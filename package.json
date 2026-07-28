@@ -4,8 +4,9 @@
   "version": "31.0.0",
   "type": "module",
   "scripts": {
+    "build": "node build.mjs",
     "dev": "vite",
-    "build": "vite build && cp dist/index.html tray-generator.html",
+    "build:vite": "vite build && cp dist/index.html tray-generator.html",
     "preview": "vite preview"
   },
   "dependencies": {
