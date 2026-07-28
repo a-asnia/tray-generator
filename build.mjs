@@ -9,7 +9,10 @@
 // официальные UMD-сборки тех же версий, что раньше грузились с CDN:
 // React 18.2.0, three.js r128).
 //
-// Запуск:  node build.mjs        → tray-generator.html в корне
+// Запуск:  node build.mjs                     → tray-generator.html в корне
+//          node build.mjs --artifact <файл>   → дополнительно фрагмент для
+//              публикации как Claude-артефакт (без <html>/<head>/<body> —
+//              их добавляет платформа при публикации)
 //
 // (Параллельно существует путь через Vite — package.json,
 // vite.config.js — для сред, где доступен npm; результат
@@ -113,6 +116,28 @@ ${guard(appBundle)}
   const target = join(ROOT, "tray-generator.html");
   writeFileSync(target, html);
   console.log(`OK: ${target} (${(statSync(target).size / 1024).toFixed(0)} КБ)`);
+
+  const ai = process.argv.indexOf("--artifact");
+  if (ai !== -1 && process.argv[ai + 1]) {
+    const fragment = `<title>Генератор лотков — система контейнеров для 3D-печати</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  #root { height: 100%; }
+</style>
+<div id="root"></div>
+<script>
+${guard(lib("react.min.js"))}</script>
+<script>
+${guard(lib("react-dom.min.js"))}</script>
+<script>
+${guard(lib("three.min.js"))}</script>
+<script>
+${guard(appBundle)}
+</script>
+`;
+    writeFileSync(process.argv[ai + 1], fragment);
+    console.log(`OK: артефакт-фрагмент → ${process.argv[ai + 1]}`);
+  }
 } finally {
   rmSync(out, { recursive: true, force: true });
 }
