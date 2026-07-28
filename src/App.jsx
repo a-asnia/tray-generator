@@ -352,6 +352,45 @@ export default function TrayGenerator() {
     }
   };
 
+  // Заполнить раскладку: к существующим контейнерам добавляются новые —
+  // колонки и ряды максимально доступного размера (лимит принтера), пока
+  // влезают в лимит раскладки; остаток, который меньше лимита принтера,
+  // забирает последний контейнер, а слишком мелкий хвост делится пополам
+  // с предыдущим. Существующие контейнеры не меняются.
+  const fillLayout = () => {
+    const gxs2 = containers.map((c) => c.gx), gys2 = containers.map((c) => c.gy);
+    const fGx0 = Math.min(...gxs2), fGx1 = Math.max(...gxs2);
+    const fGy0 = Math.min(...gys2), fGy1 = Math.max(...gys2);
+    const colW = {}, rowD = {};
+    for (let g = fGx0; g <= fGx1; g++) colW[g] = Math.max(30, ...containers.filter((c) => c.gx === g).map((c) => c.W));
+    for (let g = fGy0; g <= fGy1; g++) rowD[g] = Math.max(30, ...containers.filter((c) => c.gy === g).map((c) => c.D));
+    const extend = (map, g1, total, maxDim) => {
+      let rem = total - Object.values(map).reduce((s, v) => s + v, 0);
+      let g = g1 + 1;
+      while (rem >= 30) {
+        let size;
+        if (rem > maxDim + 0.01) size = rem - maxDim < 30 ? Math.round((rem / 2) * 10) / 10 : maxDim;
+        else size = Math.round(rem * 10) / 10;
+        map[g] = size;
+        rem -= size;
+        g++;
+      }
+      return g - 1;
+    };
+    const nGx1 = extend(colW, fGx1, limits.layW * 10, limits.maxW);
+    const nGy1 = extend(rowD, fGy1, limits.layD * 10, limits.maxD);
+    const occupied = new Set(containers.map((c) => `${c.gx},${c.gy}`));
+    const added = [];
+    for (let gy = fGy0; gy <= nGy1; gy++)
+      for (let gx = fGx0; gx <= nGx1; gx++)
+        if (!occupied.has(`${gx},${gy}`))
+          added.push({ ...makeContainer(null, gx, gy), W: colW[gx], D: rowD[gy] });
+    if (added.length) {
+      setContainers([...containers, ...added]);
+      setSelection(null);
+    }
+  };
+
   // ── карта раскладки ──
   const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
   const rGx0 = Math.min(...gxs), rGx1 = Math.max(...gxs);
@@ -749,6 +788,18 @@ export default function TrayGenerator() {
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" }}>
           {gridCells}
         </div>
+        <button
+          onClick={fillLayout}
+          style={{
+            width: "100%", marginTop: 8, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
+            cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
+          }}
+        >
+          Заполнить раскладку
+        </button>
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 }}>
+          Достроит сетку контейнерами максимально доступного размера (лимит принтера), пока они влезают в лимит раскладки. Существующие контейнеры не меняются.
+        </p>
         <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
           {containers.length > 1 && (
             <button
@@ -778,6 +829,17 @@ export default function TrayGenerator() {
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
           Лимит любой, задаётся в сантиметрах и вмещает контейнеры по внешней стороне. Сборка сейчас: {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
         </p>
+
+        <button
+          onClick={doReset}
+          style={{
+            width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
+            border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
+            background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
+          }}
+        >
+          {resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"}
+        </button>
         </div>)}
 
         {tab === "printer" && (<div>
@@ -813,7 +875,24 @@ export default function TrayGenerator() {
 
         </Collapse>
 
-        <Collapse title="Ячейки и перегородки" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
+        <Collapse title="Толщина стенок и дна" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
+        <Param
+          label="Внешние стенки" unit="мм" value={cur.wallOut}
+          min={connect ? CONN.minWall : 0.8} max={6} step={0.1}
+          disabled={cur.lockOuter && cur.lockCell}
+          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CONN.minWall) : v })}
+        />
+        {connect && (
+          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
+            Минимум {CONN.minWall} мм — паз соединителя прячется внутри стенки.
+          </p>
+        )}
+        <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
+        <Param label="Толщина дна" unit="мм" value={cur.floor} min={0.8} max={5} step={0.1} onChange={(v) => updCur({ floor: v })} />
+
+        </Collapse>
+
+        <Collapse title="Редактор стенок" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
         <button
           onClick={toggleLockCell}
           style={{
@@ -855,23 +934,6 @@ export default function TrayGenerator() {
             <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
           </div>
         )}
-        <Param
-          label="Внешние стенки" unit="мм" value={cur.wallOut}
-          min={connect ? CONN.minWall : 0.8} max={6} step={0.1}
-          disabled={cur.lockOuter && cur.lockCell}
-          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CONN.minWall) : v })}
-        />
-        {connect && (
-          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
-            Минимум {CONN.minWall} мм — паз соединителя прячется внутри стенки.
-          </p>
-        )}
-        <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
-        <Param label="Толщина дна" unit="мм" value={cur.floor} min={0.8} max={5} step={0.1} onChange={(v) => updCur({ floor: v })} />
-
-        </Collapse>
-
-        <Collapse title="Редактор стенок" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
           Нажми на <b>стенку</b> или <b>ячейку</b> — на схеме или прямо на 3D-модели. Режим выбора стенки:
         </p>
@@ -937,17 +999,6 @@ export default function TrayGenerator() {
         </p>
         </Collapse>
         </div>)}
-
-        <button
-          onClick={doReset}
-          style={{
-            width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
-            border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
-            background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
-          }}
-        >
-          {resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"}
-        </button>
       </div>
 
       <div style={{ flex: "1 1 420px", display: "flex", flexDirection: "column", minWidth: 320, height: "100vh" }}>
