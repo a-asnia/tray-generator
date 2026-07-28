@@ -21,6 +21,8 @@ export default function TrayGenerator() {
   const [selection, setSelection] = useState(null);
   const [selMode, setSelMode] = useState("seg"); // 'seg' | 'line'
   const [connect, setConnect] = useState(SAVED ? SAVED.connect !== false : true);
+  // магнит соседей: изменение размера контейнера компенсируется соседями
+  const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
   const [tab, setTab] = useState("model");
@@ -30,9 +32,9 @@ export default function TrayGenerator() {
   // автосохранение при каждом изменении
   useEffect(() => {
     try {
-      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, openSecs }));
+      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs }));
     } catch (e) {}
-  }, [containers, limits, connect, openSecs]);
+  }, [containers, limits, connect, magnet, openSecs]);
 
   const cur = containers[sel];
 
@@ -96,11 +98,12 @@ export default function TrayGenerator() {
     updCur(patch);
   };
 
-  // Магнит соседей: сборка сохраняет общий габарит. Ужал контейнер на
-  // 20 мм — соседние колонки/ряды выросли ровно на 20 мм (и наоборот),
-  // чтобы всё осталось прижатым друг к другу. Ограничения: лимит принтера
-  // сверху, замки соседа снизу — его зафиксированные ячейки не меняются,
-  // рост и ужатие впитывают только свободные.
+  // Магнит соседей (переключатель на вкладке «Раскладка»): сборка
+  // сохраняет общий габарит. Ужал контейнер — соседние колонки/ряды
+  // выросли на ту же величину (и наоборот). Сосед растёт максимум до
+  // лимита принтера; если впитать освободившееся место больше некому,
+  // рядом добавляется НОВЫЙ контейнер на остаток (минимум 30 мм).
+  // Замки соседа соблюдаются: зафиксированные ячейки не меняются.
   const applyOuterDim = (patch) => {
     const isW = "W" in patch;
     const axis = isW ? "W" : "D";
@@ -110,39 +113,66 @@ export default function TrayGenerator() {
     patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
     const myG = cur[gKey];
     const myId = cur.id;
+    const magnetOn = magnet;
+    const myOther = isW ? cur.D : cur.W;
+    const myOtherG = isW ? cur.gy : cur.gx;
     setContainers((cs) => {
       const widthIn = (arr, g) => Math.max(30, ...arr.filter((c) => c[gKey] === g).map((c) => c[axis]));
       const myBefore = widthIn(cs, myG);
-      const next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
-      if (next.length < 2) return next;
+      let next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
+      if (!magnetOn) return next;
       let delta = myBefore - widthIn(next, myG); // >0 — место освободилось, соседи растут
       if (Math.abs(delta) < 0.05) return next;
       const groupOf = (g) => next.filter((c) => c[gKey] === g);
       const adjustable = [...new Set(next.map((c) => c[gKey]))].filter(
         (g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell)
       );
-      if (!adjustable.length) return next;
       const minOf = (g) => Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
+      // расширяться может только контейнер, у которого на этой оси есть
+      // хотя бы одна незаблокированная колонка/ряд — рост впитывают
+      // свободные ячейки, зафиксированные не меняются никогда
+      const canGrow = (c) => {
+        const L = layout(c);
+        const locked = (isW ? c.lockedCols : c.lockedRows) || {};
+        const n = (isW ? L.colWs : L.rowDs).length;
+        return Object.keys(locked).filter((k) => +k >= 0 && +k < n).length < n;
+      };
+      const capOf = (g) => (groupOf(g).every(canGrow) ? maxAxis : widthIn(next, g));
       const targets = new Map(adjustable.map((g) => [g, widthIn(next, g)]));
-      for (let pass = 0; pass < 3 && Math.abs(delta) > 0.05; pass++) {
+      for (let pass = 0; pass < 3 && Math.abs(delta) > 0.05 && adjustable.length; pass++) {
         const open = adjustable.filter((g) =>
-          delta > 0 ? targets.get(g) < maxAxis - 0.01 : targets.get(g) > minOf(g) + 0.01
+          delta > 0 ? targets.get(g) < capOf(g) - 0.01 : targets.get(g) > minOf(g) + 0.01
         );
         if (!open.length) break;
         const share = delta / open.length;
         for (const g of open) {
           const t0 = targets.get(g);
-          const t = Math.max(minOf(g), Math.min(maxAxis, Math.round((t0 + share) * 10) / 10));
+          const t = Math.max(minOf(g), Math.min(capOf(g), Math.round((t0 + share) * 10) / 10));
           delta -= t - t0;
           targets.set(g, t);
         }
       }
-      return next.map((c) =>
+      next = next.map((c) =>
         c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell &&
         Math.abs(targets.get(c[gKey]) - c[axis]) > 0.01
           ? { ...c, [axis]: targets.get(c[gKey]) }
           : c
       );
+      // соседям расти больше некуда (лимит принтера) — остаток закрывает
+      // новый контейнер, вставленный сразу за ужатым
+      if (delta >= 30) {
+        const size = Math.round(delta * 10) / 10;
+        next = next.map((c) => (c[gKey] > myG ? { ...c, [gKey]: c[gKey] + 1 } : c));
+        const fresh = makeContainer(null, 0, 0);
+        next = [...next, {
+          ...fresh,
+          [gKey]: myG + 1,
+          [isW ? "gy" : "gx"]: myOtherG,
+          [axis]: size,
+          [isW ? "D" : "W"]: myOther,
+        }];
+      }
+      return next;
     });
   };
 
@@ -163,6 +193,7 @@ export default function TrayGenerator() {
     setSel(0);
     setSelection(null);
     setConnect(true);
+    setMagnet(true);
     setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
     setOpenSecs({ outer: true, cells: true, walls: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
@@ -797,7 +828,18 @@ export default function TrayGenerator() {
             />
             Соединители
           </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3D4A5C", cursor: "pointer" }}>
+            <input
+              type="checkbox" checked={magnet}
+              onChange={(e) => setMagnet(e.target.checked)}
+              style={{ accentColor: ACCENT }}
+            />
+            Магнит соседей
+          </label>
         </div>
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
+          Магнит соседей: ужимаешь контейнер — соседи в том же ряду или колонке растут на ту же величину (и наоборот), сборка остаётся прижатой. Сосед растёт максимум до лимита принтера; если расти больше некому, освободившееся место (от 30 мм) закрывает новый контейнер.
+        </p>
 
         <SectionTitle>Лимит раскладки</SectionTitle>
         <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />
