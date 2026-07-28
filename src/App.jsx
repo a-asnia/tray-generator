@@ -7,7 +7,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
 import { CONN, connectorVs } from "./model/connectors.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim } from "./model/layout.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -96,43 +96,50 @@ export default function TrayGenerator() {
     updCur(patch);
   };
 
-  // Магнит к краям раскладки: после изменения ширины/глубины контейнера
-  // свободные (незалоченные) колонки/ряды подтягиваются так, чтобы сборка
-  // заполняла лимит раскладки впритык — при уменьшении растягиваются,
-  // при увеличении ужимаются.
+  // Магнит соседей: сборка сохраняет общий габарит. Ужал контейнер на
+  // 20 мм — соседние колонки/ряды выросли ровно на 20 мм (и наоборот),
+  // чтобы всё осталось прижатым друг к другу. Ограничения: лимит принтера
+  // сверху, замки соседа снизу — его зафиксированные ячейки не меняются,
+  // рост и ужатие впитывают только свободные.
   const applyOuterDim = (patch) => {
     const isW = "W" in patch;
     const axis = isW ? "W" : "D";
     const gKey = isW ? "gx" : "gy";
-    const limitMM = (isW ? limits.layW : limits.layD) * 10;
     const maxAxis = isW ? limits.maxW : limits.maxD;
     // не даём ужать контейнер ниже суммы его зафиксированных колонок/рядов
     patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
     const myG = cur[gKey];
     const myId = cur.id;
     setContainers((cs) => {
-      let next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
+      const widthIn = (arr, g) => Math.max(30, ...arr.filter((c) => c[gKey] === g).map((c) => c[axis]));
+      const myBefore = widthIn(cs, myG);
+      const next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
       if (next.length < 2) return next;
+      let delta = myBefore - widthIn(next, myG); // >0 — место освободилось, соседи растут
+      if (Math.abs(delta) < 0.05) return next;
       const groupOf = (g) => next.filter((c) => c[gKey] === g);
-      const gs = [...new Set(next.map((c) => c[gKey]))];
-      const widthOf = (g) => Math.max(...groupOf(g).map((c) => c[axis]));
-      const total = gs.reduce((sum, g) => sum + widthOf(g), 0);
-      const gap = limitMM - total; // >0 — растянуть соседей, <0 — сжать
-      if (Math.abs(gap) < 0.05) return next;
-      const adjustable = gs.filter(
+      const adjustable = [...new Set(next.map((c) => c[gKey]))].filter(
         (g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell)
       );
       if (!adjustable.length) return next;
-      const share = gap / adjustable.length;
-      const targets = new Map();
-      for (const g of adjustable) {
-        // сосед может расти/сжиматься, но не ниже суммы своих замков:
-        // зафиксированные внутри него колонки/ряды не меняются
-        const minG = Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
-        targets.set(g, Math.max(minG, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+      const minOf = (g) => Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
+      const targets = new Map(adjustable.map((g) => [g, widthIn(next, g)]));
+      for (let pass = 0; pass < 3 && Math.abs(delta) > 0.05; pass++) {
+        const open = adjustable.filter((g) =>
+          delta > 0 ? targets.get(g) < maxAxis - 0.01 : targets.get(g) > minOf(g) + 0.01
+        );
+        if (!open.length) break;
+        const share = delta / open.length;
+        for (const g of open) {
+          const t0 = targets.get(g);
+          const t = Math.max(minOf(g), Math.min(maxAxis, Math.round((t0 + share) * 10) / 10));
+          delta -= t - t0;
+          targets.set(g, t);
+        }
       }
       return next.map((c) =>
-        c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell
+        c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell &&
+        Math.abs(targets.get(c[gKey]) - c[axis]) > 0.01
           ? { ...c, [axis]: targets.get(c[gKey]) }
           : c
       );
@@ -197,20 +204,49 @@ export default function TrayGenerator() {
     }
   };
 
-  // замок колонки/ряда: при первом замке текущие размеры сетки
-  // материализуются в явные (colWs/rowDs) и дальше держатся точно;
-  // когда замков на оси не остаётся — сетка снова выравнивается сама
+  // Замок колонки/ряда: текущие размеры сетки материализуются в явные
+  // (colWs/rowDs) и дальше держатся точно. Снятие замка размеры НЕ
+  // выравнивает — вписанные вручную остаются, просто снова могут меняться.
   const toggleColLock = (i) => {
     const Lc = layout(cur);
     const locked = { ...(cur.lockedCols || {}) };
     if (locked[i]) delete locked[i]; else locked[i] = true;
-    updCur({ lockedCols: locked, colWs: Object.keys(locked).length ? Lc.colWs.slice() : null });
+    updCur({ lockedCols: locked, colWs: Lc.colWs.slice() });
   };
   const toggleRowLock = (j) => {
     const Lc = layout(cur);
     const locked = { ...(cur.lockedRows || {}) };
     if (locked[j]) delete locked[j]; else locked[j] = true;
-    updCur({ lockedRows: locked, rowDs: Object.keys(locked).length ? Lc.rowDs.slice() : null });
+    updCur({ lockedRows: locked, rowDs: Lc.rowDs.slice() });
+  };
+  // общий замок ячейки: фиксирует/освобождает сразу оба её края
+  const setCellLockBoth = (i, j, on) => {
+    const Lc = layout(cur);
+    const lc = { ...(cur.lockedCols || {}) }, lr = { ...(cur.lockedRows || {}) };
+    if (on) { lc[i] = true; lr[j] = true; } else { delete lc[i]; delete lr[j]; }
+    updCur({ lockedCols: lc, lockedRows: lr, colWs: Lc.colWs.slice(), rowDs: Lc.rowDs.slice() });
+  };
+
+  // Задать размер конкретной ячейки (её колонки/ряда) с панели: контейнер
+  // растёт или ужимается на разницу, остальные ячейки не трогаются. Если
+  // рост упирается в лимит принтера — недостающее добирается у свободных
+  // (незамкнутых) колонок/рядов; зафиксированные не меняются никогда.
+  const setCellSize = (axis, idx, v) => {
+    const Lc = layout(cur);
+    const col = axis === "col";
+    const locked0 = (col ? cur.lockedCols : cur.lockedRows) || {};
+    if (locked0[idx]) return;
+    const sizes = (col ? Lc.colWs : Lc.rowDs).slice();
+    const dimKey = col ? "W" : "D";
+    const maxDim = col ? limits.maxW : limits.maxD;
+    const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+    // потолок: остальным ячейкам оставляем хотя бы по 10 мм
+    sizes[idx] = Math.max(10, Math.min(v, maxDim - wallSum - (sizes.length - 1) * 10));
+    const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
+    const dim2 = Math.round(Math.max(30, Math.min(want, maxDim)) * 10) / 10;
+    const fitted = fitSizes(sizes, { ...locked0, [idx]: true }, dim2 - wallSum);
+    updCur(col ? { colWs: fitted } : { rowDs: fitted });
+    applyOuterDim({ [dimKey]: dim2 });
   };
 
   const updCell = (i, j, patch) => {
@@ -598,13 +634,33 @@ export default function TrayGenerator() {
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>
           Ячейка {selection.i + 1}×{selection.j + 1}
         </div>
-        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Фиксация размера ячейки</div>
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Размер этой ячейки</div>
+        <Param
+          label="Ширина ячейки" unit="мм" value={Math.round(Lsel.cw(selection.i) * 10) / 10}
+          min={10} max={limits.maxW} step={0.5} disabled={colLocked}
+          onChange={(v) => setCellSize("col", selection.i, v)}
+        />
+        <Param
+          label="Глубина ячейки" unit="мм" value={Math.round(Lsel.cd(selection.j) * 10) / 10}
+          min={10} max={limits.maxD} step={0.5} disabled={rowLocked}
+          onChange={(v) => setCellSize("row", selection.j, v)}
+        />
+        <button
+          onClick={() => setCellLockBoth(selection.i, selection.j, !(colLocked && rowLocked))}
+          style={{
+            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            border: colLocked && rowLocked ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 6px",
+            background: colLocked && rowLocked ? "#DBEAFE" : "#fff", color: colLocked && rowLocked ? SEL : "#3D4A5C",
+          }}
+        >
+          {colLocked && rowLocked ? "🔒 Снять фиксацию ячейки" : "🔒 Зафиксировать эту ячейку"}
+        </button>
         <div style={{ display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" }}>
-          {lockBtn(colLocked, `Ширина: ${Lsel.cw(selection.i).toFixed(1)} мм`, () => toggleColLock(selection.i))}
-          {lockBtn(rowLocked, `Глубина: ${Lsel.cd(selection.j).toFixed(1)} мм`, () => toggleRowLock(selection.j))}
+          {lockBtn(colLocked, "ширина", () => toggleColLock(selection.i))}
+          {lockBtn(rowLocked, "глубина", () => toggleRowLock(selection.j))}
         </div>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
-          Ячейки стоят сеткой, поэтому замок ширины держит всю колонку этой ячейки, а замок глубины — весь её ряд (иначе перегородки разъедутся). При изменении размеров контейнера — в том числе когда его тянет или сжимает сосед — зафиксированные колонки и ряды не меняются, подстраиваются только свободные. Изменение числа ячеек или режима деления снимает эти замки.
+          Впишите размер и нажмите «Зафиксировать» — края этой ячейки будут держаться точно, соседние останутся свободными. При изменении размера свободной ячейки контейнер растёт или ужимается на разницу; если рост упирается в лимит принтера, недостающее забирается у свободных ячеек. Ячейки стоят сеткой, поэтому ширина фиксируется у всей колонки, а глубина — у всего ряда (иначе перегородки разъедутся). Изменение числа ячеек снимает замки и вписанные размеры.
         </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
