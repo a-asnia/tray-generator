@@ -17,6 +17,40 @@ export function fillAxis(inner, wall, target) {
   return cells;
 }
 
+// Подгонка явных размеров колонок/рядов под внутренний габарит:
+// зафиксированные замком не меняются, свободные масштабируются
+// (минимум 5 мм); если зафиксированы все — масштабируются все,
+// чтобы геометрия оставалась согласованной (UI до этого не доводит)
+const MIN_FREE = 5;
+export function fitSizes(sizes, locked, total) {
+  const out = sizes.slice();
+  const freeIdx = out.map((_, k) => k).filter((k) => !locked[k]);
+  if (!freeIdx.length) {
+    const sum = out.reduce((s, v) => s + v, 0) || 1;
+    return Math.abs(sum - total) > 0.01 ? out.map((v) => (v * total) / sum) : out;
+  }
+  const lockedSum = out.reduce((s, v, k) => (locked[k] ? s + v : s), 0);
+  const freeTarget = total - lockedSum;
+  for (let pass = 0; pass < 2; pass++) {
+    const freeSum = freeIdx.reduce((s, k) => s + out[k], 0) || 1;
+    if (Math.abs(freeSum - freeTarget) < 0.01) break;
+    const scale = freeTarget / freeSum;
+    for (const k of freeIdx) out[k] = Math.max(MIN_FREE, out[k] * scale);
+  }
+  return out;
+}
+
+// минимальный внешний габарит по оси с учётом замков колонок/рядов:
+// зафиксированные размеры + по 10 мм на каждую свободную колонку/ряд
+export function minOuterDim(c, axis) {
+  const L = layout(c);
+  const locked = (axis === "W" ? c.lockedCols : c.lockedRows) || {};
+  const sizes = axis === "W" ? L.colWs : L.rowDs;
+  let lockedSum = 0, freeN = 0;
+  sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+  return Math.max(30, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+}
+
 export function layout(c) {
   const innerW = c.W - 2 * c.wallOut;
   const innerD = c.D - 2 * c.wallOut;
@@ -28,6 +62,10 @@ export function layout(c) {
     colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
     rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
   }
+  // явные размеры (появляются при замке колонки/ряда) фиксируют сетку:
+  // число колонок/рядов берётся из них, свободные подгоняются под габарит
+  if (c.colWs && c.colWs.length) colWs = fitSizes(c.colWs, c.lockedCols || {}, innerW - (c.colWs.length - 1) * c.wall);
+  if (c.rowDs && c.rowDs.length) rowDs = fitSizes(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
   const pref = (arr) => { const p = [0]; for (const v of arr) p.push(p[p.length - 1] + v); return p; };
   const pw = pref(colWs), pd = pref(rowDs);
   const clampI = (arr, k) => arr[Math.max(0, Math.min(arr.length - 1, k))];

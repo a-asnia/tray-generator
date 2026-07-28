@@ -391,6 +391,40 @@ function fillAxis(inner, wall, target) {
     cells.push(Math.max(10, remain));
     return cells;
 }
+// Подгонка явных размеров колонок/рядов под внутренний габарит:
+// зафиксированные замком не меняются, свободные масштабируются
+// (минимум 5 мм); если зафиксированы все — масштабируются все,
+// чтобы геометрия оставалась согласованной (UI до этого не доводит)
+const MIN_FREE = 5;
+function fitSizes(sizes, locked, total) {
+    const out = sizes.slice();
+    const freeIdx = out.map((_, k) => k).filter((k) => !locked[k]);
+    if (!freeIdx.length) {
+        const sum = out.reduce((s, v) => s + v, 0) || 1;
+        return Math.abs(sum - total) > 0.01 ? out.map((v) => (v * total) / sum) : out;
+    }
+    const lockedSum = out.reduce((s, v, k) => (locked[k] ? s + v : s), 0);
+    const freeTarget = total - lockedSum;
+    for (let pass = 0; pass < 2; pass++) {
+        const freeSum = freeIdx.reduce((s, k) => s + out[k], 0) || 1;
+        if (Math.abs(freeSum - freeTarget) < 0.01)
+            break;
+        const scale = freeTarget / freeSum;
+        for (const k of freeIdx)
+            out[k] = Math.max(MIN_FREE, out[k] * scale);
+    }
+    return out;
+}
+// минимальный внешний габарит по оси с учётом замков колонок/рядов:
+// зафиксированные размеры + по 10 мм на каждую свободную колонку/ряд
+function minOuterDim(c, axis) {
+    const L = layout(c);
+    const locked = (axis === "W" ? c.lockedCols : c.lockedRows) || {};
+    const sizes = axis === "W" ? L.colWs : L.rowDs;
+    let lockedSum = 0, freeN = 0;
+    sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+    return Math.max(30, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+}
 function layout(c) {
     const innerW = c.W - 2 * c.wallOut;
     const innerD = c.D - 2 * c.wallOut;
@@ -403,6 +437,12 @@ function layout(c) {
         colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
         rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
     }
+    // явные размеры (появляются при замке колонки/ряда) фиксируют сетку:
+    // число колонок/рядов берётся из них, свободные подгоняются под габарит
+    if (c.colWs && c.colWs.length)
+        colWs = fitSizes(c.colWs, c.lockedCols || {}, innerW - (c.colWs.length - 1) * c.wall);
+    if (c.rowDs && c.rowDs.length)
+        rowDs = fitSizes(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
     const pref = (arr) => { const p = [0]; for (const v of arr)
         p.push(p[p.length - 1] + v); return p; };
     const pw = pref(colWs), pd = pref(rowDs);
@@ -1269,6 +1309,8 @@ const makeContainer = (src, gx, gy) => ({
     walls: {},
     cells: {},
     lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
+    // явные размеры колонок/рядов и их замки (фиксация отдельных ячеек)
+    colWs: null, rowDs: null, lockedCols: {}, lockedRows: {},
 });
 // автосохранение в localStorage: на сервере работает всегда; там, где
 // хранилище недоступно (песочницы предпросмотра), молча пропускаем
@@ -1400,7 +1442,8 @@ function Schematic({ c, selection, onSelect }) {
             const lvl = getCellLvl(c, i, j);
             cells.push(React.createElement("g", { key: `c${i}-${j}`, style: { cursor: "pointer" }, onClick: (e) => { e.stopPropagation(); onSelect({ type: "cell", i, j }); } },
                 React.createElement("rect", { x: x0, y: z0, width: L.cw(i), height: L.cd(j), fill: selCell ? "#DBEAFE" : lvl > 0 ? "#EAE4D8" : "#FFFFFF", stroke: selCell ? SEL : "none", strokeWidth: 0.5 }),
-                lvl > 0 && (React.createElement("text", { x: x0 + L.cellW / 2, y: z0 + L.cellD / 2, textAnchor: "middle", dominantBaseline: "central", fontSize: Math.min(L.cw(i), L.cd(j)) * 0.3, fill: "#8A7B5C" }, lvl))));
+                lvl > 0 && (React.createElement("text", { x: x0 + L.cellW / 2, y: z0 + L.cellD / 2, textAnchor: "middle", dominantBaseline: "central", fontSize: Math.min(L.cw(i), L.cd(j)) * 0.3, fill: "#8A7B5C" }, lvl)),
+                (((c.lockedCols || {})[i]) || ((c.lockedRows || {})[j])) && (React.createElement("text", { x: x0 + 1.5, y: z0 + 1.5, dominantBaseline: "hanging", fontSize: Math.min(L.cw(i), L.cd(j)) * 0.22, fill: "#64748B" }, "\uD83D\uDD12"))));
         }
     return (React.createElement("svg", { viewBox: `-2 -2 ${W + 4} ${D + 4}`, style: { width: "100%", maxHeight: 210, background: "#F1F5F9", borderRadius: 10, border: "1px solid #E4E9EF", display: "block" }, onClick: () => onSelect(null) },
         React.createElement("rect", { x: 0, y: 0, width: W, height: D, fill: "#CBD5E1", rx: 1 }),
@@ -1647,6 +1690,12 @@ function TrayGenerator() {
         setLimits(nl);
     };
     const updCur = (patch) => {
+        // смена деления на ячейки снимает замки колонок/рядов по этой оси:
+        // явные размеры относятся к конкретной сетке
+        if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
+            patch = { colWs: null, lockedCols: {}, ...patch };
+        if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
+            patch = { rowDs: null, lockedRows: {}, ...patch };
         setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
         if (patch.cols !== undefined || patch.rows !== undefined ||
             patch.gridMode !== undefined || patch.cellWt !== undefined || patch.cellDt !== undefined ||
@@ -1693,6 +1742,8 @@ function TrayGenerator() {
         const gKey = isW ? "gx" : "gy";
         const limitMM = (isW ? limits.layW : limits.layD) * 10;
         const maxAxis = isW ? limits.maxW : limits.maxD;
+        // не даём ужать контейнер ниже суммы его зафиксированных колонок/рядов
+        patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
         const myG = cur[gKey];
         const myId = cur.id;
         setContainers((cs) => {
@@ -1711,8 +1762,12 @@ function TrayGenerator() {
                 return next;
             const share = gap / adjustable.length;
             const targets = new Map();
-            for (const g of adjustable)
-                targets.set(g, Math.max(30, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+            for (const g of adjustable) {
+                // сосед может расти/сжиматься, но не ниже суммы своих замков:
+                // зафиксированные внутри него колонки/ряды не меняются
+                const minG = Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
+                targets.set(g, Math.max(minG, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+            }
             return next.map((c) => c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell
                 ? { ...c, [axis]: targets.get(c[gKey]) }
                 : c);
@@ -1781,6 +1836,27 @@ function TrayGenerator() {
             }
             updCur(patch);
         }
+    };
+    // замок колонки/ряда: при первом замке текущие размеры сетки
+    // материализуются в явные (colWs/rowDs) и дальше держатся точно;
+    // когда замков на оси не остаётся — сетка снова выравнивается сама
+    const toggleColLock = (i) => {
+        const Lc = layout(cur);
+        const locked = { ...(cur.lockedCols || {}) };
+        if (locked[i])
+            delete locked[i];
+        else
+            locked[i] = true;
+        updCur({ lockedCols: locked, colWs: Object.keys(locked).length ? Lc.colWs.slice() : null });
+    };
+    const toggleRowLock = (j) => {
+        const Lc = layout(cur);
+        const locked = { ...(cur.lockedRows || {}) };
+        if (locked[j])
+            delete locked[j];
+        else
+            locked[j] = true;
+        updCur({ lockedRows: locked, rowDs: Object.keys(locked).length ? Lc.rowDs.slice() : null });
     };
     const updCell = (i, j, patch) => {
         setContainers((cs) => cs.map((cc, idx) => {
@@ -2071,12 +2147,28 @@ function TrayGenerator() {
     else if (selection?.type === "cell") {
         const keys = cellKeys(cur, selection.i, selection.j);
         const firstH = getWall(cur, keys[0].key).h;
+        const Lsel = layout(cur);
+        const colLocked = !!(cur.lockedCols || {})[selection.i];
+        const rowLocked = !!(cur.lockedRows || {})[selection.j];
+        const lockBtn = (on, text, onClick) => (React.createElement("button", { onClick: onClick, style: {
+                padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: on ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: on ? "#DBEAFE" : "#fff", color: on ? SEL : "#3D4A5C",
+            } },
+            on ? "🔒" : "🔓",
+            " ",
+            text));
         editor = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
             React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 } },
                 "\u042F\u0447\u0435\u0439\u043A\u0430 ",
                 selection.i + 1,
                 "\u00D7",
                 selection.j + 1),
+            React.createElement("div", { style: { fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" } }, "\u0424\u0438\u043A\u0441\u0430\u0446\u0438\u044F \u0440\u0430\u0437\u043C\u0435\u0440\u0430 \u044F\u0447\u0435\u0439\u043A\u0438"),
+            React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" } },
+                lockBtn(colLocked, `Ширина: ${Lsel.cw(selection.i).toFixed(1)} мм`, () => toggleColLock(selection.i)),
+                lockBtn(rowLocked, `Глубина: ${Lsel.cd(selection.j).toFixed(1)} мм`, () => toggleRowLock(selection.j))),
+            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 } }, "\u042F\u0447\u0435\u0439\u043A\u0438 \u0441\u0442\u043E\u044F\u0442 \u0441\u0435\u0442\u043A\u043E\u0439, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0437\u0430\u043C\u043E\u043A \u0448\u0438\u0440\u0438\u043D\u044B \u0434\u0435\u0440\u0436\u0438\u0442 \u0432\u0441\u044E \u043A\u043E\u043B\u043E\u043D\u043A\u0443 \u044D\u0442\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438, \u0430 \u0437\u0430\u043C\u043E\u043A \u0433\u043B\u0443\u0431\u0438\u043D\u044B \u2014 \u0432\u0435\u0441\u044C \u0435\u0451 \u0440\u044F\u0434 (\u0438\u043D\u0430\u0447\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0440\u0430\u0437\u044A\u0435\u0434\u0443\u0442\u0441\u044F). \u041F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u2014 \u0432 \u0442\u043E\u043C \u0447\u0438\u0441\u043B\u0435 \u043A\u043E\u0433\u0434\u0430 \u0435\u0433\u043E \u0442\u044F\u043D\u0435\u0442 \u0438\u043B\u0438 \u0441\u0436\u0438\u043C\u0430\u0435\u0442 \u0441\u043E\u0441\u0435\u0434 \u2014 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u0438 \u0440\u044F\u0434\u044B \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442\u0441\u044F, \u043F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u044B\u0435. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435 \u0447\u0438\u0441\u043B\u0430 \u044F\u0447\u0435\u0435\u043A \u0438\u043B\u0438 \u0440\u0435\u0436\u0438\u043C\u0430 \u0434\u0435\u043B\u0435\u043D\u0438\u044F \u0441\u043D\u0438\u043C\u0430\u0435\u0442 \u044D\u0442\u0438 \u0437\u0430\u043C\u043A\u0438."),
             React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: firstH, min: 0, max: limits.maxH, step: 0.5, onChange: (v) => updWalls(keys.map((k) => k.key), { h: v }) }),
             React.createElement(Param, { label: "\u0423\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 (\u043B\u0435\u0441\u0435\u043D\u043A\u0430)", unit: "\u043C\u043C", value: getCellLvl(cur, selection.i, selection.j), min: 0, max: Math.max(0, cur.H - 4), step: 0.5, onChange: (v) => updCell(selection.i, selection.j, { lvl: v }) }),
             (() => {
@@ -2178,8 +2270,8 @@ function TrayGenerator() {
                             color: (cur.gridMode || "count") === m ? SEL : "#3D4A5C",
                         } }, t)))),
                     cur.gridMode === "size" ? (React.createElement("div", null,
-                        React.createElement(Param, { label: "\u042F\u0447\u0435\u0439\u043A\u0430 \u043F\u043E \u0448\u0438\u0440\u0438\u043D\u0435", unit: "\u043C\u043C", value: cur.cellWt, min: 15, max: 160, step: 1, onChange: (v) => updCur({ cellWt: v }) }),
-                        React.createElement(Param, { label: "\u042F\u0447\u0435\u0439\u043A\u0430 \u043F\u043E \u0433\u043B\u0443\u0431\u0438\u043D\u0435", unit: "\u043C\u043C", value: cur.cellDt, min: 15, max: 160, step: 1, onChange: (v) => updCur({ cellDt: v }) }),
+                        React.createElement(Param, { label: "\u042F\u0447\u0435\u0439\u043A\u0430 \u043F\u043E \u0448\u0438\u0440\u0438\u043D\u0435", unit: "\u043C\u043C", value: cur.cellWt, min: 15, max: 160, step: 1, disabled: cur.lockCell, onChange: (v) => updCur({ cellWt: v }) }),
+                        React.createElement(Param, { label: "\u042F\u0447\u0435\u0439\u043A\u0430 \u043F\u043E \u0433\u043B\u0443\u0431\u0438\u043D\u0435", unit: "\u043C\u043C", value: cur.cellDt, min: 15, max: 160, step: 1, disabled: cur.lockCell, onChange: (v) => updCur({ cellDt: v }) }),
                         React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-4px 0 10px", lineHeight: 1.45 } },
                             "\u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0437\u0430\u043F\u043E\u043B\u043D\u044F\u0435\u0442\u0441\u044F \u044F\u0447\u0435\u0439\u043A\u0430\u043C\u0438 \u044D\u0442\u043E\u0433\u043E \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0435\u0433\u043E \u0440\u0430\u0437\u043C\u0435\u0440\u0430; \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0432 \u043A\u0430\u0436\u0434\u043E\u043C \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0438 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u043E\u0441\u0442\u0430\u0442\u043E\u043A (\u043E\u0442 \u043E\u0434\u043D\u043E\u0433\u043E \u0434\u043E \u0434\u0432\u0443\u0445 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432). \u0421\u0435\u0439\u0447\u0430\u0441: ",
                             layout(cur).nCols,

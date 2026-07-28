@@ -17,6 +17,8 @@ export const makeContainer = (src, gx, gy) => ({
   walls: {},
   cells: {},
   lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
+  // явные размеры колонок/рядов и их замки (фиксация отдельных ячеек)
+  colWs: null, rowDs: null, lockedCols: {}, lockedRows: {},
 });
 
 // автосохранение в localStorage: на сервере работает всегда; там, где

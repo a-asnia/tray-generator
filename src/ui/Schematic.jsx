@@ -62,6 +62,12 @@ export function Schematic({ c, selection, onSelect }) {
               {lvl}
             </text>
           )}
+          {(((c.lockedCols || {})[i]) || ((c.lockedRows || {})[j])) && (
+            <text x={x0 + 1.5} y={z0 + 1.5} dominantBaseline="hanging"
+              fontSize={Math.min(L.cw(i), L.cd(j)) * 0.22} fill="#64748B">
+              🔒
+            </text>
+          )}
         </g>
       );
     }

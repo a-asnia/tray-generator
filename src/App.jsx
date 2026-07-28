@@ -7,7 +7,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
 import { CONN, connectorVs } from "./model/connectors.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle } from "./model/layout.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -54,6 +54,12 @@ export default function TrayGenerator() {
   };
 
   const updCur = (patch) => {
+    // смена деления на ячейки снимает замки колонок/рядов по этой оси:
+    // явные размеры относятся к конкретной сетке
+    if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
+      patch = { colWs: null, lockedCols: {}, ...patch };
+    if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
+      patch = { rowDs: null, lockedRows: {}, ...patch };
     setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
     if (
       patch.cols !== undefined || patch.rows !== undefined ||
@@ -100,6 +106,8 @@ export default function TrayGenerator() {
     const gKey = isW ? "gx" : "gy";
     const limitMM = (isW ? limits.layW : limits.layD) * 10;
     const maxAxis = isW ? limits.maxW : limits.maxD;
+    // не даём ужать контейнер ниже суммы его зафиксированных колонок/рядов
+    patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
     const myG = cur[gKey];
     const myId = cur.id;
     setContainers((cs) => {
@@ -117,8 +125,12 @@ export default function TrayGenerator() {
       if (!adjustable.length) return next;
       const share = gap / adjustable.length;
       const targets = new Map();
-      for (const g of adjustable)
-        targets.set(g, Math.max(30, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+      for (const g of adjustable) {
+        // сосед может расти/сжиматься, но не ниже суммы своих замков:
+        // зафиксированные внутри него колонки/ряды не меняются
+        const minG = Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
+        targets.set(g, Math.max(minG, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+      }
       return next.map((c) =>
         c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell
           ? { ...c, [axis]: targets.get(c[gKey]) }
@@ -183,6 +195,22 @@ export default function TrayGenerator() {
       }
       updCur(patch);
     }
+  };
+
+  // замок колонки/ряда: при первом замке текущие размеры сетки
+  // материализуются в явные (colWs/rowDs) и дальше держатся точно;
+  // когда замков на оси не остаётся — сетка снова выравнивается сама
+  const toggleColLock = (i) => {
+    const Lc = layout(cur);
+    const locked = { ...(cur.lockedCols || {}) };
+    if (locked[i]) delete locked[i]; else locked[i] = true;
+    updCur({ lockedCols: locked, colWs: Object.keys(locked).length ? Lc.colWs.slice() : null });
+  };
+  const toggleRowLock = (j) => {
+    const Lc = layout(cur);
+    const locked = { ...(cur.lockedRows || {}) };
+    if (locked[j]) delete locked[j]; else locked[j] = true;
+    updCur({ lockedRows: locked, rowDs: Object.keys(locked).length ? Lc.rowDs.slice() : null });
   };
 
   const updCell = (i, j, patch) => {
@@ -550,11 +578,34 @@ export default function TrayGenerator() {
   } else if (selection?.type === "cell") {
     const keys = cellKeys(cur, selection.i, selection.j);
     const firstH = getWall(cur, keys[0].key).h;
+    const Lsel = layout(cur);
+    const colLocked = !!(cur.lockedCols || {})[selection.i];
+    const rowLocked = !!(cur.lockedRows || {})[selection.j];
+    const lockBtn = (on, text, onClick) => (
+      <button
+        onClick={onClick}
+        style={{
+          padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+          border: on ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+          background: on ? "#DBEAFE" : "#fff", color: on ? SEL : "#3D4A5C",
+        }}
+      >
+        {on ? "🔒" : "🔓"} {text}
+      </button>
+    );
     editor = (
       <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>
           Ячейка {selection.i + 1}×{selection.j + 1}
         </div>
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Фиксация размера ячейки</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" }}>
+          {lockBtn(colLocked, `Ширина: ${Lsel.cw(selection.i).toFixed(1)} мм`, () => toggleColLock(selection.i))}
+          {lockBtn(rowLocked, `Глубина: ${Lsel.cd(selection.j).toFixed(1)} мм`, () => toggleRowLock(selection.j))}
+        </div>
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
+          Ячейки стоят сеткой, поэтому замок ширины держит всю колонку этой ячейки, а замок глубины — весь её ряд (иначе перегородки разъедутся). При изменении размеров контейнера — в том числе когда его тянет или сжимает сосед — зафиксированные колонки и ряды не меняются, подстраиваются только свободные. Изменение числа ячеек или режима деления снимает эти замки.
+        </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
           onChange={(v) => updWalls(keys.map((k) => k.key), { h: v })}
@@ -736,8 +787,8 @@ export default function TrayGenerator() {
         </div>
         {cur.gridMode === "size" ? (
           <div>
-            <Param label="Ячейка по ширине" unit="мм" value={cur.cellWt} min={15} max={160} step={1} onChange={(v) => updCur({ cellWt: v })} />
-            <Param label="Ячейка по глубине" unit="мм" value={cur.cellDt} min={15} max={160} step={1} onChange={(v) => updCur({ cellDt: v })} />
+            <Param label="Ячейка по ширине" unit="мм" value={cur.cellWt} min={15} max={160} step={1} disabled={cur.lockCell} onChange={(v) => updCur({ cellWt: v })} />
+            <Param label="Ячейка по глубине" unit="мм" value={cur.cellDt} min={15} max={160} step={1} disabled={cur.lockCell} onChange={(v) => updCur({ cellDt: v })} />
             <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-4px 0 10px", lineHeight: 1.45 }}>
               Контейнер заполняется ячейками этого внутреннего размера; последняя в каждом направлении забирает остаток (от одного до двух размеров). Сейчас: {layout(cur).nCols}×{layout(cur).nRows} ячеек.
             </p>
