@@ -26,7 +26,7 @@ export default function TrayGenerator() {
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
   const [tab, setTab] = useState("model");
-  const [openSecs, setOpenSecs] = useState(SAVED?.openSecs ?? { outer: true, cells: true, walls: true, export: true });
+  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -203,21 +203,11 @@ export default function TrayGenerator() {
     setConnect(true);
     setMagnet(true);
     setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
-    setOpenSecs({ outer: true, cells: true, walls: true, export: true });
+    setOpenSecs({ outer: true, cells: true, grid: true, walls: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
   };
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
-  const toggleLockCell = () => {
-    if (cur.lockCell) updCur({ lockCell: false });
-    else if (cur.gridMode === "size") {
-      // в режиме «размер ячейки» фиксируем именно целевые размеры
-      updCur({ lockCell: true, cellW0: cur.cellWt, cellD0: cur.cellDt });
-    } else {
-      const Lc = layout(cur);
-      updCur({ lockCell: true, cellW0: Lc.cellW, cellD0: Lc.cellD });
-    }
-  };
 
   // Замок колонки/ряда: текущие размеры сетки материализуются в явные
   // (colWs/rowDs) и дальше держатся точно. Снятие замка размеры НЕ
@@ -918,20 +908,12 @@ export default function TrayGenerator() {
 
         </Collapse>
 
-        <Collapse title="Редактор стенок" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
-        <button
-          onClick={toggleLockCell}
-          style={{
-            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-            border: cur.lockCell ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
-            background: cur.lockCell ? "#DBEAFE" : "#fff", color: cur.lockCell ? SEL : "#3D4A5C",
-          }}
-        >
-          {cur.lockCell ? "🔒" : "🔓"} Зафиксировать ячейку{cur.lockCell ? ` (${cur.cellW0.toFixed(1)}×${cur.cellD0.toFixed(1)} мм)` : ""}
-        </button>
-        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Деление на ячейки</div>
+        <Collapse title="Деление на ячейки" open={openSecs.grid} onToggle={() => toggleSec("grid")}>
         <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
         <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
+        </Collapse>
+
+        <Collapse title="Редактор сегментов" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
           Нажми на <b>стенку</b> или <b>ячейку</b> — на схеме или прямо на 3D-модели. Режим выбора стенки:
         </p>

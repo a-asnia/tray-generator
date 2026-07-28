@@ -1324,12 +1324,14 @@ function loadSaved() {
             return null;
         d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
         // миграция старых сохранений: режим «размер ячейки» убран из UI —
-        // переводим в «количество», сохраняя фактическую сетку
+        // переводим в «количество», сохраняя фактическую сетку; глобальный
+        // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
         d.containers = d.containers.map((c) => {
-            if (c.gridMode !== "size")
-                return c;
-            const L = layout(c);
-            return { ...c, gridMode: "count", cols: L.nCols, rows: L.nRows };
+            const base = c.lockCell ? { ...c, lockCell: false } : c;
+            if (base.gridMode !== "size")
+                return base;
+            const L = layout(base);
+            return { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
         });
         nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
         return d;
@@ -1677,7 +1679,7 @@ function TrayGenerator() {
     // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
     const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
     const [tab, setTab] = useState("model");
-    const [openSecs, setOpenSecs] = useState(SAVED?.openSecs ?? { outer: true, cells: true, walls: true, export: true });
+    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, export: true, ...(SAVED?.openSecs ?? {}) }));
     const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
     // автосохранение при каждом изменении
     useEffect(() => {
@@ -1846,22 +1848,10 @@ function TrayGenerator() {
         setConnect(true);
         setMagnet(true);
         setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
-        setOpenSecs({ outer: true, cells: true, walls: true, export: true });
+        setOpenSecs({ outer: true, cells: true, grid: true, walls: true, export: true });
         // вкладка не переключается — остаёмся там, где нажали сброс
     };
     const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
-    const toggleLockCell = () => {
-        if (cur.lockCell)
-            updCur({ lockCell: false });
-        else if (cur.gridMode === "size") {
-            // в режиме «размер ячейки» фиксируем именно целевые размеры
-            updCur({ lockCell: true, cellW0: cur.cellWt, cellD0: cur.cellDt });
-        }
-        else {
-            const Lc = layout(cur);
-            updCur({ lockCell: true, cellW0: Lc.cellW, cellD0: Lc.cellD });
-        }
-    };
     // Замок колонки/ряда: текущие размеры сетки материализуются в явные
     // (colWs/rowDs) и дальше держатся точно. Снятие замка размеры НЕ
     // выравнивает — вписанные вручную остаются, просто снова могут меняться.
@@ -2385,18 +2375,10 @@ function TrayGenerator() {
                         " \u043C\u043C \u2014 \u043F\u0430\u0437 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u044F \u043F\u0440\u044F\u0447\u0435\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u0442\u0435\u043D\u043A\u0438.")),
                     React.createElement(Param, { label: "\u041F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", unit: "\u043C\u043C", value: cur.wall, min: 0.8, max: 5, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wall: v }) }),
                     React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0434\u043D\u0430", unit: "\u043C\u043C", value: cur.floor, min: 0.8, max: 5, step: 0.1, onChange: (v) => updCur({ floor: v }) })),
-                React.createElement(Collapse, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u0442\u0435\u043D\u043E\u043A", open: openSecs.walls, onToggle: () => toggleSec("walls") },
-                    React.createElement("button", { onClick: toggleLockCell, style: {
-                            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                            border: cur.lockCell ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
-                            background: cur.lockCell ? "#DBEAFE" : "#fff", color: cur.lockCell ? SEL : "#3D4A5C",
-                        } },
-                        cur.lockCell ? "🔒" : "🔓",
-                        " \u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u044F\u0447\u0435\u0439\u043A\u0443",
-                        cur.lockCell ? ` (${cur.cellW0.toFixed(1)}×${cur.cellD0.toFixed(1)} мм)` : ""),
-                    React.createElement("div", { style: { fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" } }, "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438"),
+                React.createElement(Collapse, { title: "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.grid, onToggle: () => toggleSec("grid") },
                     React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: cur.cols, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
-                    React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) }),
+                    React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })),
+                React.createElement(Collapse, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u043E\u0432", open: openSecs.walls, onToggle: () => toggleSec("walls") },
                     React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
                         "\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 ",
                         React.createElement("b", null, "\u0441\u0442\u0435\u043D\u043A\u0443"),

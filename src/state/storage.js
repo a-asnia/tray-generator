@@ -32,11 +32,13 @@ export function loadSaved() {
     if (!d || !Array.isArray(d.containers) || !d.containers.length) return null;
     d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
     // миграция старых сохранений: режим «размер ячейки» убран из UI —
-    // переводим в «количество», сохраняя фактическую сетку
+    // переводим в «количество», сохраняя фактическую сетку; глобальный
+    // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
     d.containers = d.containers.map((c) => {
-      if (c.gridMode !== "size") return c;
-      const L = layout(c);
-      return { ...c, gridMode: "count", cols: L.nCols, rows: L.nRows };
+      const base = c.lockCell ? { ...c, lockCell: false } : c;
+      if (base.gridMode !== "size") return base;
+      const L = layout(base);
+      return { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
     });
     nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
     return d;
