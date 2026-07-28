@@ -1,0 +1,2295 @@
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import * as THREE from "three";
+
+// ══════════════════════════════════════════════════════════════
+// ГЕОМЕТРИЯ: выпуклые призмы, обход граней ориентируется наружу
+// ══════════════════════════════════════════════════════════════
+
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+function prismSolid(quadA, quadB, tag) {
+  const raw = [];
+  raw.push([quadA[0], quadA[1], quadA[2]], [quadA[0], quadA[2], quadA[3]]);
+  raw.push([quadB[0], quadB[2], quadB[1]], [quadB[0], quadB[3], quadB[2]]);
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    raw.push([quadA[i], quadA[j], quadB[j]], [quadA[i], quadB[j], quadB[i]]);
+  }
+  const c = [0, 0, 0];
+  for (const p of [...quadA, ...quadB]) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
+  c[0] /= 8; c[1] /= 8; c[2] /= 8;
+  const tris = [];
+  for (const [a, b, d] of raw) {
+    const n = cross(sub(b, a), sub(d, a));
+    if (Math.hypot(n[0], n[1], n[2]) < 1e-7) continue;
+    const tc = [(a[0] + b[0] + d[0]) / 3, (a[1] + b[1] + d[1]) / 3, (a[2] + b[2] + d[2]) / 3];
+    tris.push(dot(n, sub(tc, c)) < 0 ? [a, d, b] : [a, b, d]);
+  }
+  return { tris, tag };
+}
+
+function boxSolid(cx, cy, cz, sx, sy, sz, tag) {
+  const x0 = cx - sx / 2, x1 = cx + sx / 2;
+  const y0 = cy - sy / 2, y1 = cy + sy / 2;
+  const z0 = cz - sz / 2, z1 = cz + sz / 2;
+  return prismSolid(
+    [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+    [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+    tag
+  );
+}
+
+// Пандус (наклон грани стенки внутрь ячейки). Задняя грань заглубляется
+// в тело стенки на embed, чтобы пандус сращивался с ней даже при тейпере.
+function rampSolid(orient, facePos, dir, s0, s1, yTop, yBot, run, embed, tag) {
+  const front = facePos + run * dir;
+  const back = facePos - embed * dir;
+  let quadA, quadB;
+  if (orient === "x") {
+    quadA = [[back, yBot, s0], [back, yTop, s0], [facePos, yTop, s0], [front, yBot, s0]];
+    quadB = [[back, yBot, s1], [back, yTop, s1], [facePos, yTop, s1], [front, yBot, s1]];
+  } else {
+    quadA = [[s0, yBot, back], [s0, yTop, back], [s0, yTop, facePos], [s0, yBot, front]];
+    quadB = [[s1, yBot, back], [s1, yTop, back], [s1, yTop, facePos], [s1, yBot, front]];
+  }
+  return prismSolid(quadA, quadB, tag);
+}
+
+// Профиль стенки поперёк её оси. Толщина НЕ меняется по высоте; верхняя
+// кромка скругляется радиусом rnd — дуга аппроксимируется 7 сегментами
+// (стопка выпуклых трапеций). symmetric: у перегородки скругляются оба
+// верхних угла (при rnd = толщина/2 получается полный полукруглый валик);
+// у внешней стенки скругляется только внутренний угол — наружная плоскость
+// остаётся идеально ровной для плотной стыковки и пазов соединителей.
+const ARC_SEGS = 7;
+function wallProfile(thk, h, rnd, symmetric) {
+  const r = Math.max(0, Math.min(rnd, symmetric ? thk / 2 : thk - 0.4, h * 0.9));
+  const parts = [];
+  if (r < 0.05) {
+    if (symmetric) parts.push([[-thk / 2, 0], [thk / 2, 0], [thk / 2, h], [-thk / 2, h]]);
+    else parts.push([[0, 0], [thk, 0], [thk, h], [0, h]]);
+    return parts;
+  }
+  const hb = h - r;
+  if (symmetric) {
+    const h0 = thk / 2, core = h0 - r;
+    parts.push([[-h0, 0], [h0, 0], [h0, hb], [-h0, hb]]);
+    let prevW = h0, prevY = hb;
+    for (let k = 1; k <= ARC_SEGS; k++) {
+      const t = (k / ARC_SEGS) * (Math.PI / 2);
+      const wHalf = Math.max(core + r * Math.cos(t), 0.05);
+      const y = hb + r * Math.sin(t);
+      parts.push([[-prevW, prevY], [prevW, prevY], [wHalf, y], [-wHalf, y]]);
+      prevW = wHalf; prevY = y;
+    }
+  } else {
+    const core = thk - r;
+    parts.push([[0, 0], [thk, 0], [thk, hb], [0, hb]]);
+    let prevIn = thk, prevY = hb;
+    for (let k = 1; k <= ARC_SEGS; k++) {
+      const t = (k / ARC_SEGS) * (Math.PI / 2);
+      const inn = core + r * Math.cos(t);
+      const y = hb + r * Math.sin(t);
+      parts.push([[0, prevY], [prevIn, prevY], [inn, y], [0, y]]);
+      prevIn = inn; prevY = y;
+    }
+  }
+  return parts;
+}
+
+// ── «Ласточкин хвост» ЦЕЛИКОМ внутри толщины внешней стенки ──
+// Паз не выступает ни внутрь ячейки, ни наружу; стенки соседей
+// смыкаются вплотную. Требование: внешняя стенка ≥ minWall.
+const CONN = { w1: 5.5, w2: 8.5, depth: 1.7, clr: 0.25, back: 0.85, stop: 3, flank: 2.5 };
+CONN.dg = CONN.depth + CONN.clr;               // глубина паза
+CONN.minWall = CONN.dg + CONN.back;            // 2.8 мм — минимум внешней стенки
+CONN.bossW = CONN.w2 + 2 * CONN.clr + 2 * CONN.flank; // ширина зоны соединителя
+
+const connectorVs = (dim) => (dim < 90 ? [0] : [-dim / 4, dim / 4]);
+
+function splitRange(a, b, zones) {
+  const out = [];
+  let cur = a;
+  for (const [z0, z1] of zones) {
+    if (z1 <= a || z0 >= b) continue;
+    if (z0 > cur) out.push([cur, Math.min(z0, b)]);
+    cur = Math.max(cur, z1);
+  }
+  if (cur < b) out.push([cur, b]);
+  return out.filter(([p, q]) => q - p > 0.05);
+}
+
+// заполнение оси ячейками целевого размера: последняя забирает остаток
+// (от одного до двух целевых размеров), как в логике раскладки
+function fillAxis(inner, wall, target) {
+  const t = Math.max(10, target);
+  const cells = [];
+  let remain = inner;
+  while (remain >= 2 * t + wall && cells.length < 23) {
+    cells.push(t);
+    remain -= t + wall;
+  }
+  cells.push(Math.max(10, remain));
+  return cells;
+}
+
+function layout(c) {
+  const innerW = c.W - 2 * c.wallOut;
+  const innerD = c.D - 2 * c.wallOut;
+  let colWs, rowDs;
+  if (c.gridMode === "size") {
+    colWs = fillAxis(innerW, c.wall, c.cellWt || 40);
+    rowDs = fillAxis(innerD, c.wall, c.cellDt || 40);
+  } else {
+    colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
+    rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
+  }
+  const pref = (arr) => { const p = [0]; for (const v of arr) p.push(p[p.length - 1] + v); return p; };
+  const pw = pref(colWs), pd = pref(rowDs);
+  const clampI = (arr, k) => arr[Math.max(0, Math.min(arr.length - 1, k))];
+  return {
+    innerW, innerD, colWs, rowDs,
+    nCols: colWs.length, nRows: rowDs.length,
+    cx0: (i) => -innerW / 2 + pw[Math.max(0, Math.min(colWs.length, i))] + i * c.wall,
+    cz0: (j) => -innerD / 2 + pd[Math.max(0, Math.min(rowDs.length, j))] + j * c.wall,
+    cw: (i) => clampI(colWs, i),
+    cd: (j) => clampI(rowDs, j),
+    cellW: colWs[0], cellD: rowDs[0],
+  };
+}
+
+const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: 0, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
+function getWall(c, key) {
+  const w = c.walls[key];
+  if (!w) return defWall(c);
+  // высота может превышать H контейнера (башенка-ячейка); потолок — лимит принтера
+  return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? 0, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1 };
+}
+
+// уровень пола ячейки (лесенка), мм от дна контейнера
+const getCellLvl = (c, i, j) => (c.cells && c.cells[i + ":" + j] && c.cells[i + ":" + j].lvl) || 0;
+
+// все сегменты одной линии (для выделения перегородки целиком)
+function lineOf(c, key) {
+  const parts = key.split(":");
+  const Lc = layout(c);
+  if (parts[0] === "o") {
+    const side = parts[1];
+    const n = side === "n" || side === "s" ? Lc.nCols : Lc.nRows;
+    const names = { n: "ближняя", s: "дальняя", w: "левая", e: "правая" };
+    return {
+      keys: Array.from({ length: n }, (_, k) => `o:${side}:${k}`),
+      label: `Внешняя стенка целиком (${names[side]})`,
+      outer: true,
+    };
+  }
+  if (parts[0] === "v") {
+    const i = +parts[1];
+    return {
+      keys: Array.from({ length: Lc.nRows }, (_, j) => `v:${i}:${j}`),
+      label: `Перегородка целиком (после колонки ${i + 1})`,
+      outer: false,
+    };
+  }
+  const j = +parts[1];
+  return {
+    keys: Array.from({ length: Lc.nCols }, (_, i) => `h:${j}:${i}`),
+    label: `Перегородка целиком (после ряда ${j + 1})`,
+    outer: false,
+  };
+}
+
+// Соединительные узлы одной стороны. male: рельс, выступающий наружу и
+// входящий в паз соседа. female: паз, вырезанный ВНУТРИ толщины внешней
+// стенки (упор снизу + задний слой + две щёчки-ласточки). Внутренняя грань
+// стенки не меняется — ячейки остаются ровно заданного размера, а наружные
+// плоскости соседей смыкаются вплотную по всей длине.
+function addConnUnits(solids, c, side, vs) {
+  const { W, D, H, wallOut } = c;
+  const dg = CONN.dg;
+  const axis = side === "E" || side === "W" ? "x" : "z";
+  const s = side === "E" || side === "S" ? 1 : -1;
+  const p = axis === "x" ? (s * W) / 2 : (s * D) / 2;
+  const male = side === "E" || side === "S";
+  const mk = (u, y, v) => (axis === "x" ? [u, y, v] : [v, y, u]);
+
+  for (const vc of vs) {
+    if (male) {
+      const u0 = p - s * 0.6, u1 = p + s * CONN.depth;
+      const q = (y) => [
+        mk(u0, y, vc - CONN.w1 / 2), mk(u0, y, vc + CONN.w1 / 2),
+        mk(u1, y, vc + CONN.w2 / 2), mk(u1, y, vc - CONN.w2 / 2),
+      ];
+      solids.push(prismSolid(q(CONN.stop + CONN.clr), q(H), "conn"));
+    } else {
+      const uAt = (t) => p - s * t; // t — глубина от наружной плоскости внутрь стенки
+      const pushBox = (t0, t1, y0, y1, v0, v1) => {
+        const cu = (uAt(t0) + uAt(t1)) / 2, su = Math.abs(t1 - t0);
+        const cv = (v0 + v1) / 2, sv = v1 - v0;
+        if (axis === "x") solids.push(boxSolid(cu, (y0 + y1) / 2, cv, su, y1 - y0, sv, "conn"));
+        else solids.push(boxSolid(cv, (y0 + y1) / 2, cu, sv, y1 - y0, su, "conn"));
+      };
+      pushBox(0, wallOut, 0, CONN.stop, vc - CONN.bossW / 2, vc + CONN.bossW / 2); // упор снизу
+      pushBox(dg, wallOut, CONN.stop, H, vc - CONN.bossW / 2, vc + CONN.bossW / 2); // задний слой (дно паза)
+      const cw1 = CONN.w1 / 2 + CONN.clr, cw2 = CONN.w2 / 2 + CONN.clr;
+      for (const sg of [-1, 1]) {
+        const q = (y) => [
+          mk(uAt(0), y, vc + (sg * CONN.bossW) / 2),
+          mk(uAt(dg), y, vc + (sg * CONN.bossW) / 2),
+          mk(uAt(dg), y, vc + sg * cw2),
+          mk(uAt(0), y, vc + sg * cw1),
+        ];
+        solids.push(prismSolid(q(CONN.stop), q(H), "conn"));
+      }
+    }
+  }
+}
+
+// ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
+function buildContainer(c, conn) {
+  const { W, D, H, cols, rows, wall, wallOut, floor } = c;
+  const L = layout(c);
+  const solids = [];
+  const tan = (deg) => Math.tan((deg * Math.PI) / 180);
+
+  const zonesOf = (side) =>
+    conn[side]
+      ? conn[side].vs
+          .map((vc) => [vc - CONN.bossW / 2, vc + CONN.bossW / 2])
+          .sort((a, b) => a[0] - b[0])
+      : [];
+  const zN = zonesOf("N"), zS = zonesOf("S"), zW = zonesOf("W"), zE = zonesOf("E");
+
+  const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
+    if (tilt < 0.5 || h <= yBase + 0.3) return;
+    const run = Math.min((h - yBase) * tan(tilt), cellSize * 0.45);
+    if (run < 0.15) return;
+    if (wc.face === "hex") buildHexRamp(orient, facePos, dir, s0, s1, h, yBase, run, thk, wc.hexSize, embed, tag);
+    else if (wc.face === "lines") buildLinesRamp(orient, facePos, dir, s0, s1, h, yBase, run, thk, wc, embed, tag);
+    else solids.push(rampSolid(orient, facePos, dir, s0, s1, h, yBase, run, embed, tag));
+  };
+
+  // экструзия профиля стенки вдоль отрезка s0..s1; mapFn(смещение, y, s) → точка
+  const pushProfiled = (parts, mapFn, s0, s1, tag) => {
+    for (const quad of parts) {
+      const qa = quad.map(([o, y]) => mapFn(o, y, s0));
+      const qb = quad.map(([o, y]) => mapFn(o, y, s1));
+      solids.push(prismSolid(qa, qb, tag));
+    }
+  };
+
+  // высота кромки в точке frac (0..1) вдоль сегмента: спуск четверть-эллипсом —
+  // горизонтальный старт на высоком конце, почти вертикальный финиш (как дуга,
+  // нарисованная пользователем)
+  const heightAt = (frac, h, drop, dropH) => {
+    if (drop === "none") return h;
+    const t = drop === "b" ? frac : 1 - frac; // t=0 — высокий конец
+    return h - (h - dropH) * (1 - Math.cos((t * Math.PI) / 2));
+  };
+
+  // тело стенки с учётом спуска кромки: сегмент режется на ломтики вдоль
+  // длины, каждый ломтик — призма между профилями двух соседних высот.
+  // S0..S1 — полный пролёт сегмента (для непрерывности дуги через вырезы зон)
+  const pushWallBody = (key, wc, thk, sym, s0, s1, S0, S1, mapFn) => {
+    const dropH = Math.min(wc.dropH, wc.h);
+    if (wc.drop === "none" || wc.h - dropH < 0.3) {
+      pushProfiled(wallProfile(thk, wc.h, wc.rnd, sym), mapFn, s0, s1, key);
+      return;
+    }
+    const N = 12;
+    const span = S1 - S0 || 1;
+    for (let k = 0; k < N; k++) {
+      const sa = s0 + ((s1 - s0) * k) / N;
+      const sb = s0 + ((s1 - s0) * (k + 1)) / N;
+      const h0 = Math.max(0.4, heightAt((sa - S0) / span, wc.h, wc.drop, dropH));
+      const h1 = Math.max(0.4, heightAt((sb - S0) / span, wc.h, wc.drop, dropH));
+      const pa = wallProfile(thk, h0, wc.rnd, sym);
+      const pb = wallProfile(thk, h1, wc.rnd, sym);
+      for (let q = 0; q < Math.max(pa.length, pb.length); q++) {
+        const qa = (pa[q] ?? pa[pa.length - 1]).map(([o, y]) => mapFn(o, y, sa));
+        const qb = (pb[q] ?? pb[pb.length - 1]).map(([o, y]) => mapFn(o, y, sb));
+        solids.push(prismSolid(qa, qb, key));
+      }
+    }
+  };
+
+  // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
+  // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
+  // печатается вертикально без поддержек. Верхний пояс несёт скругление.
+  const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn) => {
+    const strut = Math.max(1.2, Math.min(2.2, thk));
+    const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
+    const rect = (sa, sb, ya, yb) => {
+      const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+    };
+    const railSide = 2.5;
+    const yA = floor + 3;
+    const parts = wallProfile(thk, wc.h, wc.rnd, sym);
+    const yB = Math.min(wc.h - 3.5, parts.length > 1 ? parts[0][2][1] : wc.h - 3.5);
+    const sA = s0 + railSide, sB = s1 - railSide;
+    if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
+      // окно слишком маленькое — сплошная стенка
+      pushProfiled(parts, mapFn, s0, s1, key);
+      return;
+    }
+    // рамка
+    rect(s0, s1, 0, yA); // нижний пояс
+    const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
+    pushProfiled(topParts, mapFn, s0, s1, key); // верхний пояс (со скруглением)
+    rect(s0, sA, yA, yB);
+    rect(sB, s1, yA, yB); // боковые пояса
+    // решётка
+    const clipSeg = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
+    };
+    const bar = (P1, P2) => {
+      const c2 = clipSeg(P1, P2);
+      if (!c2) return;
+      const [A, B] = c2;
+      const dx = B[0] - A[0], dy = B[1] - A[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 0.4) return;
+      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
+      const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+    };
+    const Whex = wc.hexSize;               // ширина соты между вертикальными гранями
+    const R = Whex / Math.sqrt(3);         // радиус до вершины
+    // только ЦЕЛЫЕ ряды сот по высоте: неполный верхний ряд не рисуется,
+    // остаток до верхнего пояса заливается пластиком
+    let rows = 0;
+    while (yA + R + rows * 1.5 * R + R <= yB + 0.01) rows++;
+    if (rows < 1) {
+      pushProfiled(parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yA : y]) : q)), mapFn, s0, s1, key);
+      return;
+    }
+    const colsN = Math.ceil((sB - sA) / Whex) + 2;
+    for (let r = 0; r < rows; r++) {
+      const yc = yA + R + r * 1.5 * R;
+      const shift = r % 2 === 1 ? Whex / 2 : 0;
+      for (let ci = -1; ci < colsN; ci++) {
+        const sc = sA + Whex / 2 + ci * Whex + shift;
+        const V = [
+          [sc, yc + R], [sc + Whex / 2, yc + R / 2], [sc + Whex / 2, yc - R / 2],
+          [sc, yc - R], [sc - Whex / 2, yc - R / 2], [sc - Whex / 2, yc + R / 2],
+        ];
+        for (let e = 0; e < 6; e++) bar(V[e], V[(e + 1) % 6]);
+      }
+    }
+    // заливка над последним целым рядом: клинья между вершинами + сплошная полоса
+    const yTip = yA + R + (rows - 1) * 1.5 * R + R;
+    const yValley = yTip - R / 2;
+    const shiftN = rows % 2 === 1 ? Whex / 2 : 0;
+    const oA2 = sym ? -thk / 2 : 0, oB2 = sym ? thk / 2 : thk;
+    for (let ci = -1; ci < colsN + 1; ci++) {
+      const sc = sA + Whex / 2 + ci * Whex + shiftN;
+      const P = [[sc, yValley], [sc - Whex / 2, yTip], [sc + Whex / 2, yTip]]
+        .map(([sv, yv]) => [Math.min(sB, Math.max(sA, sv)), yv]);
+      if (Math.max(P[0][0], P[1][0], P[2][0]) - Math.min(P[0][0], P[1][0], P[2][0]) < 0.3) continue;
+      const q = [P[0], P[1], P[2], P[2]];
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA2, yv, sv)), q.map(([sv, yv]) => mapFn(oB2, yv, sv)), key));
+    }
+    if (yB - yTip > 0.05) rect(sA, sB, yTip, yB);
+  };
+
+  // Стенка с фоном из изогнутых случайных линий: рамка как у сот + два
+  // семейства волнистых диагональных прядей (±45°, печатаются без поддержек).
+  // Узор детерминированный: сид зависит от стенки; «перемешать» меняет сид.
+  const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn) => {
+    const strut = Math.max(1.2, Math.min(2.2, thk));
+    const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
+    const rect = (sa, sb, ya, yb) => {
+      const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+    };
+    const railSide = 2.5;
+    const yA = floor + 3;
+    const parts = wallProfile(thk, wc.h, wc.rnd, sym);
+    const yB = Math.min(wc.h - 3.5, parts.length > 1 ? parts[0][2][1] : wc.h - 3.5);
+    const sA = s0 + railSide, sB = s1 - railSide;
+    const sp = Math.max(4, wc.lineStep);
+    if (sB - sA < sp || yB - yA < sp) {
+      pushProfiled(parts, mapFn, s0, s1, key);
+      return;
+    }
+    rect(s0, s1, 0, yA);
+    const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
+    pushProfiled(topParts, mapFn, s0, s1, key);
+    rect(s0, sA, yA, yB);
+    rect(sB, s1, yA, yB);
+    const clipSeg = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
+    };
+    const bar = (P1, P2) => {
+      const c2 = clipSeg(P1, P2);
+      if (!c2) return;
+      const [A, B] = c2;
+      const dx = B[0] - A[0], dy = B[1] - A[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 0.4) return;
+      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
+      const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+    };
+    // расширенное окно клипа: концы прядей заходят вглубь поясов рамки
+    // и сращиваются с ними — без зазоров на стыке
+    const ext = 2.3;
+    const sAe = sA - ext, sBe = sB + ext;
+    const hbTop = parts.length > 1 ? parts[0][2][1] : wc.h;
+    const yAe = Math.max(0.4, yA - 2.6);
+    const yBe = Math.min(yB + 3, hbTop - 0.15, wc.h - 0.4);
+    const clipT = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - sAe, sBe - P1[0], P1[1] - yAe, yBe - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return { A: [P1[0] + t0 * dx, P1[1] + t0 * dy], B: [P1[0] + t1 * dx, P1[1] + t1 * dy], t0, t1 };
+    };
+    // жёсткие границы тела стенки: лента (с учётом полуширины!) никогда
+    // не выходит за края сегмента, ниже дна и выше начала скругления
+    const pushQ = (q0) => {
+      const q = q0.map(([sv, yv]) => [
+        Math.min(s1 - 0.05, Math.max(s0 + 0.05, sv)),
+        Math.min(hbTop - 0.05, Math.max(0.2, yv)),
+      ]);
+      const area = Math.abs(
+        q[0][0] * (q[1][1] - q[3][1]) + q[1][0] * (q[2][1] - q[0][1]) +
+        q[2][0] * (q[3][1] - q[1][1]) + q[3][0] * (q[0][1] - q[2][1])
+      ) / 2;
+      if (area < 0.15) return; // полностью сплющенные о границу — отбрасываем
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+    };
+    const emitStrand = (pts, hws) => {
+      let run = [], rw = [];
+      const flush = () => { if (run.length > 1) for (const q of ribbonQuads(run, rw)) pushQ(q); run = []; rw = []; };
+      for (let k = 0; k + 1 < pts.length; k++) {
+        const c2 = clipT(pts[k], pts[k + 1]);
+        if (!c2) { flush(); continue; }
+        const wA = hws[k] + (hws[k + 1] - hws[k]) * c2.t0;
+        const wB = hws[k] + (hws[k + 1] - hws[k]) * c2.t1;
+        if (run.length === 0) { run.push(c2.A); rw.push(wA); }
+        run.push(c2.B); rw.push(wB);
+        if (c2.t1 < 0.999) flush();
+      }
+      flush();
+    };
+    const rng = mulberry32(hashStr(key) ^ Math.imul(wc.seed || 1, 2654435761));
+    const hWin = yB - yA;
+    for (const f of [1, -1]) {
+      let base = sA - (f === 1 ? hWin : 0) - sp + rng() * sp;
+      const end = sB + (f === -1 ? hWin : 0) + sp;
+      for (; base < end; base += sp * 1.1 + rng() * sp * 0.4) {
+        const A1 = sp * (0.25 + rng() * 0.4), l1 = sp * (1.8 + rng() * 1.6), p1 = rng() * 6.283;
+        const A2 = sp * 0.18 * rng(), l2 = sp * (0.8 + rng() * 0.9), p2 = rng() * 6.283;
+        const wBase = strut * (0.75 + rng() * 0.7);            // своя толщина у каждой пряди
+        const lw = sp * (2.2 + rng() * 2), pw = rng() * 6.283; // волна толщины вдоль пряди
+        const pts = [], hws = [];
+        for (let y = yAe; ; y += 1.2) {
+          const yy = Math.min(y, yBe);
+          const t = yy - yA;
+          const sv = base + f * t + A1 * Math.sin((t * 6.283) / l1 + p1) + A2 * Math.sin((t * 6.283) / l2 + p2);
+          pts.push([sv, yy]);
+          // градиент: у дна прядь заметно толще, кверху сходит на тонкую
+          const grad = 1.45 - 0.75 * ((yy - yAe) / (yBe - yAe || 1));
+          hws.push(Math.max(0.55, (wBase / 2) * grad * (1 + 0.35 * Math.sin((t * 6.283) / lw + pw))));
+          if (yy >= yBe) break;
+        }
+        emitStrand(pts, hws);
+      }
+    }
+  };
+
+  // Наклонная сотовая панель: вместо сплошного клина пандуса — тонкая
+  // панель вдоль гипотенузы с гекс-решёткой и рамкой (верхний стык со
+  // стенкой, нижний пояс у дна, боковые пояса). Толщина по перпендикуляру
+  // к наклонной плоскости ≈ толщине стенки.
+  const buildHexRamp = (orient, facePos, dir, s0, s1, yTop, yBot0, run, thk, hexSize, embed, tag) => {
+    const yBot = yBot0 - 0.6; // слегка утапливаем в дно для сращивания
+    const dh = yTop - yBot;
+    const Lslope = Math.hypot(run, dh);
+    const thkH = Math.min((thk * Lslope) / Math.max(dh, 0.1), thk * 2.2); // горизонтальная толщина
+    const toO = (u) => facePos + dir * ((u * run) / Lslope);
+    const toY = (u) => yTop - (u * dh) / Lslope;
+    const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+    const pushQuadUS = (corners) => {
+      // corners: 4 точки [u, s]; передняя грань на наклонной плоскости,
+      // задняя — сдвиг по горизонтали внутрь (к стенке)
+      const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
+      const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+      solids.push(prismSolid(qa, qb, tag));
+    };
+    const railSide = 2.5, railTop = 3, railBot = 3.5;
+    const uA = railTop, uB = Lslope - railBot;
+    const sA = s0 + railSide, sB = s1 - railSide;
+    if (sB - sA < hexSize * 0.9 || uB - uA < hexSize * 0.9) {
+      solids.push(rampSolid(orient, facePos, dir, s0, s1, yTop, yBot0, run, embed, tag));
+      return;
+    }
+    pushQuadUS([[0, s0], [uA, s0], [uA, s1], [0, s1]]);                 // верхний стык
+    pushQuadUS([[uB, s0], [Lslope, s0], [Lslope, s1], [uB, s1]]);       // нижний пояс
+    pushQuadUS([[uA, s0], [uB, s0], [uB, sA], [uA, sA]]);               // боковой пояс
+    pushQuadUS([[uA, sB], [uB, sB], [uB, s1], [uA, s1]]);               // боковой пояс
+    const strut = Math.max(1.2, Math.min(2.2, thk));
+    const clipSeg = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - uA, uB - P1[0], P1[1] - sA, sB - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
+    };
+    const bar = (P1, P2) => {
+      const c2 = clipSeg(P1, P2);
+      if (!c2) return;
+      const [A, B] = c2;
+      const dx = B[0] - A[0], dy = B[1] - A[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 0.4) return;
+      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
+      pushQuadUS([[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]]);
+    };
+    const Whex = hexSize, R = Whex / Math.sqrt(3);
+    // только целые ряды; неполный ряд у нижнего края ската заливается
+    let rows = 0;
+    while (uA + R + rows * 1.5 * R + R <= uB + 0.01) rows++;
+    if (rows < 1) {
+      pushQuadUS([[uA, s0], [uB, s0], [uB, s1], [uA, s1]]);
+      return;
+    }
+    const colsN = Math.ceil((sB - sA) / Whex) + 2;
+    for (let r = 0; r < rows; r++) {
+      const uc = uA + R + r * 1.5 * R;
+      const shift = r % 2 === 1 ? Whex / 2 : 0;
+      for (let ci = -1; ci < colsN; ci++) {
+        const sc = sA + Whex / 2 + ci * Whex + shift;
+        const V = [
+          [uc + R, sc], [uc + R / 2, sc + Whex / 2], [uc - R / 2, sc + Whex / 2],
+          [uc - R, sc], [uc - R / 2, sc - Whex / 2], [uc + R / 2, sc - Whex / 2],
+        ];
+        for (let e = 0; e < 6; e++) bar(V[e], V[(e + 1) % 6]);
+      }
+    }
+    const uTip = uA + R + (rows - 1) * 1.5 * R + R;
+    const uValley = uTip - R / 2;
+    const shiftN = rows % 2 === 1 ? Whex / 2 : 0;
+    for (let ci = -1; ci < colsN + 1; ci++) {
+      const sc = sA + Whex / 2 + ci * Whex + shiftN;
+      const P = [[uValley, sc], [uTip, sc - Whex / 2], [uTip, sc + Whex / 2]]
+        .map(([uv, sv]) => [uv, Math.min(sB, Math.max(sA, sv))]);
+      if (Math.max(P[0][1], P[1][1], P[2][1]) - Math.min(P[0][1], P[1][1], P[2][1]) < 0.3) continue;
+      pushQuadUS([P[0], P[1], P[2], P[2]]);
+    }
+    if (uB - uTip > 0.05) pushQuadUS([[uTip, sA], [uB, sA], [uB, sB], [uTip, sB]]);
+  };
+
+  // Наклонная панель с линиями: каркас как у сотового пандуса + пряди
+  const buildLinesRamp = (orient, facePos, dir, s0, s1, yTop, yBot0, run, thk, wc, embed, tag) => {
+    const yBot = yBot0 - 0.6;
+    const dh = yTop - yBot;
+    const Lslope = Math.hypot(run, dh);
+    const thkH = Math.min((thk * Lslope) / Math.max(dh, 0.1), thk * 2.2);
+    const toO = (u) => facePos + dir * ((u * run) / Lslope);
+    const toY = (u) => yTop - (u * dh) / Lslope;
+    const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+    const pushQuadUS = (corners) => {
+      const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
+      const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+      solids.push(prismSolid(qa, qb, tag));
+    };
+    const railSide = 2.5, railTop = 3, railBot = 3.5;
+    const uA = railTop, uB = Lslope - railBot;
+    const sA = s0 + railSide, sB = s1 - railSide;
+    const sp = Math.max(4, wc.lineStep);
+    if (sB - sA < sp || uB - uA < sp) {
+      solids.push(rampSolid(orient, facePos, dir, s0, s1, yTop, yBot0, run, embed, tag));
+      return;
+    }
+    pushQuadUS([[0, s0], [uA, s0], [uA, s1], [0, s1]]);
+    pushQuadUS([[uB, s0], [Lslope, s0], [Lslope, s1], [uB, s1]]);
+    pushQuadUS([[uA, s0], [uB, s0], [uB, sA], [uA, sA]]);
+    pushQuadUS([[uA, sB], [uB, sB], [uB, s1], [uA, s1]]);
+    const strut = Math.max(1.2, Math.min(2.2, thk));
+    const clipSeg = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - uA, uB - P1[0], P1[1] - sA, sB - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
+    };
+    const bar = (P1, P2) => {
+      const c2 = clipSeg(P1, P2);
+      if (!c2) return;
+      const [A, B] = c2;
+      const dx = B[0] - A[0], dy = B[1] - A[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 0.4) return;
+      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
+      pushQuadUS([[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]]);
+    };
+    const ext = 2.3;
+    const sAe = sA - ext, sBe = sB + ext;
+    const uAe = Math.max(0.3, uA - 2.6);
+    const uBe = Math.min(uB + 3, Lslope - 0.3);
+    const clipT = (P1, P2) => {
+      let t0 = 0, t1 = 1;
+      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - uAe, uBe - P1[0], P1[1] - sAe, sBe - P1[1]];
+      for (let i = 0; i < 4; i++) {
+        if (p[i] === 0) { if (q[i] < 0) return null; }
+        else {
+          const r = q[i] / p[i];
+          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
+          else { if (r < t0) return null; if (r < t1) t1 = r; }
+        }
+      }
+      return { A: [P1[0] + t0 * dx, P1[1] + t0 * dy], B: [P1[0] + t1 * dx, P1[1] + t1 * dy], t0, t1 };
+    };
+    const emitStrand = (pts, hws) => {
+      let run = [], rw = [];
+      const flush = () => {
+        if (run.length > 1)
+          for (const q0 of ribbonQuads(run, rw)) {
+            const q = q0.map(([uv, sv]) => [
+              Math.min(Lslope - 0.05, Math.max(0.05, uv)),
+              Math.min(s1 - 0.05, Math.max(s0 + 0.05, sv)),
+            ]);
+            const area = Math.abs(
+              q[0][0] * (q[1][1] - q[3][1]) + q[1][0] * (q[2][1] - q[0][1]) +
+              q[2][0] * (q[3][1] - q[1][1]) + q[3][0] * (q[0][1] - q[2][1])
+            ) / 2;
+            if (area >= 0.15) pushQuadUS(q);
+          }
+        run = [];
+        rw = [];
+      };
+      for (let k = 0; k + 1 < pts.length; k++) {
+        const c2 = clipT(pts[k], pts[k + 1]);
+        if (!c2) { flush(); continue; }
+        const wA = hws[k] + (hws[k + 1] - hws[k]) * c2.t0;
+        const wB = hws[k] + (hws[k + 1] - hws[k]) * c2.t1;
+        if (run.length === 0) { run.push(c2.A); rw.push(wA); }
+        run.push(c2.B); rw.push(wB);
+        if (c2.t1 < 0.999) flush();
+      }
+      flush();
+    };
+    const rng = mulberry32(hashStr(tag + "r") ^ Math.imul(wc.seed || 1, 2654435761));
+    const wWin = uB - uA;
+    for (const f of [1, -1]) {
+      let base = sA - (f === 1 ? wWin : 0) - sp + rng() * sp;
+      const end = sB + (f === -1 ? wWin : 0) + sp;
+      for (; base < end; base += sp * 1.1 + rng() * sp * 0.4) {
+        const A1 = sp * (0.25 + rng() * 0.4), l1 = sp * (1.8 + rng() * 1.6), p1 = rng() * 6.283;
+        const A2 = sp * 0.18 * rng(), l2 = sp * (0.8 + rng() * 0.9), p2 = rng() * 6.283;
+        const wBase = strut * (0.75 + rng() * 0.7);
+        const lw = sp * (2.2 + rng() * 2), pw = rng() * 6.283;
+        const pts = [], hws = [];
+        for (let u = uAe; ; u += 1.2) {
+          const uu = Math.min(u, uBe);
+          const t = uu - uA;
+          const sv = base + f * t + A1 * Math.sin((t * 6.283) / l1 + p1) + A2 * Math.sin((t * 6.283) / l2 + p2);
+          pts.push([uu, sv]);
+          // низ ската (большие u) — толще, к верхнему стыку — тоньше
+          const grad = 0.7 + 0.75 * ((uu - uAe) / (uBe - uAe || 1));
+          hws.push(Math.max(0.55, (wBase / 2) * grad * (1 + 0.35 * Math.sin((t * 6.283) / lw + pw))));
+          if (uu >= uBe) break;
+        }
+        emitStrand(pts, hws);
+      }
+    }
+  };
+
+  // диспетчер: узорные заполнения (если нет спуска) либо обычное тело стенки
+  const pushWallAuto = (key, wc, thk, sym, s0, s1, S0, S1, mapFn) => {
+    if (wc.face === "hex" && wc.drop === "none") buildHexWall(key, wc, thk, sym, s0, s1, mapFn);
+    else if (wc.face === "lines" && wc.drop === "none") buildLinesWall(key, wc, thk, sym, s0, s1, mapFn);
+    else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn);
+  };
+
+  // пол — по ячейкам: у каждой свой уровень (лесенка). Плита заходит под
+  // окружающие стенки (они и есть «ножки»); под поднятым полом — пустота.
+  const cellLvl = (i, j) => Math.min(getCellLvl(c, i, j), H - 4);
+  for (let i = 0; i < L.nCols; i++)
+    for (let j = 0; j < L.nRows; j++) {
+      const lvl = cellLvl(i, j);
+      // заход плиты под стенки — строго по толщине конкретной стенки:
+      // под внешнюю на wallOut, под перегородку на wall. Ни плита, ни
+      // рёбра под ней не пересекают внутренний объём соседней ячейки.
+      const xa = Math.max(-W / 2, L.cx0(i) - (i === 0 ? wallOut : wall));
+      const xb = Math.min(W / 2, L.cx0(i) + L.cw(i) + (i === L.nCols - 1 ? wallOut : wall));
+      const za = Math.max(-D / 2, L.cz0(j) - (j === 0 ? wallOut : wall));
+      const zb = Math.min(D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? wallOut : wall));
+      const cc = (c.cells && c.cells[i + ":" + j]) || {};
+      const fDir = cc.tiltDir || "none";
+      const fA = cc.tiltA || 0;
+      if (fDir === "none" || fA < 0.5) {
+        solids.push(boxSolid((xa + xb) / 2, lvl + floor / 2, (za + zb) / 2, xb - xa, floor, zb - za, "floor"));
+      } else {
+        // наклонный пол: клин, спускающийся к выбранной стороне; верх высокой
+        // кромки ограничен высотой контейнера
+        const span = fDir === "w" || fDir === "e" ? L.cw(i) : L.cd(j);
+        const rise = Math.min(span * Math.tan((fA * Math.PI) / 180), Math.max(0, H - lvl - floor - 1));
+        const yLo = lvl + floor, yHi = lvl + floor + rise;
+        let capA, capB;
+        if (fDir === "e") {
+          // низкая сторона — правая (x+)
+          const q = [[xa, lvl], [xb, lvl], [xb, yLo], [xa, yHi]];
+          capA = q.map(([x, y]) => [x, y, za]); capB = q.map(([x, y]) => [x, y, zb]);
+        } else if (fDir === "w") {
+          const q = [[xa, lvl], [xb, lvl], [xb, yHi], [xa, yLo]];
+          capA = q.map(([x, y]) => [x, y, za]); capB = q.map(([x, y]) => [x, y, zb]);
+        } else if (fDir === "n") {
+          // низкая сторона — ближняя (z-)
+          const q = [[za, lvl], [zb, lvl], [zb, yHi], [za, yLo]];
+          capA = q.map(([z, y]) => [xa, y, z]); capB = q.map(([z, y]) => [xb, y, z]);
+        } else {
+          const q = [[za, lvl], [zb, lvl], [zb, yLo], [za, yHi]];
+          capA = q.map(([z, y]) => [xa, y, z]); capB = q.map(([z, y]) => [xb, y, z]);
+        }
+        solids.push(prismSolid(capA, capB, "floor"));
+      }
+      // минимальное заполнение под поднятой плитой: редкая сетка рёбер,
+      // печатаются со стола и служат опорой для пола (мосты ≤ ~12 мм)
+      if (lvl > 2) {
+        const ribT = 1.0, spacing = 12;
+        const nAlongX = Math.max(0, Math.floor((zb - za) / spacing));
+        for (let k = 1; k <= nAlongX; k++) {
+          const z = za + ((zb - za) * k) / (nAlongX + 1);
+          solids.push(boxSolid((xa + xb) / 2, (lvl + 0.4) / 2, z, xb - xa, lvl + 0.4, ribT, "floor"));
+        }
+        const nAlongZ = Math.max(0, Math.floor((xb - xa) / spacing));
+        for (let k = 1; k <= nAlongZ; k++) {
+          const x = xa + ((xb - xa) * k) / (nAlongZ + 1);
+          solids.push(boxSolid(x, (lvl + 0.4) / 2, (za + zb) / 2, ribT, lvl + 0.4, zb - za, "floor"));
+        }
+      }
+    }
+
+  // внешние стенки N/S (сегменты вдоль X), с вырезом под зоны соединителей
+  for (let i = 0; i < L.nCols; i++) {
+    const x0 = L.cx0(i), x1 = x0 + L.cw(i);
+    const bx0 = Math.max(-W / 2, x0 - wallOut), bx1 = Math.min(W / 2, x1 + wallOut);
+    for (const [side, zones] of [["n", zN], ["s", zS]]) {
+      const key = `o:${side}:${i}`;
+      const wc = getWall(c, key);
+      if (wc.h > 0.3) {
+        const mapFn = side === "n"
+          ? (o, y, x) => [x, y, -D / 2 + o]
+          : (o, y, x) => [x, y, D / 2 - o];
+        for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bx0, bx1, mapFn);
+        const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+        addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(side === "n" ? 0 : L.nRows - 1), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, side === "n" ? 0 : L.nRows - 1), key);
+      }
+    }
+  }
+  // внешние стенки W/E (сегменты вдоль Z)
+  for (let j = 0; j < L.nRows; j++) {
+    const z0 = L.cz0(j), z1 = z0 + L.cd(j);
+    const bz0 = Math.max(-D / 2, z0 - wallOut), bz1 = Math.min(D / 2, z1 + wallOut);
+    for (const [side, zones] of [["w", zW], ["e", zE]]) {
+      const key = `o:${side}:${j}`;
+      const wc = getWall(c, key);
+      if (wc.h > 0.3) {
+        const mapFn = side === "w"
+          ? (o, y, z) => [-W / 2 + o, y, z]
+          : (o, y, z) => [W / 2 - o, y, z];
+        for (const [a, b] of splitRange(bz0, bz1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bz0, bz1, mapFn);
+        const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+        addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, z0, z1, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nCols - 1), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nCols - 1, j), key);
+      }
+    }
+  }
+  // в male-зонах стенка ставится обратно на полную высоту (несёт рельс)
+  if (conn.S?.male) for (const [a, b] of zS)
+    solids.push(boxSolid((a + b) / 2, H / 2, (D - wallOut) / 2, b - a, H, wallOut, "conn"));
+  if (conn.N?.male) for (const [a, b] of zN)
+    solids.push(boxSolid((a + b) / 2, H / 2, -(D - wallOut) / 2, b - a, H, wallOut, "conn"));
+  if (conn.E?.male) for (const [a, b] of zE)
+    solids.push(boxSolid((W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
+  if (conn.W?.male) for (const [a, b] of zW)
+    solids.push(boxSolid(-(W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
+
+  // вертикальные перегородки
+  for (let i = 0; i < L.nCols - 1; i++) {
+    const xd = L.cx0(i) + L.cw(i) + wall / 2;
+    for (let j = 0; j < L.nRows; j++) {
+      const key = `v:${i}:${j}`;
+      const wc = getWall(c, key);
+      const z0 = L.cz0(j), z1 = z0 + L.cd(j);
+      const bz0 = Math.max(-D / 2 + wallOut * 0.5, z0 - wallOut), bz1 = Math.min(D / 2 - wallOut * 0.5, z1 + wallOut);
+      if (wc.h > 0.3) {
+        pushWallAuto(key, wc, wall, true, bz0, bz1, bz0, bz1, (o, y, z) => [xd + o, y, z]);
+        const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+        addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+        addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
+      }
+    }
+  }
+  // горизонтальные перегородки
+  for (let j = 0; j < L.nRows - 1; j++) {
+    const zd = L.cz0(j) + L.cd(j) + wall / 2;
+    for (let i = 0; i < L.nCols; i++) {
+      const key = `h:${j}:${i}`;
+      const wc = getWall(c, key);
+      const x0 = L.cx0(i), x1 = x0 + L.cw(i);
+      const bx0 = Math.max(-W / 2 + wallOut * 0.5, x0 - wallOut), bx1 = Math.min(W / 2 - wallOut * 0.5, x1 + wallOut);
+      if (wc.h > 0.3) {
+        pushWallAuto(key, wc, wall, true, bx0, bx1, bx0, bx1, (o, y, x) => [x, y, zd + o]);
+        const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+        addRamp("z", zd - wall / 2, -1, x0, x1, hRamp, wc.t1, L.cd(j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+        addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i, j + 1), key);
+      }
+    }
+  }
+
+  // соединители
+  for (const side of ["N", "S", "W", "E"])
+    if (conn[side]) addConnUnits(solids, c, side, conn[side].vs);
+
+  return solids;
+}
+
+// ══════════════════════════════════════════════════════════════
+// STL
+// ══════════════════════════════════════════════════════════════
+function exportSTL(solids, filename) {
+  const tris = solids.flatMap((s) => s.tris);
+  const buf = new ArrayBuffer(84 + tris.length * 50);
+  const dv = new DataView(buf);
+  dv.setUint32(80, tris.length, true);
+  let o = 84;
+  const put = (p) => {
+    dv.setFloat32(o, p[0], true);
+    dv.setFloat32(o + 4, p[2], true);
+    dv.setFloat32(o + 8, p[1], true);
+    o += 12;
+  };
+  for (const [a, b, c] of tris) {
+    const n = cross(sub(b, a), sub(c, a));
+    const l = Math.hypot(n[0], n[1], n[2]) || 1;
+    put([n[0] / l, n[1] / l, n[2] / l]);
+    put(a); put(c); put(b);
+    dv.setUint16(o, 0, true); o += 2;
+  }
+  const blob = new Blob([buf], { type: "model/stl" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function solidsVolume(solids) {
+  let v = 0;
+  for (const s of solids) for (const [a, b, c] of s.tris) v += dot(a, cross(b, c)) / 6;
+  return v / 1000;
+}
+
+// ── Цельное тело: сварка вершин + булево объединение через Manifold ──
+function weldTris(tris) {
+  const map = new Map();
+  const vp = [], tv = [];
+  const idx = (p) => {
+    const k = `${Math.round(p[0] * 1e4)},${Math.round(p[1] * 1e4)},${Math.round(p[2] * 1e4)}`;
+    let i = map.get(k);
+    if (i === undefined) { i = vp.length / 3; map.set(k, i); vp.push(p[0], p[1], p[2]); }
+    return i;
+  };
+  for (const [a, b, c] of tris) {
+    const ia = idx(a), ib = idx(b), ic = idx(c);
+    if (ia !== ib && ib !== ic && ia !== ic) tv.push(ia, ib, ic);
+  }
+  return { vp: new Float32Array(vp), tv: new Uint32Array(tv) };
+}
+
+function exportSTLIndexed(vp, tv, filename) {
+  const nTri = tv.length / 3;
+  const buf = new ArrayBuffer(84 + nTri * 50);
+  const dv = new DataView(buf);
+  dv.setUint32(80, nTri, true);
+  let o = 84;
+  const put = (x, y, z) => {
+    dv.setFloat32(o, x, true); dv.setFloat32(o + 4, z, true); dv.setFloat32(o + 8, y, true);
+    o += 12;
+  };
+  const P = (i) => [vp[3 * i], vp[3 * i + 1], vp[3 * i + 2]];
+  for (let t = 0; t < nTri; t++) {
+    const a = P(tv[3 * t]), b = P(tv[3 * t + 1]), c = P(tv[3 * t + 2]);
+    const n = cross(sub(b, a), sub(c, a));
+    const l = Math.hypot(n[0], n[1], n[2]) || 1;
+    put(n[0] / l, n[1] / l, n[2] / l);
+    put(a[0], a[1], a[2]); put(c[0], c[1], c[2]); put(b[0], b[1], b[2]);
+    dv.setUint16(o, 0, true); o += 2;
+  }
+  const blob = new Blob([buf], { type: "model/stl" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+// детерминированный случайный узор: сид из ключа стенки
+function hashStr(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// лента переменной ширины по ломаной: сглаженные стыки (усреднённые
+// нормали), возвращает четырёхугольники в 2D-координатах ломаной
+function ribbonQuads(pts, halfWidths) {
+  const quads = [];
+  const n = pts.length;
+  if (n < 2) return quads;
+  const Lp = [], Rp = [];
+  for (let k = 0; k < n; k++) {
+    const a = pts[Math.max(0, k - 1)], b = pts[Math.min(n - 1, k + 1)];
+    let dx = b[0] - a[0], dy = b[1] - a[1];
+    const l = Math.hypot(dx, dy) || 1;
+    const nx = -dy / l, ny = dx / l;
+    Lp.push([pts[k][0] + nx * halfWidths[k], pts[k][1] + ny * halfWidths[k]]);
+    Rp.push([pts[k][0] - nx * halfWidths[k], pts[k][1] - ny * halfWidths[k]]);
+  }
+  for (let k = 0; k + 1 < n; k++) quads.push([Lp[k], Lp[k + 1], Rp[k + 1], Rp[k]]);
+  return quads;
+}
+
+let manifoldPromise = null;
+function getManifold() {
+  if (!manifoldPromise) {
+    manifoldPromise = import("https://cdn.jsdelivr.net/npm/manifold-3d@2.5.1/manifold.js")
+      .then((m) => m.default())
+      .then((wasm) => { wasm.setup(); return wasm; });
+  }
+  return manifoldPromise;
+}
+
+// ══════════════════════════════════════════════════════════════
+// UI
+// ══════════════════════════════════════════════════════════════
+const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+const ACCENT = "#F2620F";
+const SEL = "#2563EB";
+
+function Param({ label, unit, value, min, max, step, onChange, disabled }) {
+  const [draft, setDraft] = useState(null);
+  const commit = (raw) => {
+    const v = parseFloat(raw);
+    if (!isNaN(v)) onChange(Math.min(max, Math.max(min, v)));
+    setDraft(null);
+  };
+  return (
+    <div style={{ marginBottom: 12, opacity: disabled ? 0.45 : 1 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+        <label style={{ fontSize: 13, color: "#3D4A5C", fontWeight: 500 }}>{label}{disabled ? " 🔒" : ""}</label>
+        <span style={{ fontFamily: MONO, fontSize: 13, color: "#16202E", whiteSpace: "nowrap" }}>
+          <input
+            type="number" value={draft ?? value} min={min} max={max} step={step} disabled={!!disabled}
+            onChange={(e) => {
+              // не зажимаем на каждой клавише — иначе нельзя набрать «40» при минимуме 5
+              setDraft(e.target.value);
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v >= min && v <= max) onChange(v);
+            }}
+            onBlur={(e) => commit(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commit(e.target.value); }}
+            style={{
+              width: 58, textAlign: "right", border: "1px solid #D6DDE6", borderRadius: 6,
+              padding: "1px 5px", fontFamily: "inherit", fontSize: 13,
+              background: disabled ? "#F1F5F9" : "#fff", outline: "none",
+            }}
+          />
+          <span style={{ marginLeft: 4, color: "#8A97A8", fontSize: 12 }}>{unit}</span>
+        </span>
+      </div>
+      <input
+        type="range" value={value} min={min} max={max} step={step} disabled={!!disabled}
+        onChange={(e) => { setDraft(null); onChange(parseFloat(e.target.value)); }}
+        style={{ width: "100%", accentColor: ACCENT, height: 4, cursor: disabled ? "default" : "pointer" }}
+      />
+    </div>
+  );
+}
+
+// счётчик с плюсом и минусом (колонки и ряды)
+function Stepper({ label, value, min, max, onChange, disabled }) {
+  const btn = (d, t) => (
+    <button
+      onClick={() => !disabled && onChange(Math.min(max, Math.max(min, value + d)))}
+      disabled={!!disabled}
+      style={{
+        width: 30, height: 28, borderRadius: 7, border: "1px solid #D6DDE6",
+        background: disabled ? "#F1F5F9" : "#fff", fontSize: 16, fontWeight: 700,
+        color: "#3D4A5C", cursor: disabled ? "default" : "pointer", lineHeight: 1,
+      }}
+    >
+      {t}
+    </button>
+  );
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, opacity: disabled ? 0.45 : 1 }}>
+      <label style={{ fontSize: 13, color: "#3D4A5C", fontWeight: 500 }}>{label}{disabled ? " 🔒" : ""}</label>
+      <span style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        {btn(-1, "−")}
+        <span style={{ fontFamily: MONO, fontSize: 14, minWidth: 18, textAlign: "center" }}>{value}</span>
+        {btn(1, "+")}
+      </span>
+    </div>
+  );
+}
+
+// сворачиваемая секция настроек
+function Collapse({ title, open, onToggle, children }) {
+  return (
+    <div style={{ border: "1px solid #E4E9EF", borderRadius: 10, marginBottom: 8, background: "#fff" }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "9px 12px", background: "transparent", border: "none", cursor: "pointer",
+          fontSize: 11, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "#5A6B80",
+        }}
+      >
+        <span>{title}</span>
+        <span style={{ color: "#A9B4C2", fontSize: 13 }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ padding: "2px 12px 10px" }}>{children}</div>}
+    </div>
+  );
+}
+
+const SectionTitle = ({ children }) => (
+  <div style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "#8A97A8", fontWeight: 600, margin: "16px 0 8px" }}>
+    {children}
+  </div>
+);
+
+function Schematic({ c, selection, onSelect }) {
+  const L = layout(c);
+  const { W, D, wall, wallOut } = c;
+  const hit = 2.2;
+  const segs = [];
+
+  const isSel = (key) =>
+    selection?.type === "wall" && selection.key === key
+      ? true
+      : selection?.type === "line"
+      ? selection.keys.includes(key)
+      : selection?.type === "cell"
+      ? cellKeys(c, selection.i, selection.j).some((k) => k.key === key)
+      : false;
+
+  const pushSeg = (key, x, z, sw, sd) =>
+    segs.push(
+      <g key={key} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); onSelect({ type: "wall", key }); }}>
+        <rect x={x - hit} y={z - hit} width={sw + 2 * hit} height={sd + 2 * hit} fill="transparent" />
+        <rect x={x} y={z} width={sw} height={sd} fill={isSel(key) ? SEL : getWall(c, key).h > 0.3 ? "#7B8AA0" : "#E2E8F0"} rx={0.4} />
+      </g>
+    );
+
+  for (let i = 0; i < L.nCols; i++) {
+    const x0 = W / 2 + L.cx0(i), x1 = x0 + L.cw(i);
+    pushSeg(`o:n:${i}`, x0, 0, x1 - x0, wallOut);
+    pushSeg(`o:s:${i}`, x0, D - wallOut, x1 - x0, wallOut);
+  }
+  for (let j = 0; j < L.nRows; j++) {
+    const z0 = D / 2 + L.cz0(j), z1 = z0 + L.cd(j);
+    pushSeg(`o:w:${j}`, 0, z0, wallOut, z1 - z0);
+    pushSeg(`o:e:${j}`, W - wallOut, z0, wallOut, z1 - z0);
+  }
+  for (let i = 0; i < L.nCols - 1; i++) {
+    const xd = W / 2 + L.cx0(i) + L.cw(i);
+    for (let j = 0; j < L.nRows; j++) pushSeg(`v:${i}:${j}`, xd, D / 2 + L.cz0(j), wall, L.cd(j));
+  }
+  for (let j = 0; j < L.nRows - 1; j++) {
+    const zd = D / 2 + L.cz0(j) + L.cd(j);
+    for (let i = 0; i < L.nCols; i++) pushSeg(`h:${j}:${i}`, W / 2 + L.cx0(i), zd, L.cw(i), wall);
+  }
+
+  const cells = [];
+  for (let i = 0; i < L.nCols; i++)
+    for (let j = 0; j < L.nRows; j++) {
+      const x0 = W / 2 + L.cx0(i), z0 = D / 2 + L.cz0(j);
+      const selCell = selection?.type === "cell" && selection.i === i && selection.j === j;
+      const lvl = getCellLvl(c, i, j);
+      cells.push(
+        <g key={`c${i}-${j}`} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); onSelect({ type: "cell", i, j }); }}>
+          <rect
+            x={x0} y={z0} width={L.cw(i)} height={L.cd(j)}
+            fill={selCell ? "#DBEAFE" : lvl > 0 ? "#EAE4D8" : "#FFFFFF"} stroke={selCell ? SEL : "none"} strokeWidth={0.5}
+          />
+          {lvl > 0 && (
+            <text x={x0 + L.cellW / 2} y={z0 + L.cellD / 2} textAnchor="middle" dominantBaseline="central"
+              fontSize={Math.min(L.cw(i), L.cd(j)) * 0.3} fill="#8A7B5C">
+              {lvl}
+            </text>
+          )}
+        </g>
+      );
+    }
+
+  return (
+    <svg
+      viewBox={`-2 -2 ${W + 4} ${D + 4}`}
+      style={{ width: "100%", maxHeight: 210, background: "#F1F5F9", borderRadius: 10, border: "1px solid #E4E9EF", display: "block" }}
+      onClick={() => onSelect(null)}
+    >
+      <rect x={0} y={0} width={W} height={D} fill="#CBD5E1" rx={1} />
+      {cells}
+      {segs}
+    </svg>
+  );
+}
+
+function cellKeys(c, i, j) {
+  const L = layout(c);
+  return [
+    { side: "Ближняя", key: j === 0 ? `o:n:${i}` : `h:${j - 1}:${i}`, slot: j === 0 ? "t1" : "t2" },
+    { side: "Дальняя", key: j === L.nRows - 1 ? `o:s:${i}` : `h:${j}:${i}`, slot: "t1" },
+    { side: "Левая", key: i === 0 ? `o:w:${j}` : `v:${i - 1}:${j}`, slot: i === 0 ? "t1" : "t2" },
+    { side: "Правая", key: i === L.nCols - 1 ? `o:e:${j}` : `v:${i}:${j}`, slot: "t1" },
+  ];
+}
+
+// подписи концов сегмента для спуска кромки (вдоль оси сегмента)
+const endLabels = (key) => {
+  const p = key.split(":");
+  const t = p[0] === "o" ? p[1] : p[0];
+  // сегменты вдоль Z (верт. перегородки, стенки W/E): ближний/дальний край
+  if (t === "v" || t === "w" || t === "e") return ["К ближнему краю", "К дальнему краю"];
+  return ["Влево", "Вправо"]; // сегменты вдоль X
+};
+
+const wallTitle = (key) => {
+  const [t] = key.split(":");
+  if (t === "o") return "Внешняя стенка";
+  return t === "v" ? "Перегородка (между колонками)" : "Перегородка (между рядами)";
+};
+
+// ══════════════════════════════════════════════════════════════
+// Приложение
+// ══════════════════════════════════════════════════════════════
+let nextId = 2;
+const makeContainer = (src, gx, gy) => ({
+  id: nextId++,
+  gx, gy,
+  W: src?.W ?? 170, D: src?.D ?? 170, H: src?.H ?? 30,
+  cols: src?.cols ?? 1, rows: src?.rows ?? 1,
+  gridMode: src?.gridMode ?? "count", cellWt: src?.cellWt ?? 40, cellDt: src?.cellDt ?? 40,
+  wall: src?.wall ?? 1.6, wallOut: src?.wallOut ?? CONN.minWall, floor: src?.floor ?? 1.6,
+  walls: {},
+  cells: {},
+  lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
+});
+
+// автосохранение в localStorage: на сервере работает всегда; там, где
+// хранилище недоступно (песочницы предпросмотра), молча пропускаем
+function loadSaved() {
+  try {
+    const raw = window.localStorage.getItem("trayGenState");
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.containers) || !d.containers.length) return null;
+    d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
+    nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
+    return d;
+  } catch (e) {
+    return null;
+  }
+}
+const SAVED = loadSaved();
+
+export default function TrayGenerator() {
+  const [containers, setContainers] = useState(() => (SAVED ? SAVED.containers : [{ ...makeContainer(null, 0, 0), id: 1 }]));
+  const [sel, setSel] = useState(0);
+  const [selection, setSelection] = useState(null);
+  const [selMode, setSelMode] = useState("seg"); // 'seg' | 'line'
+  const [connect, setConnect] = useState(SAVED ? SAVED.connect !== false : true);
+  // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
+  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 100, layD: 100 });
+  const [tab, setTab] = useState("model");
+  const [openSecs, setOpenSecs] = useState(SAVED?.openSecs ?? { outer: true, cells: true, walls: true, export: true });
+  const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
+
+  // автосохранение при каждом изменении
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, openSecs }));
+    } catch (e) {}
+  }, [containers, limits, connect, openSecs]);
+
+  const cur = containers[sel];
+
+  const updLimits = (patch) => {
+    const nl = { ...limits, ...patch };
+    // габариты и высоты стенок не могут превышать лимиты принтера
+    setContainers((cs) =>
+      cs.map((c) => ({
+        ...c,
+        W: Math.min(c.W, nl.maxW),
+        D: Math.min(c.D, nl.maxD),
+        H: Math.min(c.H, nl.maxH),
+        walls: Object.fromEntries(
+          Object.entries(c.walls).map(([k, w]) => [k, w.h === undefined ? w : { ...w, h: Math.min(w.h, nl.maxH) }])
+        ),
+      }))
+    );
+    setLimits(nl);
+  };
+
+  const updCur = (patch) => {
+    setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
+    if (
+      patch.cols !== undefined || patch.rows !== undefined ||
+      patch.gridMode !== undefined || patch.cellWt !== undefined || patch.cellDt !== undefined ||
+      (cur.gridMode === "size" && (patch.W !== undefined || patch.D !== undefined || patch.wall !== undefined || patch.wallOut !== undefined))
+    ) setSelection(null);
+  };
+  const updWall = (key, patch) => updWalls([key], patch);
+  const updWalls = (keys, patch) => {
+    if (patch.h !== undefined) patch = { ...patch, h: Math.min(patch.h, limits.maxH) };
+    setContainers((cs) =>
+      cs.map((c, idx) => {
+        if (idx !== sel) return c;
+        const walls = { ...c.walls };
+        for (const key of keys) walls[key] = { ...(walls[key] ?? defWall(c)), ...patch };
+        return { ...c, walls };
+      })
+    );
+  };
+
+  // изменение параметров с учётом замков: при замке ячейки контейнер
+  // подстраивает внешний размер, сохраняя внутренние габариты ячейки
+  const applyParam = (patch) => {
+    const lockO = cur.lockOuter, lockC = cur.lockCell;
+    if (lockC && lockO) return; // оба замка: структура заблокирована
+    if (lockC && cur.gridMode !== "size") {
+      const m = { ...cur, ...patch };
+      const W2 = 2 * m.wallOut + m.cols * cur.cellW0 + (m.cols - 1) * m.wall;
+      const D2 = 2 * m.wallOut + m.rows * cur.cellD0 + (m.rows - 1) * m.wall;
+      if (W2 > limits.maxW + 0.01 || D2 > limits.maxD + 0.01 || W2 < 30 || D2 < 30) return; // не влезает в принтер
+      updCur({ ...patch, W: Math.round(W2 * 10) / 10, D: Math.round(D2 * 10) / 10 });
+      return;
+    }
+    updCur(patch);
+  };
+
+  // Магнит к краям раскладки: после изменения ширины/глубины контейнера
+  // свободные (незалоченные) колонки/ряды подтягиваются так, чтобы сборка
+  // заполняла лимит раскладки впритык — при уменьшении растягиваются,
+  // при увеличении ужимаются.
+  const applyOuterDim = (patch) => {
+    const isW = "W" in patch;
+    const axis = isW ? "W" : "D";
+    const gKey = isW ? "gx" : "gy";
+    const limitMM = (isW ? limits.layW : limits.layD) * 10;
+    const maxAxis = isW ? limits.maxW : limits.maxD;
+    const myG = cur[gKey];
+    const myId = cur.id;
+    setContainers((cs) => {
+      let next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
+      if (next.length < 2) return next;
+      const groupOf = (g) => next.filter((c) => c[gKey] === g);
+      const gs = [...new Set(next.map((c) => c[gKey]))];
+      const widthOf = (g) => Math.max(...groupOf(g).map((c) => c[axis]));
+      const total = gs.reduce((sum, g) => sum + widthOf(g), 0);
+      const gap = limitMM - total; // >0 — растянуть соседей, <0 — сжать
+      if (Math.abs(gap) < 0.05) return next;
+      const adjustable = gs.filter(
+        (g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell)
+      );
+      if (!adjustable.length) return next;
+      const share = gap / adjustable.length;
+      const targets = new Map();
+      for (const g of adjustable)
+        targets.set(g, Math.max(30, Math.min(maxAxis, Math.round((widthOf(g) + share) * 10) / 10)));
+      return next.map((c) =>
+        c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell
+          ? { ...c, [axis]: targets.get(c[gKey]) }
+          : c
+      );
+    });
+  };
+
+  // сброс к значениям по умолчанию: без диалогов и перезагрузки,
+  // двойное нажатие как защита от случайного клика
+  const [resetArm, setResetArm] = useState(false);
+  const doReset = () => {
+    if (!resetArm) {
+      setResetArm(true);
+      setTimeout(() => setResetArm(false), 3000);
+      return;
+    }
+    setResetArm(false);
+    try { window.localStorage.removeItem("trayGenState"); } catch (e) {}
+    const fresh = { ...makeContainer(null, 0, 0), id: 1 };
+    nextId = 2;
+    setContainers([fresh]);
+    setSel(0);
+    setSelection(null);
+    setConnect(true);
+    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 100, layD: 100 });
+    setOpenSecs({ outer: true, cells: true, walls: true, export: true });
+    setTab("model");
+  };
+
+  const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
+  const toggleLockCell = () => {
+    if (cur.lockCell) updCur({ lockCell: false });
+    else if (cur.gridMode === "size") {
+      // в режиме «размер ячейки» фиксируем именно целевые размеры
+      updCur({ lockCell: true, cellW0: cur.cellWt, cellD0: cur.cellDt });
+    } else {
+      const Lc = layout(cur);
+      updCur({ lockCell: true, cellW0: Lc.cellW, cellD0: Lc.cellD });
+    }
+  };
+
+  // переключение режима деления без потери сетки: количество ячеек
+  // переносится; при активном замке ячейки контейнер подгоняется так,
+  // чтобы размеры ячеек сохранились точно
+  const switchGridMode = (m) => {
+    if ((cur.gridMode || "count") === m) return;
+    const Lc = layout(cur);
+    if (m === "size") {
+      updCur({
+        gridMode: "size",
+        cellWt: Math.max(15, Math.min(160, Math.round(Lc.cellW))),
+        cellDt: Math.max(15, Math.min(160, Math.round(Lc.cellD))),
+      });
+    } else {
+      const patch = { gridMode: "count", cols: Lc.nCols, rows: Lc.nRows };
+      if (cur.lockCell) {
+        const W2 = 2 * cur.wallOut + Lc.nCols * cur.cellW0 + (Lc.nCols - 1) * cur.wall;
+        const D2 = 2 * cur.wallOut + Lc.nRows * cur.cellD0 + (Lc.nRows - 1) * cur.wall;
+        if (W2 >= 30 && W2 <= limits.maxW + 0.01) patch.W = Math.round(W2 * 10) / 10;
+        if (D2 >= 30 && D2 <= limits.maxD + 0.01) patch.D = Math.round(D2 * 10) / 10;
+      }
+      updCur(patch);
+    }
+  };
+
+  const updCell = (i, j, patch) => {
+    setContainers((cs) =>
+      cs.map((cc, idx) => {
+        if (idx !== sel) return cc;
+        const k = i + ":" + j;
+        return { ...cc, cells: { ...(cc.cells || {}), [k]: { ...((cc.cells || {})[k] || {}), ...patch } } };
+      })
+    );
+  };
+
+  const handleSelect = (s) => {
+    if (s?.type === "wall" && selMode === "line") {
+      setSelection({ type: "line", src: s.key, ...lineOf(cur, s.key) });
+    } else setSelection(s);
+  };
+
+  const posMap = useMemo(() => {
+    const m = new Map();
+    containers.forEach((c, i) => m.set(`${c.gx},${c.gy}`, i));
+    return m;
+  }, [containers]);
+
+  // ── сборка: соединители по соседям + раскладка сеткой ──
+  const built = useMemo(() => {
+    const nb = (c, dx, dy) => {
+      const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
+      return i === undefined ? null : containers[i];
+    };
+    // физическая сетка: ширина колонки/глубина ряда = максимум по контейнерам
+    const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
+    const gx0 = Math.min(...gxs), gx1 = Math.max(...gxs);
+    const gy0 = Math.min(...gys), gy1 = Math.max(...gys);
+    const gap = connect ? 0 : 6;
+    const colW = {}, rowD = {};
+    for (let g = gx0; g <= gx1; g++)
+      colW[g] = Math.max(30, ...containers.filter((c) => c.gx === g).map((c) => c.W));
+    for (let g = gy0; g <= gy1; g++)
+      rowD[g] = Math.max(30, ...containers.filter((c) => c.gy === g).map((c) => c.D));
+    const colX = {}, rowZ = {};
+    let acc = 0;
+    for (let g = gx0; g <= gx1; g++) { colX[g] = acc + colW[g] / 2; acc += colW[g] + gap; }
+    const totalW = acc - gap;
+    acc = 0;
+    for (let g = gy0; g <= gy1; g++) { rowZ[g] = acc + rowD[g] / 2; acc += rowD[g] + gap; }
+    const totalD = acc - gap;
+
+    const items = containers.map((c) => {
+      const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
+      const conn = !connect
+        ? { N: null, S: null, W: null, E: null }
+        : {
+            E: E ? { male: true, vs: connectorVs(Math.min(c.D, E.D)) } : null,
+            W: Wn ? { male: false, vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
+            S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
+            N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
+          };
+      return {
+        c,
+        solids: buildContainer(c, conn),
+        ox: colX[c.gx] - totalW / 2,
+        oz: rowZ[c.gy] - totalD / 2,
+      };
+    });
+    return { items, totalW, totalD };
+  }, [containers, connect, posMap]);
+
+  // актуальное состояние для пикинга кликом (эффект сцены создаётся один раз)
+  const pickRef = useRef({});
+  pickRef.current = { containers, sel, selMode, setSel, setSelection };
+
+  // ── three.js ──
+  const mountRef = useRef(null);
+  const groupRef = useRef(null);
+  const cameraRef = useRef(null);
+  const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, lastX: 0, lastY: 0 });
+
+  const applyCamera = useCallback(() => {
+    const cam = cameraRef.current, o = orbitRef.current;
+    if (!cam) return;
+    const y = o.radius * Math.cos(o.phi);
+    const r = o.radius * Math.sin(o.phi);
+    cam.position.set(r * Math.sin(o.theta), y + 15, r * Math.cos(o.theta));
+    cam.lookAt(0, 12, 0);
+  }, []);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xeef1f5);
+    const camera = new THREE.PerspectiveCamera(40, mount.clientWidth / mount.clientHeight, 1, 3000);
+    cameraRef.current = camera;
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    mount.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xb8c0cc, 0.95));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    dir.position.set(140, 220, 90);
+    scene.add(dir);
+    const grid = new THREE.GridHelper(500, 50, 0xc3ccd8, 0xd9e0e9);
+    grid.position.y = -0.05;
+    scene.add(grid);
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.MeshBasicMaterial({ color: 0xe4e9ef }));
+    plate.rotation.x = -Math.PI / 2;
+    plate.position.y = -0.1;
+    scene.add(plate);
+
+    const group = new THREE.Group();
+    groupRef.current = group;
+    scene.add(group);
+    applyCamera();
+
+    let raf;
+    const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
+    loop();
+
+    const onDown = (e) => { const o = orbitRef.current; o.dragging = true; o.moved = 0; o.lastX = e.clientX; o.lastY = e.clientY; };
+    const onMove = (e) => {
+      const o = orbitRef.current;
+      if (!o.dragging) return;
+      o.moved = (o.moved || 0) + Math.abs(e.clientX - o.lastX) + Math.abs(e.clientY - o.lastY);
+      o.theta -= (e.clientX - o.lastX) * 0.008;
+      o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - (e.clientY - o.lastY) * 0.008));
+      o.lastX = e.clientX; o.lastY = e.clientY;
+      applyCamera();
+    };
+    const onUp = () => { orbitRef.current.dragging = false; };
+    const onWheel = (e) => {
+      e.preventDefault();
+      const o = orbitRef.current;
+      o.radius = Math.min(1200, Math.max(90, o.radius * (1 + e.deltaY * 0.001)));
+      applyCamera();
+    };
+    // выбор элементов кликом прямо на превью: рейкаст → тег треугольника
+    const raycaster = new THREE.Raycaster();
+    const onClickPick = (e) => {
+      if ((orbitRef.current.moved || 0) > 5) return; // это было вращение
+      const rect = renderer.domElement.getBoundingClientRect();
+      const m = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(m, camera);
+      const hits = raycaster.intersectObjects(group.children, false);
+      const st = pickRef.current;
+      if (!hits.length) { st.setSelection(null); return; }
+      const hit = hits[0];
+      const ud = hit.object.userData;
+      if (!ud || !ud.tags) return;
+      const tag = ud.tags[hit.faceIndex];
+      const cont = st.containers[ud.cIdx];
+      if (!cont) return;
+      if (ud.cIdx !== st.sel) st.setSel(ud.cIdx);
+      if (tag === "conn") { st.setSelection(null); return; }
+      if (tag === "floor") {
+        const Lc = layout(cont);
+        const lx = hit.point.x - ud.ox, lz = hit.point.z - ud.oz;
+        let ci = -1, cj = -1;
+        for (let i = 0; i < Lc.nCols; i++)
+          if (lx >= Lc.cx0(i) - cont.wall && lx <= Lc.cx0(i) + Lc.cw(i) + cont.wall) { ci = i; break; }
+        for (let j = 0; j < Lc.nRows; j++)
+          if (lz >= Lc.cz0(j) - cont.wall && lz <= Lc.cz0(j) + Lc.cd(j) + cont.wall) { cj = j; break; }
+        st.setSelection(ci >= 0 && cj >= 0 ? { type: "cell", i: ci, j: cj } : null);
+        return;
+      }
+      if (st.selMode === "line") st.setSelection({ type: "line", src: tag, ...lineOf(cont, tag) });
+      else st.setSelection({ type: "wall", key: tag });
+    };
+
+    const el = renderer.domElement;
+    el.style.touchAction = "none";
+    el.addEventListener("click", onClickPick);
+    el.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    const onResize = () => {
+      camera.aspect = mount.clientWidth / mount.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(mount.clientWidth, mount.clientHeight);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("click", onClickPick);
+      el.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      el.removeEventListener("wheel", onWheel);
+      window.removeEventListener("resize", onResize);
+      renderer.dispose();
+      mount.removeChild(el);
+    };
+  }, [applyCamera]);
+
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group) return;
+    while (group.children.length) {
+      const ch = group.children.pop();
+      ch.geometry?.dispose();
+      ch.material?.dispose();
+      group.remove(ch);
+    }
+    const selKeys = new Set();
+    if (selection?.type === "wall") selKeys.add(selection.key);
+    if (selection?.type === "line") selection.keys.forEach((k) => selKeys.add(k));
+    if (selection?.type === "cell") cellKeys(cur, selection.i, selection.j).forEach((k) => selKeys.add(k.key));
+
+    built.items.forEach(({ solids, ox, oz }, idx) => {
+      const base = [], hi = [], baseTags = [], hiTags = [];
+      for (const s of solids) {
+        const isHi = idx === sel && selKeys.has(s.tag);
+        const arr = isHi ? hi : base;
+        const tagArr = isHi ? hiTags : baseTags;
+        for (const [a, b, c] of s.tris) { arr.push(...a, ...b, ...c); tagArr.push(s.tag); }
+      }
+      const addMesh = (arr, color, opacity, tags) => {
+        if (!arr.length) return;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(arr), 3));
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true, transparent: opacity < 1, opacity });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(ox, 0, oz);
+        mesh.userData = { tags, cIdx: idx, ox, oz };
+        group.add(mesh);
+      };
+      addMesh(base, idx === sel ? 0xf2620f : 0xf5a06a, idx === sel ? 1 : 0.92, baseTags);
+      addMesh(hi, 0x2563eb, 1, hiTags);
+    });
+
+    // рамка лимита раскладки на столе — видно, как сборка «липнет» к краям
+    const bw = limits.layW * 10, bd = limits.layD * 10;
+    const bGeo = new THREE.BufferGeometry();
+    bGeo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        new Float32Array([
+          -bw / 2, 0.08, -bd / 2, bw / 2, 0.08, -bd / 2,
+          bw / 2, 0.08, bd / 2, -bw / 2, 0.08, bd / 2,
+        ]),
+        3
+      )
+    );
+    const bLine = new THREE.LineLoop(bGeo, new THREE.LineBasicMaterial({ color: 0x8a97a8 }));
+    bLine.userData = {};
+    bLine.raycast = () => {}; // рамка не должна перехватывать клики выбора
+    group.add(bLine);
+  }, [built, selection, sel, cur, limits]);
+
+  const L = layout(cur);
+  const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
+
+  const exportOne = (idx) => {
+    const { solids, c } = built.items[idx];
+    exportSTL(solids, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
+  };
+  const exportAll = () => built.items.forEach((_, idx) => setTimeout(() => exportOne(idx), idx * 500));
+
+  const [solidBusy, setSolidBusy] = useState(false);
+  const exportSolid = async (idx) => {
+    setSolidBusy(true);
+    try {
+      const wasm = await getManifold();
+      const { Manifold, Mesh } = wasm;
+      const { solids, c } = built.items[idx];
+      const parts = solids.map((sl) => {
+        const { vp, tv } = weldTris(sl.tris);
+        return new Manifold(new Mesh({ numProp: 3, vertProperties: vp, triVerts: tv }));
+      });
+      const uni = Manifold.union(parts);
+      const mesh = uni.getMesh();
+      exportSTLIndexed(mesh.vertProperties, mesh.triVerts, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_solid.stl`);
+      parts.forEach((p) => p.delete && p.delete());
+      uni.delete && uni.delete();
+    } catch (e) {
+      console.error(e);
+      alert("Не удалось собрать цельное тело (библиотека Manifold не загрузилась или геометрия не сошлась). Скачиваю обычный STL — слайсер объединит тела сам.");
+      exportOne(idx);
+    } finally {
+      setSolidBusy(false);
+    }
+  };
+
+  // ── карта раскладки ──
+  const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
+  const rGx0 = Math.min(...gxs), rGx1 = Math.max(...gxs);
+  const rGy0 = Math.min(...gys), rGy1 = Math.max(...gys);
+  const gx0 = rGx0 - 1, gx1 = rGx1 + 1, gy0 = rGy0 - 1, gy1 = rGy1 + 1;
+  // Размеры нового контейнера: стандартный (120×80), НО если после него
+  // в лимит раскладки уже не влезет ещё один стандартный — он растягивается
+  // и заполняет оставшееся место (в пределах лимита принтера).
+  // В существующей колонке/ряду размер совпадает с ними — для плотной стыковки.
+  // «стандартный» контейнер = максимум принтера по ширине и глубине
+  const STD = { W: limits.maxW, D: limits.maxD };
+  const colWidthAt = (g) => {
+    const ws = containers.filter((c) => c.gx === g).map((c) => c.W);
+    return ws.length ? Math.max(...ws) : 0;
+  };
+  const rowDepthAt = (g) => {
+    const ds = containers.filter((c) => c.gy === g).map((c) => c.D);
+    return ds.length ? Math.max(...ds) : 0;
+  };
+  const plannedDims = (gx, gy) => {
+    // остаток, не влезающий в один контейнер по лимиту принтера,
+    // делится пополам на ДВА контейнера (splitX/splitY)
+    let W, splitX = null;
+    if (gx >= rGx0 && gx <= rGx1 && colWidthAt(gx) > 0) {
+      W = Math.min(colWidthAt(gx), limits.maxW);
+    } else {
+      let used = 0;
+      for (let g = Math.min(rGx0, gx); g <= Math.max(rGx1, gx); g++)
+        if (g !== gx) used += colWidthAt(g) || (g >= rGx0 && g <= rGx1 ? 30 : 0);
+      const remain = limits.layW * 10 - used;
+      if (remain < STD.W * 2) {
+        if (remain <= limits.maxW) W = Math.max(30, remain); // последний — заполняет остаток
+        else {
+          const half = Math.round((remain / 2) * 10) / 10;
+          if (half <= limits.maxW && half >= 30) {
+            splitX = [half, Math.round((remain - half) * 10) / 10];
+            W = splitX[0];
+          } else W = Math.min(STD.W, limits.maxW);
+        }
+      } else W = STD.W;
+      W = Math.max(30, Math.min(W, limits.maxW));
+    }
+    let D, splitY = null;
+    if (gy >= rGy0 && gy <= rGy1 && rowDepthAt(gy) > 0) {
+      D = Math.min(rowDepthAt(gy), limits.maxD);
+    } else {
+      let used = 0;
+      for (let g = Math.min(rGy0, gy); g <= Math.max(rGy1, gy); g++)
+        if (g !== gy) used += rowDepthAt(g) || (g >= rGy0 && g <= rGy1 ? 30 : 0);
+      const remain = limits.layD * 10 - used;
+      if (remain < STD.D * 2) {
+        if (remain <= limits.maxD) D = Math.max(30, remain);
+        else {
+          const half = Math.round((remain / 2) * 10) / 10;
+          if (half <= limits.maxD && half >= 30) {
+            splitY = [half, Math.round((remain - half) * 10) / 10];
+            D = splitY[0];
+          } else D = Math.min(STD.D, limits.maxD);
+        }
+      } else D = STD.D;
+      D = Math.max(30, Math.min(D, limits.maxD));
+    }
+    return { W: Math.round(W * 10) / 10, D: Math.round(D * 10) / 10, splitX, splitY };
+  };
+  const canPlace = (gx, gy) => {
+    const pd = plannedDims(gx, gy);
+    let wSum = pd.splitX ? pd.splitX[1] : 0;
+    for (let g = Math.min(rGx0, gx); g <= Math.max(rGx1, gx); g++)
+      wSum += g === gx ? Math.max(colWidthAt(g), pd.W) : colWidthAt(g) || 30;
+    let dSum = pd.splitY ? pd.splitY[1] : 0;
+    for (let g = Math.min(rGy0, gy); g <= Math.max(rGy1, gy); g++)
+      dSum += g === gy ? Math.max(rowDepthAt(g), pd.D) : rowDepthAt(g) || 30;
+    return wSum <= limits.layW * 10 + 0.5 && dSum <= limits.layD * 10 + 0.5;
+  };
+  const gridCells = [];
+  for (let gy = gy0; gy <= gy1; gy++)
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const idx = posMap.get(`${gx},${gy}`);
+      if (idx !== undefined) {
+        gridCells.push(
+          <button
+            key={`${gx},${gy}`}
+            onClick={() => { setSel(idx); setSelection(null); }}
+            style={{
+              width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+              border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+              background: idx === sel ? "#FFF3EB" : "#fff", color: idx === sel ? ACCENT : "#3D4A5C",
+            }}
+          >
+            №{idx + 1}
+          </button>
+        );
+      } else {
+        const adjacent =
+          posMap.has(`${gx + 1},${gy}`) || posMap.has(`${gx - 1},${gy}`) ||
+          posMap.has(`${gx},${gy + 1}`) || posMap.has(`${gx},${gy - 1}`);
+        gridCells.push(
+          adjacent && canPlace(gx, gy) ? (
+            <button
+              key={`${gx},${gy}`}
+              onClick={() => {
+                const pd = plannedDims(gx, gy);
+                const fresh = [{ ...makeContainer(null, gx, gy), W: pd.W, D: pd.D }];
+                if (pd.splitX) {
+                  const dir = gx > rGx1 ? 1 : -1;
+                  fresh.push({ ...makeContainer(null, gx + dir, gy), W: pd.splitX[1], D: pd.D });
+                } else if (pd.splitY) {
+                  const dir = gy > rGy1 ? 1 : -1;
+                  fresh.push({ ...makeContainer(null, gx, gy + dir), W: pd.W, D: pd.splitY[1] });
+                }
+                setContainers((cs) => [...cs, ...fresh]);
+                setSel(containers.length);
+                setSelection(null);
+              }}
+              style={{ width: 38, height: 34, borderRadius: 8, fontSize: 15, cursor: "pointer", border: "1px dashed #A9B4C2", background: "transparent", color: "#8A97A8" }}
+            >
+              +
+            </button>
+          ) : (
+            <div key={`${gx},${gy}`} style={{ width: 38, height: 34 }} />
+          )
+        );
+      }
+    }
+
+  // ── редактор стенки/линии/ячейки ──
+  let editor = null;
+  if (selection?.type === "wall") {
+    const key = selection.key;
+    const w = getWall(cur, key);
+    const isOuter = key.startsWith("o");
+    editor = (
+      <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>{wallTitle(key)}</div>
+        <Param label="Высота" unit="мм" value={w.h} min={0} max={limits.maxH} step={0.5} onChange={(v) => updWall(key, { h: v })} />
+        <Param label={isOuter ? "Наклон внутрь" : "Наклон в одну сторону"} unit="°" value={w.t1} min={0} max={50} step={1} onChange={(v) => updWall(key, { t1: v })} />
+        {!isOuter && (
+          <Param label="Наклон в другую сторону" unit="°" value={w.t2} min={0} max={50} step={1} onChange={(v) => updWall(key, { t2: v })} />
+        )}
+        <Param label="Скругление кромки" unit="мм" value={w.rnd} min={0} max={8} step={0.25} onChange={(v) => updWall(key, { rnd: v })} />
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Спуск кромки дугой</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
+          {[["none", "Нет"], ["a", endLabels(key)[0]], ["b", endLabels(key)[1]]].map(([d, t]) => (
+            <button
+              key={d}
+              onClick={() => updWall(key, { drop: d })}
+              style={{
+                padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: w.drop === d ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: w.drop === d ? "#DBEAFE" : "#fff", color: w.drop === d ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {w.drop !== "none" && (
+          <Param label="Высота в низкой точке" unit="мм" value={Math.min(w.dropH, w.h)} min={0} max={w.h} step={0.5} onChange={(v) => updWall(key, { dropH: v })} />
+        )}
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Заполнение стенки</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+          {[["solid", "Сплошная"], ["hex", "Соты"], ["lines", "Линии"]].map(([f, t]) => (
+            <button
+              key={f}
+              onClick={() => updWall(key, { face: f })}
+              style={{
+                padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: w.face === f ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: w.face === f ? "#DBEAFE" : "#fff", color: w.face === f ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {w.face === "hex" && (
+          <Param label="Размер соты" unit="мм" value={w.hexSize} min={5} max={20} step={0.5} onChange={(v) => updWall(key, { hexSize: v })} />
+        )}
+        {w.face === "lines" && (
+          <Param label="Шаг линий" unit="мм" value={w.lineStep} min={6} max={30} step={0.5} onChange={(v) => updWall(key, { lineStep: v })} />
+        )}
+        {w.face === "lines" && (
+          <button
+            onClick={() => updWall(key, { seed: Math.floor(Math.random() * 1e6) + 1 })}
+            style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#3D4A5C", marginBottom: 8 }}
+          >
+            Перемешать узор
+          </button>
+        )}
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
+          Скругление катает верхнюю плоскость радиусом, толщина стенки не меняется. Соты работают без спуска кромки (спуск строит стенку сплошной); наклонная плоскость при сотах тоже становится сотовой панелью. Высота 0 объединяет ячейки; выше {cur.H} мм — стенка поднимется над контейнером. У внешних стенок скругляется только внутренний угол — наружная плоскость остаётся ровной для стыковки.
+        </p>
+      </div>
+    );
+  } else if (selection?.type === "line") {
+    const first = getWall(cur, selection.keys[0]);
+    editor = (
+      <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>{selection.label}</div>
+        <Param label="Высота всех сегментов" unit="мм" value={first.h} min={0} max={limits.maxH} step={0.5} onChange={(v) => updWalls(selection.keys, { h: v })} />
+        <Param label={selection.outer ? "Наклон внутрь" : "Наклон в одну сторону"} unit="°" value={first.t1} min={0} max={50} step={1} onChange={(v) => updWalls(selection.keys, { t1: v })} />
+        {!selection.outer && (
+          <Param label="Наклон в другую сторону" unit="°" value={first.t2} min={0} max={50} step={1} onChange={(v) => updWalls(selection.keys, { t2: v })} />
+        )}
+        <Param label="Скругление кромки" unit="мм" value={first.rnd} min={0} max={8} step={0.25} onChange={(v) => updWalls(selection.keys, { rnd: v })} />
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Спуск кромки дугой</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
+          {[["none", "Нет"], ["a", endLabels(selection.src)[0]], ["b", endLabels(selection.src)[1]]].map(([d, t]) => (
+            <button
+              key={d}
+              onClick={() => updWalls(selection.keys, { drop: d })}
+              style={{
+                padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: first.drop === d ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: first.drop === d ? "#DBEAFE" : "#fff", color: first.drop === d ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {first.drop !== "none" && (
+          <Param label="Высота в низкой точке" unit="мм" value={Math.min(first.dropH, first.h)} min={0} max={first.h} step={0.5} onChange={(v) => updWalls(selection.keys, { dropH: v })} />
+        )}
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Заполнение стенки</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+          {[["solid", "Сплошная"], ["hex", "Соты"], ["lines", "Линии"]].map(([f, t]) => (
+            <button
+              key={f}
+              onClick={() => updWalls(selection.keys, { face: f })}
+              style={{
+                padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: first.face === f ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: first.face === f ? "#DBEAFE" : "#fff", color: first.face === f ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {first.face === "hex" && (
+          <Param label="Размер соты" unit="мм" value={first.hexSize} min={5} max={20} step={0.5} onChange={(v) => updWalls(selection.keys, { hexSize: v })} />
+        )}
+        {first.face === "lines" && (
+          <Param label="Шаг линий" unit="мм" value={first.lineStep} min={6} max={30} step={0.5} onChange={(v) => updWalls(selection.keys, { lineStep: v })} />
+        )}
+        {first.face === "lines" && (
+          <button
+            onClick={() => updWalls(selection.keys, { seed: Math.floor(Math.random() * 1e6) + 1 })}
+            style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#3D4A5C", marginBottom: 8 }}
+          >
+            Перемешать узор
+          </button>
+        )}
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
+          Значение применяется сразу ко всем {selection.keys.length} сегментам линии; дуга спуска строится в каждом сегменте отдельно.
+        </p>
+      </div>
+    );
+  } else if (selection?.type === "cell") {
+    const keys = cellKeys(cur, selection.i, selection.j);
+    const firstH = getWall(cur, keys[0].key).h;
+    editor = (
+      <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>
+          Ячейка {selection.i + 1}×{selection.j + 1}
+        </div>
+        <Param
+          label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
+          onChange={(v) => updWalls(keys.map((k) => k.key), { h: v })}
+        />
+        <Param
+          label="Уровень пола (лесенка)" unit="мм" value={getCellLvl(cur, selection.i, selection.j)}
+          min={0} max={Math.max(0, cur.H - 4)} step={0.5}
+          onChange={(v) => updCell(selection.i, selection.j, { lvl: v })}
+        />
+        {(() => {
+          const cc = (cur.cells || {})[selection.i + ":" + selection.j] || {};
+          const fDir = cc.tiltDir || "none";
+          return (
+            <div>
+              <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Наклон пола (спуск к стороне)</div>
+              <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
+                {[["none", "Нет"], ["n", "Ближней"], ["s", "Дальней"], ["w", "Левой"], ["e", "Правой"]].map(([d, t]) => (
+                  <button
+                    key={d}
+                    onClick={() => updCell(selection.i, selection.j, { tiltDir: d })}
+                    style={{
+                      padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      border: fDir === d ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                      background: fDir === d ? "#DBEAFE" : "#fff", color: fDir === d ? SEL : "#3D4A5C",
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              {fDir !== "none" && (
+                <Param label="Угол наклона пола" unit="°" value={cc.tiltA || 5} min={1} max={30} step={0.5}
+                  onChange={(v) => updCell(selection.i, selection.j, { tiltA: v })} />
+              )}
+            </div>
+          );
+        })()}
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Наклон стенок внутрь</div>
+        {keys.map(({ side, key, slot }) => (
+          <Param
+            key={key + slot} label={side} unit="°"
+            value={getWall(cur, key)[slot]} min={0} max={50} step={1}
+            onChange={(v) => updWall(key, { [slot]: v })}
+          />
+        ))}
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
+          Высота выше {cur.H} мм делает ячейку-башенку. Под поднятым полом — редкая сетка рёбер (шаг ~12 мм): она печатается со стола и служит опорой, поддержки не нужны.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      display: "flex", flexWrap: "wrap", height: "100vh", background: "#F6F8FA",
+      fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif", color: "#16202E", overflow: "hidden",
+    }}>
+      <div style={{ width: 310, minWidth: 270, flex: "0 1 310px", padding: "18px 18px 30px", background: "#FDFDFE", borderRight: "1px solid #E4E9EF", overflowY: "auto", maxHeight: "100vh" }}>
+        <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: ACCENT, fontWeight: 700 }}>
+          Генератор лотков
+        </div>
+        <h1 style={{ fontSize: 19, fontWeight: 700, margin: "3px 0 0" }}>Система контейнеров</h1>
+
+        <div style={{ display: "flex", gap: 6, margin: "12px 0 16px" }}>
+          {[["model", "Модель"], ["printer", "Принтер"], ["layout", "Раскладка"]].map(([t, n]) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                border: tab === t ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: tab === t ? "#FFF3EB" : "#fff", color: tab === t ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+
+        {tab === "layout" && (<div>
+        <SectionTitle>Раскладка</SectionTitle>
+        <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+          Нажми <b>+</b> — пристыкуется стандартный контейнер (размером с лимит принтера по ширине и глубине); когда места в лимите остаётся меньше, чем на два стандартных, новый растягивается и заполняет остаток (а если остаток больше лимита принтера — вставятся сразу два, пополам). В существующем ряду/колонке размер подстраивается под соседей.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" }}>
+          {gridCells}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {containers.length > 1 && (
+            <button
+              onClick={() => { setContainers((cs) => cs.filter((_, i) => i !== sel)); setSel(0); setSelection(null); }}
+              style={{ padding: "5px 10px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" }}
+            >
+              удалить №{sel + 1}
+            </button>
+          )}
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3D4A5C", cursor: "pointer" }}>
+            <input
+              type="checkbox" checked={connect}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setConnect(on);
+                if (on) setContainers((cs) => cs.map((c) => ({ ...c, wallOut: Math.max(c.wallOut, CONN.minWall) })));
+              }}
+              style={{ accentColor: ACCENT }}
+            />
+            Соединители
+          </label>
+        </div>
+
+        <SectionTitle>Лимит раскладки</SectionTitle>
+        <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />
+        <Param label="Раскладка по Y" unit="см" value={limits.layD} min={5} max={2000} step={1} onChange={(v) => updLimits({ layD: Math.round(v) })} />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
+          Лимит любой, задаётся в сантиметрах и вмещает контейнеры по внешней стороне. Сборка сейчас: {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
+        </p>
+        </div>)}
+
+        {tab === "printer" && (<div>
+        <SectionTitle>Лимиты принтера</SectionTitle>
+        <Param label="Макс. ширина" unit="мм" value={limits.maxW} min={50} max={500} step={1} onChange={(v) => updLimits({ maxW: v })} />
+        <Param label="Макс. глубина" unit="мм" value={limits.maxD} min={50} max={500} step={1} onChange={(v) => updLimits({ maxD: v })} />
+        <Param label="Макс. высота" unit="мм" value={limits.maxH} min={30} max={500} step={1} onChange={(v) => updLimits({ maxH: v })} />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
+          Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
+        </p>
+        </div>)}
+
+        {tab === "model" && (<div>
+        <Collapse title={`Внешний размер — контейнер №${sel + 1}`} open={openSecs.outer} onToggle={() => toggleSec("outer")}>
+        <button
+          onClick={toggleLockOuter}
+          style={{
+            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            border: cur.lockOuter ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
+            background: cur.lockOuter ? "#DBEAFE" : "#fff", color: cur.lockOuter ? SEL : "#3D4A5C",
+          }}
+        >
+          {cur.lockOuter ? "🔒" : "🔓"} Зафиксировать внешний размер
+        </button>
+        <Param label="Ширина" unit="мм" value={cur.W} min={30} max={limits.maxW} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ W: v })} />
+        <Param label="Глубина" unit="мм" value={cur.D} min={30} max={limits.maxD} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ D: v })} />
+        <Param label="Высота" unit="мм" value={cur.H} min={10} max={limits.maxH} step={1} disabled={cur.lockOuter} onChange={(v) => updCur({ H: v })} />
+        {cur.lockCell && (
+          <p style={{ fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 }}>
+            Ячейка зафиксирована по внутренним размерам: при изменении сетки и стенок контейнер подстраивается сам. Если новый размер не влезает в лимит принтера — изменение не применится.
+          </p>
+        )}
+
+        </Collapse>
+
+        <Collapse title="Ячейки и перегородки" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
+        <button
+          onClick={toggleLockCell}
+          style={{
+            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            border: cur.lockCell ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
+            background: cur.lockCell ? "#DBEAFE" : "#fff", color: cur.lockCell ? SEL : "#3D4A5C",
+          }}
+        >
+          {cur.lockCell ? "🔒" : "🔓"} Зафиксировать ячейку{cur.lockCell ? ` (${cur.cellW0.toFixed(1)}×${cur.cellD0.toFixed(1)} мм)` : ""}
+        </button>
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Деление на ячейки</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+          {[["count", "Количество"], ["size", "Размер ячейки"]].map(([m, t]) => (
+            <button
+              key={m}
+              onClick={() => switchGridMode(m)}
+              style={{
+                flex: 1, padding: "5px 4px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: (cur.gridMode || "count") === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: (cur.gridMode || "count") === m ? "#DBEAFE" : "#fff",
+                color: (cur.gridMode || "count") === m ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {cur.gridMode === "size" ? (
+          <div>
+            <Param label="Ячейка по ширине" unit="мм" value={cur.cellWt} min={15} max={160} step={1} onChange={(v) => updCur({ cellWt: v })} />
+            <Param label="Ячейка по глубине" unit="мм" value={cur.cellDt} min={15} max={160} step={1} onChange={(v) => updCur({ cellDt: v })} />
+            <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-4px 0 10px", lineHeight: 1.45 }}>
+              Контейнер заполняется ячейками этого внутреннего размера; последняя в каждом направлении забирает остаток (от одного до двух размеров). Сейчас: {layout(cur).nCols}×{layout(cur).nRows} ячеек.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
+            <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
+          </div>
+        )}
+        <Param
+          label="Внешние стенки" unit="мм" value={cur.wallOut}
+          min={connect ? CONN.minWall : 0.8} max={6} step={0.1}
+          disabled={cur.lockOuter && cur.lockCell}
+          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CONN.minWall) : v })}
+        />
+        {connect && (
+          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
+            Минимум {CONN.minWall} мм — паз соединителя прячется внутри стенки.
+          </p>
+        )}
+        <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
+        <Param label="Толщина дна" unit="мм" value={cur.floor} min={0.8} max={5} step={0.1} onChange={(v) => updCur({ floor: v })} />
+
+        </Collapse>
+
+        <Collapse title="Редактор стенок" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
+        <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+          Нажми на <b>стенку</b> или <b>ячейку</b> — на схеме или прямо на 3D-модели. Режим выбора стенки:
+        </p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          {[["seg", "Сегмент"], ["line", "Вся перегородка"]].map(([m, t]) => (
+            <button
+              key={m}
+              onClick={() => { setSelMode(m); setSelection(null); }}
+              style={{
+                padding: "5px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                border: selMode === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: selMode === m ? "#EFF6FF" : "#fff", color: selMode === m ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <Schematic c={cur} selection={selection} onSelect={handleSelect} />
+        {editor}
+        {Object.keys(cur.walls).length > 0 && (
+          <button
+            onClick={() => updCur({ walls: {} })}
+            style={{ marginTop: 10, padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#5A6B80" }}
+          >
+            Сбросить все стенки контейнера №{sel + 1}
+          </button>
+        )}
+
+        </Collapse>
+
+        <Collapse title="Экспорт" open={openSecs.export} onToggle={() => toggleSec("export")}>
+        <button
+          onClick={() => exportOne(sel)}
+          style={{
+            width: "100%", padding: "11px 0", background: ACCENT, color: "#fff", border: "none",
+            borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(242,98,15,0.35)",
+          }}
+        >
+          Скачать STL — контейнер №{sel + 1}
+        </button>
+        <button
+          onClick={() => !solidBusy && exportSolid(sel)}
+          disabled={solidBusy}
+          style={{
+            width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: solidBusy ? "#8A97A8" : "#16202E",
+            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700,
+            cursor: solidBusy ? "wait" : "pointer", opacity: solidBusy ? 0.7 : 1,
+          }}
+        >
+          {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
+        </button>
+        {containers.length > 1 && (
+          <button
+            onClick={exportAll}
+            style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: ACCENT, border: `1.5px solid ${ACCENT}`, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+          >
+            Скачать все ({containers.length} файла)
+          </button>
+        )}
+        <p style={{ fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 }}>
+          Миллиметры, вертикаль — Z. Пазы спрятаны внутри толщины стенки: ячейки не искажаются, контейнеры смыкаются вплотную. Сборка — вдвиганием сверху.
+        </p>
+        </Collapse>
+        </div>)}
+
+        <button
+          onClick={doReset}
+          style={{
+            width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
+            border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
+            background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
+          }}
+        >
+          {resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"}
+        </button>
+      </div>
+
+      <div style={{ flex: "1 1 420px", display: "flex", flexDirection: "column", minWidth: 320, height: "100vh" }}>
+        <div ref={mountRef} style={{ flex: 1, minHeight: 320, cursor: "grab" }} />
+        <div style={{
+          display: "flex", flexWrap: "wrap", gap: "6px 26px", padding: "10px 18px",
+          background: "#FDFDFE", borderTop: "1px solid #E4E9EF", fontSize: 13,
+        }}>
+          <div>
+            <span style={{ color: "#8A97A8" }}>Ячейка №{sel + 1}: </span>
+            <span style={{ fontFamily: MONO }}>{L.cellW.toFixed(1)} × {L.cellD.toFixed(1)} × {(cur.H - cur.floor).toFixed(1)} мм</span>
+          </div>
+          <div>
+            <span style={{ color: "#8A97A8" }}>Материал ≈ </span>
+            <span style={{ fontFamily: MONO }}>{volume.toFixed(1)} см³</span>
+          </div>
+          <div style={{ color: "#B4BECB", marginLeft: "auto" }}>
+            Вращение — перетаскиванием, зум — колесом
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
