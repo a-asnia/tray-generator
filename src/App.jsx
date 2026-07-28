@@ -866,6 +866,41 @@ export default function TrayGenerator() {
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
           Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
         </p>
+
+        <div style={{ height: 12 }} />
+        <Collapse title="Экспорт" open={openSecs.export} onToggle={() => toggleSec("export")}>
+        <button
+          onClick={() => exportOne(sel)}
+          style={{
+            width: "100%", padding: "11px 0", background: ACCENT, color: "#fff", border: "none",
+            borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(242,98,15,0.35)",
+          }}
+        >
+          Скачать STL — контейнер №{sel + 1}
+        </button>
+        <button
+          onClick={() => !solidBusy && exportSolid(sel)}
+          disabled={solidBusy}
+          style={{
+            width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: solidBusy ? "#8A97A8" : "#16202E",
+            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700,
+            cursor: solidBusy ? "wait" : "pointer", opacity: solidBusy ? 0.7 : 1,
+          }}
+        >
+          {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
+        </button>
+        {containers.length > 1 && (
+          <button
+            onClick={exportAll}
+            style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: ACCENT, border: `1.5px solid ${ACCENT}`, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+          >
+            Скачать все ({containers.length} файла)
+          </button>
+        )}
+        <p style={{ fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 }}>
+          Миллиметры, вертикаль — Z. Пазы спрятаны внутри толщины стенки: ячейки не искажаются, контейнеры смыкаются вплотную. Сборка — вдвиганием сверху.
+        </p>
+        </Collapse>
         </div>)}
 
         {tab === "model" && (<div>
@@ -945,39 +980,6 @@ export default function TrayGenerator() {
 
         </Collapse>
 
-        <Collapse title="Экспорт" open={openSecs.export} onToggle={() => toggleSec("export")}>
-        <button
-          onClick={() => exportOne(sel)}
-          style={{
-            width: "100%", padding: "11px 0", background: ACCENT, color: "#fff", border: "none",
-            borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(242,98,15,0.35)",
-          }}
-        >
-          Скачать STL — контейнер №{sel + 1}
-        </button>
-        <button
-          onClick={() => !solidBusy && exportSolid(sel)}
-          disabled={solidBusy}
-          style={{
-            width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: solidBusy ? "#8A97A8" : "#16202E",
-            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700,
-            cursor: solidBusy ? "wait" : "pointer", opacity: solidBusy ? 0.7 : 1,
-          }}
-        >
-          {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
-        </button>
-        {containers.length > 1 && (
-          <button
-            onClick={exportAll}
-            style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: ACCENT, border: `1.5px solid ${ACCENT}`, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
-          >
-            Скачать все ({containers.length} файла)
-          </button>
-        )}
-        <p style={{ fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 }}>
-          Миллиметры, вертикаль — Z. Пазы спрятаны внутри толщины стенки: ячейки не искажаются, контейнеры смыкаются вплотную. Сборка — вдвиганием сверху.
-        </p>
-        </Collapse>
         </div>)}
       </div>
 
