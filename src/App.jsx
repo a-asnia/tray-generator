@@ -22,7 +22,7 @@ export default function TrayGenerator() {
   const [selMode, setSelMode] = useState("seg"); // 'seg' | 'line'
   const [connect, setConnect] = useState(SAVED ? SAVED.connect !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
-  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 100, layD: 100 });
+  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
   const [tab, setTab] = useState("model");
   const [openSecs, setOpenSecs] = useState(SAVED?.openSecs ?? { outer: true, cells: true, walls: true, export: true });
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
@@ -163,9 +163,9 @@ export default function TrayGenerator() {
     setSel(0);
     setSelection(null);
     setConnect(true);
-    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 100, layD: 100 });
+    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
     setOpenSecs({ outer: true, cells: true, walls: true, export: true });
-    setTab("model");
+    // вкладка не переключается — остаёмся там, где нажали сброс
   };
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
@@ -177,30 +177,6 @@ export default function TrayGenerator() {
     } else {
       const Lc = layout(cur);
       updCur({ lockCell: true, cellW0: Lc.cellW, cellD0: Lc.cellD });
-    }
-  };
-
-  // переключение режима деления без потери сетки: количество ячеек
-  // переносится; при активном замке ячейки контейнер подгоняется так,
-  // чтобы размеры ячеек сохранились точно
-  const switchGridMode = (m) => {
-    if ((cur.gridMode || "count") === m) return;
-    const Lc = layout(cur);
-    if (m === "size") {
-      updCur({
-        gridMode: "size",
-        cellWt: Math.max(15, Math.min(160, Math.round(Lc.cellW))),
-        cellDt: Math.max(15, Math.min(160, Math.round(Lc.cellD))),
-      });
-    } else {
-      const patch = { gridMode: "count", cols: Lc.nCols, rows: Lc.nRows };
-      if (cur.lockCell) {
-        const W2 = 2 * cur.wallOut + Lc.nCols * cur.cellW0 + (Lc.nCols - 1) * cur.wall;
-        const D2 = 2 * cur.wallOut + Lc.nRows * cur.cellD0 + (Lc.nRows - 1) * cur.wall;
-        if (W2 >= 30 && W2 <= limits.maxW + 0.01) patch.W = Math.round(W2 * 10) / 10;
-        if (D2 >= 30 && D2 <= limits.maxD + 0.01) patch.D = Math.round(D2 * 10) / 10;
-      }
-      updCur(patch);
     }
   };
 
@@ -904,36 +880,8 @@ export default function TrayGenerator() {
           {cur.lockCell ? "🔒" : "🔓"} Зафиксировать ячейку{cur.lockCell ? ` (${cur.cellW0.toFixed(1)}×${cur.cellD0.toFixed(1)} мм)` : ""}
         </button>
         <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Деление на ячейки</div>
-        <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
-          {[["count", "Количество"], ["size", "Размер ячейки"]].map(([m, t]) => (
-            <button
-              key={m}
-              onClick={() => switchGridMode(m)}
-              style={{
-                flex: 1, padding: "5px 4px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                border: (cur.gridMode || "count") === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
-                background: (cur.gridMode || "count") === m ? "#DBEAFE" : "#fff",
-                color: (cur.gridMode || "count") === m ? SEL : "#3D4A5C",
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        {cur.gridMode === "size" ? (
-          <div>
-            <Param label="Ячейка по ширине" unit="мм" value={cur.cellWt} min={15} max={160} step={1} disabled={cur.lockCell} onChange={(v) => updCur({ cellWt: v })} />
-            <Param label="Ячейка по глубине" unit="мм" value={cur.cellDt} min={15} max={160} step={1} disabled={cur.lockCell} onChange={(v) => updCur({ cellDt: v })} />
-            <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-4px 0 10px", lineHeight: 1.45 }}>
-              Контейнер заполняется ячейками этого внутреннего размера; последняя в каждом направлении забирает остаток (от одного до двух размеров). Сейчас: {layout(cur).nCols}×{layout(cur).nRows} ячеек.
-            </p>
-          </div>
-        ) : (
-          <div>
-            <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
-            <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
-          </div>
-        )}
+        <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
+        <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
           Нажми на <b>стенку</b> или <b>ячейку</b> — на схеме или прямо на 3D-модели. Режим выбора стенки:
         </p>

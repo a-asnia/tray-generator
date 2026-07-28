@@ -3,6 +3,7 @@
 // ══════════════════════════════════════════════════════════════
 
 import { CONN } from "../model/connectors.js";
+import { layout } from "../model/layout.js";
 
 let nextId = 2;
 export const setNextId = (v) => { nextId = v; };
@@ -30,6 +31,13 @@ export function loadSaved() {
     const d = JSON.parse(raw);
     if (!d || !Array.isArray(d.containers) || !d.containers.length) return null;
     d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
+    // миграция старых сохранений: режим «размер ячейки» убран из UI —
+    // переводим в «количество», сохраняя фактическую сетку
+    d.containers = d.containers.map((c) => {
+      if (c.gridMode !== "size") return c;
+      const L = layout(c);
+      return { ...c, gridMode: "count", cols: L.nCols, rows: L.nRows };
+    });
     nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
     return d;
   } catch (e) {
