@@ -106,6 +106,9 @@ export default function TrayGenerator() {
   // рядом добавляется НОВЫЙ контейнер на остаток (минимум 30 мм).
   // Замки соседа соблюдаются: зафиксированные ячейки не меняются.
   const applyOuterDim = (patch) => {
+    // «Зафиксировать внешний размер» — намертво: габарит не меняется ни
+    // от ползунков, ни от изменения ячеек внутри, ни магнитом соседей
+    if (cur.lockOuter) return;
     const isW = "W" in patch;
     const axis = isW ? "W" : "D";
     const gKey = isW ? "gx" : "gy";
@@ -290,11 +293,20 @@ export default function TrayGenerator() {
     const Lc = layout(cur);
     const sizes = Lc.rowCols[j].slice();
     const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+    const lockedJ = { ...lockedWIn(cur, j), [i]: true };
+    // при зафиксированном габарите ячейка меняется ЗА СЧЁТ свободных
+    // соседей в своём ряду — контейнер не растёт и не ужимается
+    if (cur.lockOuter) {
+      const avail = cur.W - wallSum;
+      sizes[i] = Math.max(10, Math.min(v, avail - (sizes.length - 1) * 10));
+      updCur({ rowColWs: { ...(cur.rowColWs || {}), [j]: fitSizes(sizes, lockedJ, avail) } });
+      return;
+    }
     // потолок: остальным ячейкам ряда оставляем хотя бы по 10 мм
     sizes[i] = Math.max(10, Math.min(v, limits.maxW - wallSum - (sizes.length - 1) * 10));
     const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
     const W2 = Math.round(Math.max(30, Math.min(want, limits.maxW)) * 10) / 10;
-    const fitted = fitSizes(sizes, { ...lockedWIn(cur, j), [i]: true }, W2 - wallSum);
+    const fitted = fitSizes(sizes, lockedJ, W2 - wallSum);
     const rowColWs = { ...(cur.rowColWs || {}) };
     rowColWs[j] = fitted;
     updCur({ rowColWs });
@@ -305,10 +317,17 @@ export default function TrayGenerator() {
     const Lc = layout(cur);
     const sizes = Lc.rowDs.slice();
     const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+    const lockedJ = { ...(cur.lockedRows || {}), [j]: true };
+    if (cur.lockOuter) {
+      const avail = cur.D - wallSum;
+      sizes[j] = Math.max(10, Math.min(v, avail - (sizes.length - 1) * 10));
+      updCur({ rowDs: fitSizes(sizes, lockedJ, avail) });
+      return;
+    }
     sizes[j] = Math.max(10, Math.min(v, limits.maxD - wallSum - (sizes.length - 1) * 10));
     const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
     const D2 = Math.round(Math.max(30, Math.min(want, limits.maxD)) * 10) / 10;
-    const fitted = fitSizes(sizes, { ...(cur.lockedRows || {}), [j]: true }, D2 - wallSum);
+    const fitted = fitSizes(sizes, lockedJ, D2 - wallSum);
     updCur({ rowDs: fitted });
     applyOuterDim({ D: D2 });
   };
@@ -1018,6 +1037,11 @@ export default function TrayGenerator() {
         >
           {cur.lockOuter ? "🔒" : "🔓"} Зафиксировать внешний размер
         </button>
+        {cur.lockOuter && (
+          <p style={{ fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 }}>
+            Габарит зафиксирован намертво: он не меняется ни от размеров ячеек (они перераспределяются внутри), ни магнитом соседей. Ячейки, перегородки и сетку внутри менять можно.
+          </p>
+        )}
         <Param label="Ширина" unit="мм" value={cur.W} min={30} max={limits.maxW} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ W: v })} />
         <Param label="Глубина" unit="мм" value={cur.D} min={30} max={limits.maxD} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ D: v })} />
         <Param label="Высота" unit="мм" value={cur.H} min={10} max={limits.maxH} step={1} disabled={cur.lockOuter} onChange={(v) => updCur({ H: v })} />

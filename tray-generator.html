@@ -2186,6 +2186,10 @@ function TrayGenerator() {
     // рядом добавляется НОВЫЙ контейнер на остаток (минимум 30 мм).
     // Замки соседа соблюдаются: зафиксированные ячейки не меняются.
     const applyOuterDim = (patch) => {
+        // «Зафиксировать внешний размер» — намертво: габарит не меняется ни
+        // от ползунков, ни от изменения ячеек внутри, ни магнитом соседей
+        if (cur.lockOuter)
+            return;
         const isW = "W" in patch;
         const axis = isW ? "W" : "D";
         const gKey = isW ? "gx" : "gy";
@@ -2379,11 +2383,20 @@ function TrayGenerator() {
         const Lc = layout(cur);
         const sizes = Lc.rowCols[j].slice();
         const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+        const lockedJ = { ...lockedWIn(cur, j), [i]: true };
+        // при зафиксированном габарите ячейка меняется ЗА СЧЁТ свободных
+        // соседей в своём ряду — контейнер не растёт и не ужимается
+        if (cur.lockOuter) {
+            const avail = cur.W - wallSum;
+            sizes[i] = Math.max(10, Math.min(v, avail - (sizes.length - 1) * 10));
+            updCur({ rowColWs: { ...(cur.rowColWs || {}), [j]: fitSizes(sizes, lockedJ, avail) } });
+            return;
+        }
         // потолок: остальным ячейкам ряда оставляем хотя бы по 10 мм
         sizes[i] = Math.max(10, Math.min(v, limits.maxW - wallSum - (sizes.length - 1) * 10));
         const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
         const W2 = Math.round(Math.max(30, Math.min(want, limits.maxW)) * 10) / 10;
-        const fitted = fitSizes(sizes, { ...lockedWIn(cur, j), [i]: true }, W2 - wallSum);
+        const fitted = fitSizes(sizes, lockedJ, W2 - wallSum);
         const rowColWs = { ...(cur.rowColWs || {}) };
         rowColWs[j] = fitted;
         updCur({ rowColWs });
@@ -2395,10 +2408,17 @@ function TrayGenerator() {
         const Lc = layout(cur);
         const sizes = Lc.rowDs.slice();
         const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+        const lockedJ = { ...(cur.lockedRows || {}), [j]: true };
+        if (cur.lockOuter) {
+            const avail = cur.D - wallSum;
+            sizes[j] = Math.max(10, Math.min(v, avail - (sizes.length - 1) * 10));
+            updCur({ rowDs: fitSizes(sizes, lockedJ, avail) });
+            return;
+        }
         sizes[j] = Math.max(10, Math.min(v, limits.maxD - wallSum - (sizes.length - 1) * 10));
         const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
         const D2 = Math.round(Math.max(30, Math.min(want, limits.maxD)) * 10) / 10;
-        const fitted = fitSizes(sizes, { ...(cur.lockedRows || {}), [j]: true }, D2 - wallSum);
+        const fitted = fitSizes(sizes, lockedJ, D2 - wallSum);
         updCur({ rowDs: fitted });
         applyOuterDim({ D: D2 });
     };
@@ -2897,6 +2917,7 @@ function TrayGenerator() {
                         } },
                         cur.lockOuter ? "🔒" : "🔓",
                         " \u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440"),
+                    cur.lockOuter && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u0413\u0430\u0431\u0430\u0440\u0438\u0442 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D \u043D\u0430\u043C\u0435\u0440\u0442\u0432\u043E: \u043E\u043D \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043D\u0438 \u043E\u0442 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u044F\u0447\u0435\u0435\u043A (\u043E\u043D\u0438 \u043F\u0435\u0440\u0435\u0440\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u044F\u044E\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438), \u043D\u0438 \u043C\u0430\u0433\u043D\u0438\u0442\u043E\u043C \u0441\u043E\u0441\u0435\u0434\u0435\u0439. \u042F\u0447\u0435\u0439\u043A\u0438, \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438 \u0441\u0435\u0442\u043A\u0443 \u0432\u043D\u0443\u0442\u0440\u0438 \u043C\u0435\u043D\u044F\u0442\u044C \u043C\u043E\u0436\u043D\u043E.")),
                     React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.W, min: 30, max: limits.maxW, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ W: v }) }),
                     React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.D, min: 30, max: limits.maxD, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ D: v }) }),
                     React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: cur.H, min: 10, max: limits.maxH, step: 1, disabled: cur.lockOuter, onChange: (v) => updCur({ H: v }) }),
