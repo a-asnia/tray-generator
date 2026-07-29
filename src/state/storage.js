@@ -26,14 +26,13 @@ export const makeContainer = (src, gx, gy) => ({
   fixedCells: [],
 });
 
-// автосохранение в localStorage: на сервере работает всегда; там, где
-// хранилище недоступно (песочницы предпросмотра), молча пропускаем
-export function loadSaved() {
+// Приведение сохранённого/импортированного проекта к текущей модели:
+// добавляет недостающие поля и мигрирует старые форматы. Возвращает
+// null, если данные не похожи на проект.
+export function normalizeProject(d) {
   try {
-    const raw = window.localStorage.getItem("trayGenState");
-    if (!raw) return null;
-    const d = JSON.parse(raw);
     if (!d || !Array.isArray(d.containers) || !d.containers.length) return null;
+    d = { ...d };
     d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
     // миграция старых сохранений: режим «размер ячейки» убран из UI —
     // переводим в «количество», сохраняя фактическую сетку; глобальный
@@ -64,4 +63,47 @@ export function loadSaved() {
     return null;
   }
 }
+
+// автосохранение в localStorage: на сервере работает всегда; там, где
+// хранилище недоступно (песочницы предпросмотра), молча пропускаем
+export function loadSaved() {
+  try {
+    const raw = window.localStorage.getItem("trayGenState");
+    return raw ? normalizeProject(JSON.parse(raw)) : null;
+  } catch (e) {
+    return null;
+  }
+}
 export const SAVED = loadSaved();
+
+// ── Проект в файл и обратно ──
+export const PROJECT_FORMAT = "tray-generator-project";
+
+export function exportProject(state) {
+  const data = { format: PROJECT_FORMAT, version: 1, ...state };
+  const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const d = new Date();
+  const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  link.href = url;
+  link.download = `tray-project-${stamp}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+// Читает файл проекта. onDone(project | null) — null, если файл
+// не является проектом генератора
+export function importProject(file, onDone) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const raw = JSON.parse(String(reader.result));
+      onDone(normalizeProject(raw));
+    } catch (e) {
+      onDone(null);
+    }
+  };
+  reader.onerror = () => onDone(null);
+  reader.readAsText(file);
+}

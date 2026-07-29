@@ -1712,16 +1712,14 @@ const makeContainer = (src, gx, gy) => ({
     // или стенке ({w, d, anchor, lvl}); сетка обтекает их
     fixedCells: [],
 });
-// автосохранение в localStorage: на сервере работает всегда; там, где
-// хранилище недоступно (песочницы предпросмотра), молча пропускаем
-function loadSaved() {
+// Приведение сохранённого/импортированного проекта к текущей модели:
+// добавляет недостающие поля и мигрирует старые форматы. Возвращает
+// null, если данные не похожи на проект.
+function normalizeProject(d) {
     try {
-        const raw = window.localStorage.getItem("trayGenState");
-        if (!raw)
-            return null;
-        const d = JSON.parse(raw);
         if (!d || !Array.isArray(d.containers) || !d.containers.length)
             return null;
+        d = { ...d };
         d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
         // миграция старых сохранений: режим «размер ячейки» убран из UI —
         // переводим в «количество», сохраняя фактическую сетку; глобальный
@@ -1755,7 +1753,48 @@ function loadSaved() {
         return null;
     }
 }
+// автосохранение в localStorage: на сервере работает всегда; там, где
+// хранилище недоступно (песочницы предпросмотра), молча пропускаем
+function loadSaved() {
+    try {
+        const raw = window.localStorage.getItem("trayGenState");
+        return raw ? normalizeProject(JSON.parse(raw)) : null;
+    }
+    catch (e) {
+        return null;
+    }
+}
 const SAVED = loadSaved();
+// ── Проект в файл и обратно ──
+const PROJECT_FORMAT = "tray-generator-project";
+function exportProject(state) {
+    const data = { format: PROJECT_FORMAT, version: 1, ...state };
+    const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const d = new Date();
+    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    link.href = url;
+    link.download = `tray-project-${stamp}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+// Читает файл проекта. onDone(project | null) — null, если файл
+// не является проектом генератора
+function importProject(file, onDone) {
+    const reader = new FileReader();
+    reader.onload = () => {
+        try {
+            const raw = JSON.parse(String(reader.result));
+            onDone(normalizeProject(raw));
+        }
+        catch (e) {
+            onDone(null);
+        }
+    };
+    reader.onerror = () => onDone(null);
+    reader.readAsText(file);
+}
 // ── src/ui/theme.js ──
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 const ACCENT = "#F2620F";
@@ -2123,7 +2162,7 @@ function TrayGenerator() {
     // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
     const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
     const [tab, setTab] = useState("model");
-    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
     const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
     // автосохранение при каждом изменении
     useEffect(() => {
@@ -2302,7 +2341,7 @@ function TrayGenerator() {
         setConnect(true);
         setMagnet(true);
         setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
-        setOpenSecs({ outer: true, cells: true, grid: true, walls: true, export: true });
+        setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
         // вкладка не переключается — остаёмся там, где нажали сброс
     };
     const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
@@ -2576,6 +2615,38 @@ function TrayGenerator() {
             setContainers([...containers, ...added]);
             setSelection(null);
         }
+    };
+    // ── проект в файл и обратно ──
+    const fileRef = useRef(null);
+    const [ioMsg, setIoMsg] = useState("");
+    const saveProject = () => {
+        exportProject({ containers, limits, connect, magnet, openSecs });
+        setIoMsg("Проект сохранён в файл");
+        setTimeout(() => setIoMsg(""), 3000);
+    };
+    const openProjectFile = (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = ""; // чтобы повторный выбор того же файла сработал
+        if (!file)
+            return;
+        importProject(file, (proj) => {
+            if (!proj) {
+                setIoMsg("Не удалось открыть: это не файл проекта");
+                setTimeout(() => setIoMsg(""), 4000);
+                return;
+            }
+            setContainers(proj.containers);
+            if (proj.limits)
+                setLimits(proj.limits);
+            setConnect(proj.connect !== false);
+            setMagnet(proj.magnet !== false);
+            if (proj.openSecs)
+                setOpenSecs((o) => ({ ...o, ...proj.openSecs }));
+            setSel(0);
+            setSelection(null);
+            setIoMsg(`Проект открыт: ${proj.containers.length} контейнер(ов)`);
+            setTimeout(() => setIoMsg(""), 4000);
+        });
     };
     // ── карта раскладки ──
     const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
@@ -2901,6 +2972,18 @@ function TrayGenerator() {
                 React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0432\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: limits.maxH, min: 30, max: 500, step: 1, onChange: (v) => updLimits({ maxH: v }) }),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } }, "\u041B\u0438\u043C\u0438\u0442\u044B \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044E\u0442 \u043D\u0430 \u041E\u0414\u0418\u041D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E \u0435\u0433\u043E \u0432\u043D\u0435\u0448\u043D\u0438\u043C \u0433\u0430\u0431\u0430\u0440\u0438\u0442\u0430\u043C (\u0438 \u043D\u0430 \u0432\u044B\u0441\u043E\u0442\u0443 \u0441\u0442\u0435\u043D\u043E\u043A). \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E \u2014 \u0447\u0443\u0442\u044C \u043C\u0435\u043D\u044C\u0448\u0435 \u0441\u0442\u043E\u043B\u0430 Bambu A1 mini (180\u00D7180\u00D7180 \u043C\u043C), \u0441 \u0437\u0430\u043F\u0430\u0441\u043E\u043C \u043F\u043E\u0434 \u044E\u0431\u043A\u0443. \u041D\u0443\u0436\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043C\u0435\u0441\u0442\u0430 \u2014 \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u0443\u0439 \u0435\u0449\u0451 \u043E\u0434\u0438\u043D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430\u00BB."),
                 React.createElement("div", { style: { height: 12 } }),
+                React.createElement(Collapse, { title: "\u041F\u0440\u043E\u0435\u043A\u0442", open: openSecs.project, onToggle: () => toggleSec("project") },
+                    React.createElement("button", { onClick: saveProject, style: {
+                            width: "100%", padding: "10px 0", background: "#fff", color: "#16202E",
+                            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                        } }, "\uD83D\uDCBE \u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442 \u0432 \u0444\u0430\u0439\u043B"),
+                    React.createElement("button", { onClick: () => fileRef.current && fileRef.current.click(), style: {
+                            width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E",
+                            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                        } }, "\uD83D\uDCC2 \u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442 \u0438\u0437 \u0444\u0430\u0439\u043B\u0430"),
+                    React.createElement("input", { ref: fileRef, type: "file", accept: ".json,application/json", onChange: openProjectFile, style: { display: "none" } }),
+                    ioMsg && (React.createElement("p", { style: { fontSize: 12, color: ACCENT, margin: "8px 0 0", fontWeight: 600 } }, ioMsg)),
+                    React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 } }, "\u0421\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442\u0441\u044F \u0432\u0441\u044F \u0440\u0430\u0431\u043E\u0442\u0430: \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B, \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430, \u044F\u0447\u0435\u0439\u043A\u0438, \u0441\u0442\u0435\u043D\u043A\u0438, \u0444\u0438\u043A\u0441\u0430\u0446\u0438\u0438 \u0438 \u043B\u0438\u043C\u0438\u0442\u044B \u2014 \u043E\u0434\u043D\u0438\u043C \u0444\u0430\u0439\u043B\u043E\u043C .json. \u0415\u0433\u043E \u043C\u043E\u0436\u043D\u043E \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0442\u0438 \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u0439 \u043A\u043E\u043C\u043F\u044C\u044E\u0442\u0435\u0440 \u0438\u043B\u0438 \u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043A\u0430\u043A \u0432\u0435\u0440\u0441\u0438\u044E; \u00AB\u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043F\u0440\u043E\u0435\u043A\u0442\u00BB \u0437\u0430\u043C\u0435\u043D\u044F\u0435\u0442 \u0442\u0435\u043A\u0443\u0449\u0443\u044E \u0440\u0430\u0431\u043E\u0442\u0443 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u044B\u043C \u0444\u0430\u0439\u043B\u0430.")),
                 React.createElement(Collapse, { title: "\u042D\u043A\u0441\u043F\u043E\u0440\u0442", open: openSecs.export, onToggle: () => toggleSec("export") },
                     React.createElement("button", { onClick: () => exportOne(sel), style: {
                             width: "100%", padding: "11px 0", background: ACCENT, color: "#fff", border: "none",

@@ -9,7 +9,7 @@ import { getManifold } from "./geometry/manifold.js";
 import { CONN, connectorVs } from "./model/connectors.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
-import { makeContainer, SAVED, setNextId } from "./state/storage.js";
+import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
 import { MONO, ACCENT, SEL } from "./ui/theme.js";
 import { Param, Stepper, Collapse, SectionTitle } from "./ui/controls.jsx";
@@ -26,7 +26,7 @@ export default function TrayGenerator() {
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
   const [tab, setTab] = useState("model");
-  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -211,7 +211,7 @@ export default function TrayGenerator() {
     setConnect(true);
     setMagnet(true);
     setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
-    setOpenSecs({ outer: true, cells: true, grid: true, walls: true, export: true });
+    setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
   };
 
@@ -472,6 +472,32 @@ export default function TrayGenerator() {
       setContainers([...containers, ...added]);
       setSelection(null);
     }
+  };
+
+  // ── проект в файл и обратно ──
+  const fileRef = useRef(null);
+  const [ioMsg, setIoMsg] = useState("");
+  const saveProject = () => {
+    exportProject({ containers, limits, connect, magnet, openSecs });
+    setIoMsg("Проект сохранён в файл");
+    setTimeout(() => setIoMsg(""), 3000);
+  };
+  const openProjectFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // чтобы повторный выбор того же файла сработал
+    if (!file) return;
+    importProject(file, (proj) => {
+      if (!proj) { setIoMsg("Не удалось открыть: это не файл проекта"); setTimeout(() => setIoMsg(""), 4000); return; }
+      setContainers(proj.containers);
+      if (proj.limits) setLimits(proj.limits);
+      setConnect(proj.connect !== false);
+      setMagnet(proj.magnet !== false);
+      if (proj.openSecs) setOpenSecs((o) => ({ ...o, ...proj.openSecs }));
+      setSel(0);
+      setSelection(null);
+      setIoMsg(`Проект открыт: ${proj.containers.length} контейнер(ов)`);
+      setTimeout(() => setIoMsg(""), 4000);
+    });
   };
 
   // ── карта раскладки ──
@@ -990,6 +1016,34 @@ export default function TrayGenerator() {
         </p>
 
         <div style={{ height: 12 }} />
+        <Collapse title="Проект" open={openSecs.project} onToggle={() => toggleSec("project")}>
+        <button
+          onClick={saveProject}
+          style={{
+            width: "100%", padding: "10px 0", background: "#fff", color: "#16202E",
+            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          💾 Сохранить проект в файл
+        </button>
+        <button
+          onClick={() => fileRef.current && fileRef.current.click()}
+          style={{
+            width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E",
+            border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          📂 Открыть проект из файла
+        </button>
+        <input ref={fileRef} type="file" accept=".json,application/json" onChange={openProjectFile} style={{ display: "none" }} />
+        {ioMsg && (
+          <p style={{ fontSize: 12, color: ACCENT, margin: "8px 0 0", fontWeight: 600 }}>{ioMsg}</p>
+        )}
+        <p style={{ fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 }}>
+          Сохраняется вся работа: контейнеры, раскладка, ячейки, стенки, фиксации и лимиты — одним файлом .json. Его можно перенести на другой компьютер или хранить как версию; «Открыть проект» заменяет текущую работу содержимым файла.
+        </p>
+        </Collapse>
+
         <Collapse title="Экспорт" open={openSecs.export} onToggle={() => toggleSec("export")}>
         <button
           onClick={() => exportOne(sel)}
