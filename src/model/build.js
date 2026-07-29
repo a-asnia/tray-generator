@@ -7,7 +7,7 @@
 
 import { prismSolid, boxSolid, rampSolid, wallProfile } from "../geometry/solids.js";
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
-import { CONN, splitRange, addConnUnits } from "./connectors.js";
+import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl } from "./layout.js";
 
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
@@ -56,6 +56,7 @@ export function buildContainer(c, conn, opts = {}) {
     return low ? Math.max(0.4, Math.min(wc.dropH, wc.h)) : wc.h;
   };
 
+  const CONN = connOf(c); // размеры соединителя с учётом зазора печати
   const zonesOf = (side) =>
     conn[side]
       ? conn[side].vs
@@ -127,11 +128,12 @@ export function buildContainer(c, conn, opts = {}) {
       const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
       solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     };
-    const railSide = 2.5;
-    const yA = floor + 3;
+    // рамка вокруг узора — две толщины этой стенки с каждой стороны
+    const rail = 2 * thk;
+    const yA = floor + rail;
     const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-    const yB = Math.min(wc.h - 3.5, parts.length > 1 ? parts[0][2][1] : wc.h - 3.5);
-    const sA = s0 + railSide, sB = s1 - railSide;
+    const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
+    const sA = s0 + rail, sB = s1 - rail;
     if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
       // окно слишком маленькое — сплошная стенка
       pushProfiled(parts, mapFn, s0, s1, key);
@@ -218,11 +220,12 @@ export function buildContainer(c, conn, opts = {}) {
       const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
       solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     };
-    const railSide = 2.5;
-    const yA = floor + 3;
+    // рамка вокруг узора — две толщины этой стенки с каждой стороны
+    const rail = 2 * thk;
+    const yA = floor + rail;
     const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-    const yB = Math.min(wc.h - 3.5, parts.length > 1 ? parts[0][2][1] : wc.h - 3.5);
-    const sA = s0 + railSide, sB = s1 - railSide;
+    const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
+    const sA = s0 + rail, sB = s1 - rail;
     const sp = Math.max(4, wc.lineStep);
     if (sB - sA < sp || yB - yA < sp) {
       pushProfiled(parts, mapFn, s0, s1, key);
@@ -352,9 +355,10 @@ export function buildContainer(c, conn, opts = {}) {
       const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
       solids.push(prismSolid(qa, qb, tag));
     };
-    const railSide = 2.5, railTop = 3, railBot = 3.5;
-    const uA = railTop, uB = Lslope - railBot;
-    const sA = s0 + railSide, sB = s1 - railSide;
+    // рамка наклонной панели — тоже две толщины стенки
+    const rail = 2 * thk;
+    const uA = rail, uB = Lslope - rail;
+    const sA = s0 + rail, sB = s1 - rail;
     if (sB - sA < hexSize * 0.9 || uB - uA < hexSize * 0.9) {
       solids.push(rampSolid(orient, facePos, dir, s0, s1, yTop, yBot0, run, embed, tag));
       return;
@@ -436,9 +440,10 @@ export function buildContainer(c, conn, opts = {}) {
       const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
       solids.push(prismSolid(qa, qb, tag));
     };
-    const railSide = 2.5, railTop = 3, railBot = 3.5;
-    const uA = railTop, uB = Lslope - railBot;
-    const sA = s0 + railSide, sB = s1 - railSide;
+    // рамка наклонной панели — тоже две толщины стенки
+    const rail = 2 * thk;
+    const uA = rail, uB = Lslope - rail;
+    const sA = s0 + rail, sB = s1 - rail;
     const sp = Math.max(4, wc.lineStep);
     if (sB - sA < sp || uB - uA < sp) {
       solids.push(rampSolid(orient, facePos, dir, s0, s1, yTop, yBot0, run, embed, tag));
@@ -658,10 +663,14 @@ export function buildContainer(c, conn, opts = {}) {
       const key = `o:${side}:${i}`;
       const wc = getWall(c, key);
       if (wc.h > 0.3) {
+        // сторона без замка: кромка скругляется с обеих сторон (симметрично);
+        // со замком — только внутренняя, наружная плоскость строго ровная
+        const sym = !conn[side === "n" ? "N" : "S"];
+        const off = sym ? wallOut / 2 : 0;
         const mapFn = side === "n"
-          ? (o, y, x) => [x, y, -D / 2 + o]
-          : (o, y, x) => [x, y, D / 2 - o];
-        for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bx0, bx1, mapFn);
+          ? (o, y, x) => [x, y, -D / 2 + off + o]
+          : (o, y, x) => [x, y, D / 2 - off - o];
+        for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         // пандус не должен войти в полость прижатого к стенке бокса
         for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
@@ -677,10 +686,12 @@ export function buildContainer(c, conn, opts = {}) {
       const key = `o:${side}:${j}`;
       const wc = getWall(c, key);
       if (wc.h > 0.3) {
+        const sym = !conn[side === "w" ? "W" : "E"];
+        const off = sym ? wallOut / 2 : 0;
         const mapFn = side === "w"
-          ? (o, y, z) => [-W / 2 + o, y, z]
-          : (o, y, z) => [W / 2 - o, y, z];
-        for (const [a, b] of splitRange(bz0, bz1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bz0, bz1, mapFn);
+          ? (o, y, z) => [-W / 2 + off + o, y, z]
+          : (o, y, z) => [W / 2 - off - o, y, z];
+        for (const [a, b] of splitRange(bz0, bz1, zones)) pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
           addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);

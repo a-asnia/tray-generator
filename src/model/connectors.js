@@ -4,10 +4,28 @@
 
 import { prismSolid, boxSolid } from "../geometry/solids.js";
 
-export const CONN = { w1: 5.5, w2: 8.5, depth: 1.7, clr: 0.25, back: 0.85, stop: 3, flank: 2.5 };
-CONN.dg = CONN.depth + CONN.clr;               // глубина паза
-CONN.minWall = CONN.dg + CONN.back;            // 2.8 мм — минимум внешней стенки
-CONN.bossW = CONN.w2 + 2 * CONN.clr + 2 * CONN.flank; // ширина зоны соединителя
+// Зазор (clr) — на сторону, между рельсом и пазом. Рекомендации для FDM:
+// 0.1 мм — press fit, детали приходится вдавливать (PLA, жёсткая посадка);
+// 0.2 мм — плотно, но собирается руками (значение по умолчанию);
+// 0.3–0.4 мм — свободное скольжение (PETG, крупные детали, усадка).
+export const DEFAULT_CLR = 0.2;
+// top — насколько рельс не доходит до верхней кромки контейнера: сверху
+// остаётся ровная полоска стенки, замок не выглядывает наружу и не
+// цепляется при сборке. Паз при этом сквозной — иначе рельс не вдвинуть.
+export const CONN = { w1: 5.5, w2: 8.5, depth: 1.7, clr: DEFAULT_CLR, back: 0.85, stop: 3, flank: 2.5, top: 2 };
+
+// Производные размеры зависят от зазора, поэтому считаются функцией.
+// c.connClr — настройка «Зазор соединителя» (вкладка «Принтер»).
+export function connGeom(clr) {
+  const g = { ...CONN, clr: clr ?? DEFAULT_CLR };
+  g.dg = g.depth + g.clr;                       // глубина паза
+  g.minWall = Math.round((g.dg + g.back) * 100) / 100; // минимум внешней стенки
+  g.bossW = g.w2 + 2 * g.clr + 2 * g.flank;     // ширина зоны соединителя
+  return g;
+}
+export const connOf = (c) => connGeom(c && c.connClr);
+// значения по умолчанию (совместимость со старым кодом)
+Object.assign(CONN, connGeom(DEFAULT_CLR));
 
 export const connectorVs = (dim) => (dim < 90 ? [0] : [-dim / 4, dim / 4]);
 
@@ -30,6 +48,7 @@ export function splitRange(a, b, zones) {
 // плоскости соседей смыкаются вплотную по всей длине.
 export function addConnUnits(solids, c, side, vs) {
   const { W, D, H, wallOut } = c;
+  const CONN = connOf(c); // зазор берётся из настройки контейнера
   const dg = CONN.dg;
   const axis = side === "E" || side === "W" ? "x" : "z";
   const s = side === "E" || side === "S" ? 1 : -1;
@@ -44,7 +63,9 @@ export function addConnUnits(solids, c, side, vs) {
         mk(u0, y, vc - CONN.w1 / 2), mk(u0, y, vc + CONN.w1 / 2),
         mk(u1, y, vc + CONN.w2 / 2), mk(u1, y, vc - CONN.w2 / 2),
       ];
-      solids.push(prismSolid(q(CONN.stop + CONN.clr), q(H), "conn"));
+      // рельс заканчивается чуть ниже верхней кромки контейнера
+      const yTop = Math.max(CONN.stop + CONN.clr + 1, H - CONN.top);
+      solids.push(prismSolid(q(CONN.stop + CONN.clr), q(yTop), "conn"));
     } else {
       const uAt = (t) => p - s * t; // t — глубина от наружной плоскости внутрь стенки
       const pushBox = (t0, t1, y0, y1, v0, v1) => {

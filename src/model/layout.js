@@ -172,12 +172,16 @@ export function layout(c) {
   };
 }
 
-export const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: 0, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
+// острые верхние кромки скругляются по умолчанию (радиус в мм);
+// у стенок с замком скругляется только внутренняя сторона — наружная
+// плоскость остаётся ровной для стыковки и пазов
+export const DEFAULT_RND = 0.8;
+export const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
 export function getWall(c, key) {
   const w = c.walls[key];
   if (!w) return defWall(c);
   // высота может превышать H контейнера (башенка-ячейка); потолок — лимит принтера
-  return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? 0, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1 };
+  return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? DEFAULT_RND, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1 };
 }
 
 // уровень пола ячейки (лесенка), мм от дна контейнера

@@ -6,7 +6,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
-import { CONN, connectorVs } from "./model/connectors.js";
+import { CONN, connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -39,7 +39,9 @@ export default function TrayGenerator() {
   // магнит соседей: изменение размера контейнера компенсируется соседями
   const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
-  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
+  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
+  // размеры соединителя зависят от зазора печати (настройка «Принтер»)
+  const CG = connGeom(limits.connClr);
   const [tab, setTab] = useState("model");
   const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
@@ -225,7 +227,7 @@ export default function TrayGenerator() {
     setSelection(null);
     setConnect(true);
     setMagnet(true);
-    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
+    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
     setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
   };
@@ -438,13 +440,13 @@ export default function TrayGenerator() {
           };
       return {
         c,
-        solids: buildContainer(c, conn),
+        solids: buildContainer({ ...c, connClr: limits.connClr }, conn),
         ox: colX[c.gx] - totalW / 2,
         oz: rowZ[c.gy] - totalD / 2,
       };
     });
     return { items, totalW, totalD };
-  }, [containers, connect, posMap]);
+  }, [containers, connect, posMap, limits.connClr]);
 
   // ── three.js: сцена, камера, пикинг ──
   const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection });
@@ -1025,7 +1027,7 @@ export default function TrayGenerator() {
               onChange={(e) => {
                 const on = e.target.checked;
                 setConnect(on);
-                if (on) setContainers((cs) => cs.map((c) => ({ ...c, wallOut: Math.max(c.wallOut, CONN.minWall) })));
+                if (on) setContainers((cs) => cs.map((c) => ({ ...c, wallOut: Math.max(c.wallOut, CG.minWall) })));
               }}
               style={{ accentColor: ACCENT }}
             />
@@ -1070,6 +1072,16 @@ export default function TrayGenerator() {
         <Param label="Макс. высота" unit="мм" value={limits.maxH} min={30} max={500} step={1} onChange={(v) => updLimits({ maxH: v })} />
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
           Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
+        </p>
+
+        <SectionTitle>Зазор соединителей</SectionTitle>
+        <Param
+          label="Зазор на сторону" unit="мм" value={limits.connClr ?? DEFAULT_CLR}
+          min={0.05} max={0.5} step={0.05}
+          onChange={(v) => updLimits({ connClr: Math.round(v * 100) / 100 })}
+        />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
+          Щель между рельсом «ласточкиного хвоста» и пазом соседа, на сторону (общий зазор вдвое больше). Для FDM: <b>0,1 мм</b> — жёсткая посадка, детали приходится вдавливать; <b>0,2 мм</b> — плотно, но собирается руками (по умолчанию); <b>0,3–0,4 мм</b> — свободно, для PETG и крупных деталей. Точное значение зависит от принтера — напечатайте пару контейнеров и проверьте. Минимальная внешняя стенка при этом зазоре: {CG.minWall} мм.
         </p>
 
         <div style={{ height: 12 }} />
@@ -1167,13 +1179,13 @@ export default function TrayGenerator() {
         <Collapse title="Толщина стенок и дна" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
         <Param
           label="Внешние стенки" unit="мм" value={cur.wallOut}
-          min={connect ? CONN.minWall : 0.8} max={6} step={0.1}
+          min={connect ? CG.minWall : 0.8} max={6} step={0.1}
           disabled={cur.lockOuter && cur.lockCell}
-          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CONN.minWall) : v })}
+          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CG.minWall) : v })}
         />
         {connect && (
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
-            Минимум {CONN.minWall} мм — паз соединителя прячется внутри стенки.
+            Минимум {CG.minWall} мм — паз соединителя прячется внутри стенки.
           </p>
         )}
         <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
