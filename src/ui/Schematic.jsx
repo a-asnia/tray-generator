@@ -25,46 +25,52 @@ export function Schematic({ c, selection, onSelect }) {
       </g>
     );
 
-  for (let i = 0; i < L.nCols; i++) {
-    const x0 = W / 2 + L.cx0(i), x1 = x0 + L.cw(i);
-    pushSeg(`o:n:${i}`, x0, 0, x1 - x0, wallOut);
-    pushSeg(`o:s:${i}`, x0, D - wallOut, x1 - x0, wallOut);
+  // внешние N/S — по ячейкам крайних рядов; «кирпичная» раскладка:
+  // у каждого ряда свои перегородки
+  for (let i = 0; i < L.nColsAt(0); i++) {
+    const x0 = W / 2 + L.cx0(i, 0);
+    pushSeg(`o:n:${i}`, x0, 0, L.cw(i, 0), wallOut);
+  }
+  for (let i = 0; i < L.nColsAt(L.nRows - 1); i++) {
+    const x0 = W / 2 + L.cx0(i, L.nRows - 1);
+    pushSeg(`o:s:${i}`, x0, D - wallOut, L.cw(i, L.nRows - 1), wallOut);
   }
   for (let j = 0; j < L.nRows; j++) {
     const z0 = D / 2 + L.cz0(j), z1 = z0 + L.cd(j);
     pushSeg(`o:w:${j}`, 0, z0, wallOut, z1 - z0);
     pushSeg(`o:e:${j}`, W - wallOut, z0, wallOut, z1 - z0);
   }
-  for (let i = 0; i < L.nCols - 1; i++) {
-    const xd = W / 2 + L.cx0(i) + L.cw(i);
-    for (let j = 0; j < L.nRows; j++) pushSeg(`v:${i}:${j}`, xd, D / 2 + L.cz0(j), wall, L.cd(j));
-  }
+  for (let j = 0; j < L.nRows; j++)
+    for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+      const xd = W / 2 + L.cx0(i, j) + L.cw(i, j);
+      pushSeg(`v:${i}:${j}`, xd, D / 2 + L.cz0(j), wall, L.cd(j));
+    }
   for (let j = 0; j < L.nRows - 1; j++) {
     const zd = D / 2 + L.cz0(j) + L.cd(j);
-    for (let i = 0; i < L.nCols; i++) pushSeg(`h:${j}:${i}`, W / 2 + L.cx0(i), zd, L.cw(i), wall);
+    for (let i = 0; i < L.nColsAt(j); i++) pushSeg(`h:${j}:${i}`, W / 2 + L.cx0(i, j), zd, L.cw(i, j), wall);
   }
 
   const cells = [];
-  for (let i = 0; i < L.nCols; i++)
-    for (let j = 0; j < L.nRows; j++) {
-      const x0 = W / 2 + L.cx0(i), z0 = D / 2 + L.cz0(j);
+  for (let j = 0; j < L.nRows; j++)
+    for (let i = 0; i < L.nColsAt(j); i++) {
+      const x0 = W / 2 + L.cx0(i, j), z0 = D / 2 + L.cz0(j);
       const selCell = selection?.type === "cell" && selection.i === i && selection.j === j;
       const lvl = getCellLvl(c, i, j);
       cells.push(
         <g key={`c${i}-${j}`} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); onSelect({ type: "cell", i, j }); }}>
           <rect
-            x={x0} y={z0} width={L.cw(i)} height={L.cd(j)}
+            x={x0} y={z0} width={L.cw(i, j)} height={L.cd(j)}
             fill={selCell ? "#DBEAFE" : lvl > 0 ? "#EAE4D8" : "#FFFFFF"} stroke={selCell ? SEL : "none"} strokeWidth={0.5}
           />
           {lvl > 0 && (
-            <text x={x0 + L.cellW / 2} y={z0 + L.cellD / 2} textAnchor="middle" dominantBaseline="central"
-              fontSize={Math.min(L.cw(i), L.cd(j)) * 0.3} fill="#8A7B5C">
+            <text x={x0 + L.cw(i, j) / 2} y={z0 + L.cd(j) / 2} textAnchor="middle" dominantBaseline="central"
+              fontSize={Math.min(L.cw(i, j), L.cd(j)) * 0.3} fill="#8A7B5C">
               {lvl}
             </text>
           )}
-          {(((c.lockedCols || {})[i]) || ((c.lockedRows || {})[j])) && (
+          {(((c.lockedCellW || {})[i + ":" + j]) || ((c.lockedRows || {})[j])) && (
             <text x={x0 + 1.5} y={z0 + 1.5} dominantBaseline="hanging"
-              fontSize={Math.min(L.cw(i), L.cd(j)) * 0.22} fill="#64748B">
+              fontSize={Math.min(L.cw(i, j), L.cd(j)) * 0.22} fill="#64748B">
               🔒
             </text>
           )}

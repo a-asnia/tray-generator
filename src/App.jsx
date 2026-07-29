@@ -7,7 +7,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
 import { CONN, connectorVs } from "./model/connectors.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes } from "./model/layout.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -56,12 +56,13 @@ export default function TrayGenerator() {
   };
 
   const updCur = (patch) => {
-    // смена деления на ячейки снимает замки колонок/рядов по этой оси:
-    // явные размеры относятся к конкретной сетке
+    // смена деления на ячейки снимает замки и вписанные размеры:
+    // они привязаны к конкретной сетке (при смене рядов индексы ячеек
+    // сдвигаются, поэтому сбрасываются и ширины ячеек)
     if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
-      patch = { colWs: null, lockedCols: {}, ...patch };
+      patch = { rowColWs: null, lockedCellW: {}, ...patch };
     if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
-      patch = { rowDs: null, lockedRows: {}, ...patch };
+      patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, ...patch };
     setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
     if (
       patch.cols !== undefined || patch.rows !== undefined ||
@@ -136,14 +137,18 @@ export default function TrayGenerator() {
         (g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell)
       );
       const minOf = (g) => Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
-      // расширяться может только контейнер, у которого на этой оси есть
-      // хотя бы одна незаблокированная колонка/ряд — рост впитывают
-      // свободные ячейки, зафиксированные не меняются никогда
-      const canGrow = (c) => {
-        const L = layout(c);
-        const locked = (isW ? c.lockedCols : c.lockedRows) || {};
-        const n = (isW ? L.colWs : L.rowDs).length;
-        return Object.keys(locked).filter((k) => +k >= 0 && +k < n).length < n;
+      // расширяться может только контейнер, который способен впитать рост
+      // свободными ячейками: по ширине — в КАЖДОМ ряду есть незамкнутая
+      // ячейка, по глубине — есть незамкнутый ряд
+      const canGrow = (cc) => {
+        const Lg = layout(cc);
+        if (!isW) {
+          const locked = cc.lockedRows || {};
+          return Object.keys(locked).filter((k) => +k >= 0 && +k < Lg.nRows).length < Lg.nRows;
+        }
+        for (let j = 0; j < Lg.nRows; j++)
+          if (Object.keys(lockedWIn(cc, j)).length >= Lg.nColsAt(j)) return false;
+        return true;
       };
       const capOf = (g) => (groupOf(g).every(canGrow) ? maxAxis : widthIn(next, g));
       const targets = new Map(adjustable.map((g) => [g, widthIn(next, g)]));
@@ -209,49 +214,66 @@ export default function TrayGenerator() {
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
 
-  // Замок колонки/ряда: текущие размеры сетки материализуются в явные
-  // (colWs/rowDs) и дальше держатся точно. Снятие замка размеры НЕ
-  // выравнивает — вписанные вручную остаются, просто снова могут меняться.
-  const toggleColLock = (i) => {
+  // Замок ширины держит только ЭТУ ячейку: её ряд получает явные размеры
+  // (rowColWs), перегородки других рядов независимы и не обязаны совпадать.
+  // Снятие замка размеры НЕ выравнивает — вписанные вручную остаются.
+  const toggleCellWLock = (i, j) => {
     const Lc = layout(cur);
-    const locked = { ...(cur.lockedCols || {}) };
-    if (locked[i]) delete locked[i]; else locked[i] = true;
-    updCur({ lockedCols: locked, colWs: Lc.colWs.slice() });
+    const key = i + ":" + j;
+    const locked = { ...(cur.lockedCellW || {}) };
+    if (locked[key]) delete locked[key]; else locked[key] = true;
+    const rowColWs = { ...(cur.rowColWs || {}) };
+    rowColWs[j] = Lc.rowCols[j].slice();
+    updCur({ lockedCellW: locked, rowColWs });
   };
+  // глубина у ряда общая (ряды — полосы на всю ширину), её держит замок ряда
   const toggleRowLock = (j) => {
     const Lc = layout(cur);
     const locked = { ...(cur.lockedRows || {}) };
     if (locked[j]) delete locked[j]; else locked[j] = true;
     updCur({ lockedRows: locked, rowDs: Lc.rowDs.slice() });
   };
-  // общий замок ячейки: фиксирует/освобождает сразу оба её края
+  // общий замок ячейки: её ширина + глубина её ряда
   const setCellLockBoth = (i, j, on) => {
     const Lc = layout(cur);
-    const lc = { ...(cur.lockedCols || {}) }, lr = { ...(cur.lockedRows || {}) };
-    if (on) { lc[i] = true; lr[j] = true; } else { delete lc[i]; delete lr[j]; }
-    updCur({ lockedCols: lc, lockedRows: lr, colWs: Lc.colWs.slice(), rowDs: Lc.rowDs.slice() });
+    const key = i + ":" + j;
+    const lw = { ...(cur.lockedCellW || {}) }, lr = { ...(cur.lockedRows || {}) };
+    if (on) { lw[key] = true; lr[j] = true; } else { delete lw[key]; delete lr[j]; }
+    const rowColWs = { ...(cur.rowColWs || {}) };
+    rowColWs[j] = Lc.rowCols[j].slice();
+    updCur({ lockedCellW: lw, lockedRows: lr, rowColWs, rowDs: Lc.rowDs.slice() });
   };
 
-  // Задать размер конкретной ячейки (её колонки/ряда) с панели: контейнер
-  // растёт или ужимается на разницу, остальные ячейки не трогаются. Если
-  // рост упирается в лимит принтера — недостающее добирается у свободных
-  // (незамкнутых) колонок/рядов; зафиксированные не меняются никогда.
-  const setCellSize = (axis, idx, v) => {
+  // Задать ширину конкретной ячейки: меняется только её ряд, контейнер
+  // растёт/ужимается на разницу (другие ряды подстраиваются свободными
+  // ячейками). У лимита принтера недостающее добирается у свободных
+  // ячеек этого же ряда; зафиксированные не меняются никогда.
+  const setCellWidth = (i, j, v) => {
+    if ((cur.lockedCellW || {})[i + ":" + j]) return;
     const Lc = layout(cur);
-    const col = axis === "col";
-    const locked0 = (col ? cur.lockedCols : cur.lockedRows) || {};
-    if (locked0[idx]) return;
-    const sizes = (col ? Lc.colWs : Lc.rowDs).slice();
-    const dimKey = col ? "W" : "D";
-    const maxDim = col ? limits.maxW : limits.maxD;
+    const sizes = Lc.rowCols[j].slice();
     const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
-    // потолок: остальным ячейкам оставляем хотя бы по 10 мм
-    sizes[idx] = Math.max(10, Math.min(v, maxDim - wallSum - (sizes.length - 1) * 10));
+    // потолок: остальным ячейкам ряда оставляем хотя бы по 10 мм
+    sizes[i] = Math.max(10, Math.min(v, limits.maxW - wallSum - (sizes.length - 1) * 10));
     const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
-    const dim2 = Math.round(Math.max(30, Math.min(want, maxDim)) * 10) / 10;
-    const fitted = fitSizes(sizes, { ...locked0, [idx]: true }, dim2 - wallSum);
-    updCur(col ? { colWs: fitted } : { rowDs: fitted });
-    applyOuterDim({ [dimKey]: dim2 });
+    const W2 = Math.round(Math.max(30, Math.min(want, limits.maxW)) * 10) / 10;
+    const fitted = fitSizes(sizes, { ...lockedWIn(cur, j), [i]: true }, W2 - wallSum);
+    const rowColWs = { ...(cur.rowColWs || {}) };
+    rowColWs[j] = fitted;
+    updCur({ rowColWs });
+    applyOuterDim({ W: W2 });
+  };
+  const setRowDepth = (j, v) => {
+    if ((cur.lockedRows || {})[j]) return;
+    const Lc = layout(cur);
+    const sizes = Lc.rowDs.slice();
+    const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+    sizes[j] = Math.max(10, Math.min(v, limits.maxD - wallSum - (sizes.length - 1) * 10));
+    const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
+    const D2 = Math.round(Math.max(30, Math.min(want, limits.maxD)) * 10) / 10;
+    const fitted = fitSizes(sizes, { ...(cur.lockedRows || {}), [j]: true }, D2 - wallSum);
+    updCur({ rowDs: fitted });
+    applyOuterDim({ D: D2 });
   };
 
   const updCell = (i, j, patch) => {
@@ -659,7 +681,7 @@ export default function TrayGenerator() {
     const keys = cellKeys(cur, selection.i, selection.j);
     const firstH = getWall(cur, keys[0].key).h;
     const Lsel = layout(cur);
-    const colLocked = !!(cur.lockedCols || {})[selection.i];
+    const colLocked = !!(cur.lockedCellW || {})[selection.i + ":" + selection.j];
     const rowLocked = !!(cur.lockedRows || {})[selection.j];
     const lockBtn = (on, text, onClick) => (
       <button
@@ -680,14 +702,14 @@ export default function TrayGenerator() {
         </div>
         <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" }}>Размер этой ячейки</div>
         <Param
-          label="Ширина ячейки" unit="мм" value={Math.round(Lsel.cw(selection.i) * 10) / 10}
+          label="Ширина ячейки" unit="мм" value={Math.round(Lsel.cw(selection.i, selection.j) * 10) / 10}
           min={10} max={limits.maxW} step={0.5} disabled={colLocked}
-          onChange={(v) => setCellSize("col", selection.i, v)}
+          onChange={(v) => setCellWidth(selection.i, selection.j, v)}
         />
         <Param
           label="Глубина ячейки" unit="мм" value={Math.round(Lsel.cd(selection.j) * 10) / 10}
           min={10} max={limits.maxD} step={0.5} disabled={rowLocked}
-          onChange={(v) => setCellSize("row", selection.j, v)}
+          onChange={(v) => setRowDepth(selection.j, v)}
         />
         <button
           onClick={() => setCellLockBoth(selection.i, selection.j, !(colLocked && rowLocked))}
@@ -700,11 +722,11 @@ export default function TrayGenerator() {
           {colLocked && rowLocked ? "🔒 Снять фиксацию ячейки" : "🔒 Зафиксировать эту ячейку"}
         </button>
         <div style={{ display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" }}>
-          {lockBtn(colLocked, "ширина", () => toggleColLock(selection.i))}
-          {lockBtn(rowLocked, "глубина", () => toggleRowLock(selection.j))}
+          {lockBtn(colLocked, "ширина (эта ячейка)", () => toggleCellWLock(selection.i, selection.j))}
+          {lockBtn(rowLocked, "глубина (весь ряд)", () => toggleRowLock(selection.j))}
         </div>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
-          Впишите размер и нажмите «Зафиксировать» — края этой ячейки будут держаться точно, соседние останутся свободными. При изменении размера свободной ячейки контейнер растёт или ужимается на разницу; если рост упирается в лимит принтера, недостающее забирается у свободных ячеек. Ячейки стоят сеткой, поэтому ширина фиксируется у всей колонки, а глубина — у всего ряда (иначе перегородки разъедутся). Изменение числа ячеек снимает замки и вписанные размеры.
+          Впишите размер и нажмите «Зафиксировать» — замок ширины держит только эту ячейку: перегородки в разных рядах независимы и не обязаны совпадать. Глубина у всех ячеек ряда общая (ряды — полосы на всю ширину контейнера), поэтому её замок держит весь ряд. При изменении размера свободной ячейки контейнер растёт или ужимается на разницу; если рост упирается в лимит принтера, недостающее забирается у свободных ячеек этого ряда. Изменение числа ячеек снимает замки и вписанные размеры.
         </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}

@@ -415,15 +415,36 @@ function fitSizes(sizes, locked, total) {
     }
     return out;
 }
-// минимальный внешний габарит по оси с учётом замков колонок/рядов:
-// зафиксированные размеры + по 10 мм на каждую свободную колонку/ряд
+// замки ширины отдельных ячеек: ключ "i:j" (i — номер ячейки в ряду j)
+const lockedWIn = (c, j) => {
+    const out = {};
+    for (const k of Object.keys(c.lockedCellW || {})) {
+        const [i, jj] = k.split(":");
+        if (+jj === j)
+            out[+i] = true;
+    }
+    return out;
+};
+// минимальный внешний габарит по оси с учётом замков. Ширина: у каждого
+// ряда своя раскладка — берём самый требовательный ряд (зафиксированные
+// ячейки + по 10 мм на свободные). Глубина: замки рядов.
 function minOuterDim(c, axis) {
     const L = layout(c);
-    const locked = (axis === "W" ? c.lockedCols : c.lockedRows) || {};
-    const sizes = axis === "W" ? L.colWs : L.rowDs;
-    let lockedSum = 0, freeN = 0;
-    sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
-    return Math.max(30, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+    if (axis === "D") {
+        const locked = c.lockedRows || {};
+        let lockedSum = 0, freeN = 0;
+        L.rowDs.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+        return Math.max(30, 2 * c.wallOut + (L.rowDs.length - 1) * c.wall + lockedSum + freeN * 10);
+    }
+    let need = 30;
+    for (let j = 0; j < L.nRows; j++) {
+        const locked = lockedWIn(c, j);
+        const sizes = L.rowCols[j];
+        let lockedSum = 0, freeN = 0;
+        sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+        need = Math.max(need, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+    }
+    return need;
 }
 function layout(c) {
     const innerW = c.W - 2 * c.wallOut;
@@ -437,24 +458,56 @@ function layout(c) {
         colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
         rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
     }
-    // явные размеры (появляются при замке колонки/ряда) фиксируют сетку:
-    // число колонок/рядов берётся из них, свободные подгоняются под габарит
-    if (c.colWs && c.colWs.length)
-        colWs = fitSizes(c.colWs, c.lockedCols || {}, innerW - (c.colWs.length - 1) * c.wall);
+    // явные размеры рядов (появляются при замке ряда) фиксируют сетку рядов
     if (c.rowDs && c.rowDs.length)
         rowDs = fitSizes(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
+    const nRows = rowDs.length;
+    // «кирпичная» раскладка: у каждого ряда СВОИ ширины ячеек — вертикальные
+    // перегородки разных рядов не обязаны совпадать. rowColWs[j] — явные
+    // ширины ряда j (появляются при замке или ручном размере ячейки);
+    // без них ряд делится равномерно по colWs
+    const rowCols = [];
+    for (let j = 0; j < nRows; j++) {
+        const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length ? c.rowColWs[j] : colWs;
+        const lockedJ = {};
+        for (const k of Object.keys(c.lockedCellW || {})) {
+            const [ii, jj] = k.split(":");
+            if (+jj === j)
+                lockedJ[+ii] = true;
+        }
+        rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall));
+    }
     const pref = (arr) => { const p = [0]; for (const v of arr)
         p.push(p[p.length - 1] + v); return p; };
-    const pw = pref(colWs), pd = pref(rowDs);
+    const pd = pref(rowDs);
+    const pws = rowCols.map(pref);
     const clampI = (arr, k) => arr[Math.max(0, Math.min(arr.length - 1, k))];
+    const clampJ = (j) => Math.max(0, Math.min(nRows - 1, j));
+    const cx0 = (i, j = 0) => {
+        const jj = clampJ(j);
+        return -innerW / 2 + pws[jj][Math.max(0, Math.min(rowCols[jj].length, i))] + i * c.wall;
+    };
+    const cw = (i, j = 0) => clampI(rowCols[clampJ(j)], i);
     return {
-        innerW, innerD, colWs, rowDs,
-        nCols: colWs.length, nRows: rowDs.length,
-        cx0: (i) => -innerW / 2 + pw[Math.max(0, Math.min(colWs.length, i))] + i * c.wall,
-        cz0: (j) => -innerD / 2 + pd[Math.max(0, Math.min(rowDs.length, j))] + j * c.wall,
-        cw: (i) => clampI(colWs, i),
+        innerW, innerD, rowDs, rowCols,
+        colWs: rowCols[0], // совместимость: колонки первого ряда
+        nCols: rowCols[0].length, nRows,
+        nColsAt: (j) => rowCols[clampJ(j)].length,
+        cx0,
+        cz0: (j) => -innerD / 2 + pd[Math.max(0, Math.min(nRows, j))] + j * c.wall,
+        cw,
         cd: (j) => clampI(rowDs, j),
-        cellW: colWs[0], cellD: rowDs[0],
+        // ячейка ряда j, накрывающая координату x (для стыковки рядов)
+        cellIndexAt: (j, x) => {
+            const jj = clampJ(j);
+            let best = 0;
+            for (let i = 0; i < rowCols[jj].length; i++) {
+                if (x >= cx0(i, jj) - c.wall)
+                    best = i;
+            }
+            return best;
+        },
+        cellW: rowCols[0][0], cellD: rowDs[0],
     };
 }
 const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: 0, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
@@ -473,7 +526,8 @@ function lineOf(c, key) {
     const Lc = layout(c);
     if (parts[0] === "o") {
         const side = parts[1];
-        const n = side === "n" || side === "s" ? Lc.nCols : Lc.nRows;
+        // сегменты N/S идут по ячейкам крайнего ряда (ближнего или дальнего)
+        const n = side === "n" ? Lc.nColsAt(0) : side === "s" ? Lc.nColsAt(Lc.nRows - 1) : Lc.nRows;
         const names = { n: "ближняя", s: "дальняя", w: "левая", e: "правая" };
         return {
             keys: Array.from({ length: n }, (_, k) => `o:${side}:${k}`),
@@ -482,27 +536,37 @@ function lineOf(c, key) {
         };
     }
     if (parts[0] === "v") {
+        // перегородки разных рядов не обязаны совпадать — «линия» собирает
+        // сегменты с тем же номером в рядах, где такая перегородка есть
         const i = +parts[1];
+        const keys = [];
+        for (let j = 0; j < Lc.nRows; j++)
+            if (i < Lc.nColsAt(j) - 1)
+                keys.push(`v:${i}:${j}`);
         return {
-            keys: Array.from({ length: Lc.nRows }, (_, j) => `v:${i}:${j}`),
-            label: `Перегородка целиком (после колонки ${i + 1})`,
+            keys,
+            label: `Перегородка целиком (после ячейки ${i + 1} в каждом ряду)`,
             outer: false,
         };
     }
     const j = +parts[1];
     return {
-        keys: Array.from({ length: Lc.nCols }, (_, i) => `h:${j}:${i}`),
+        keys: Array.from({ length: Lc.nColsAt(j) }, (_, i) => `h:${j}:${i}`),
         label: `Перегородка целиком (после ряда ${j + 1})`,
         outer: false,
     };
 }
 function cellKeys(c, i, j) {
     const L = layout(c);
+    // сегменты горизонтальной перегородки h:j идут по ячейкам ряда j;
+    // для «ближней» стенки ячейки берём сегмент ряда выше, накрывающий её центр
+    const xc = L.cx0(i, j) + L.cw(i, j) / 2;
+    const nearKey = j === 0 ? `o:n:${i}` : `h:${j - 1}:${L.cellIndexAt(j - 1, xc)}`;
     return [
-        { side: "Ближняя", key: j === 0 ? `o:n:${i}` : `h:${j - 1}:${i}`, slot: j === 0 ? "t1" : "t2" },
+        { side: "Ближняя", key: nearKey, slot: j === 0 ? "t1" : "t2" },
         { side: "Дальняя", key: j === L.nRows - 1 ? `o:s:${i}` : `h:${j}:${i}`, slot: "t1" },
         { side: "Левая", key: i === 0 ? `o:w:${j}` : `v:${i - 1}:${j}`, slot: i === 0 ? "t1" : "t2" },
-        { side: "Правая", key: i === L.nCols - 1 ? `o:e:${j}` : `v:${i}:${j}`, slot: "t1" },
+        { side: "Правая", key: i === L.nColsAt(j) - 1 ? `o:e:${j}` : `v:${i}:${j}`, slot: "t1" },
     ];
 }
 // подписи концов сегмента для спуска кромки (вдоль оси сегмента)
@@ -1142,15 +1206,16 @@ function buildContainer(c, conn) {
     };
     // пол — по ячейкам: у каждой свой уровень (лесенка). Плита заходит под
     // окружающие стенки (они и есть «ножки»); под поднятым полом — пустота.
+    // Раскладка «кирпичная»: у каждого ряда свои ячейки (i — индекс в ряду j).
     const cellLvl = (i, j) => Math.min(getCellLvl(c, i, j), H - 4);
-    for (let i = 0; i < L.nCols; i++)
-        for (let j = 0; j < L.nRows; j++) {
+    for (let j = 0; j < L.nRows; j++)
+        for (let i = 0; i < L.nColsAt(j); i++) {
             const lvl = cellLvl(i, j);
             // заход плиты под стенки — строго по толщине конкретной стенки:
             // под внешнюю на wallOut, под перегородку на wall. Ни плита, ни
             // рёбра под ней не пересекают внутренний объём соседней ячейки.
-            const xa = Math.max(-W / 2, L.cx0(i) - (i === 0 ? wallOut : wall));
-            const xb = Math.min(W / 2, L.cx0(i) + L.cw(i) + (i === L.nCols - 1 ? wallOut : wall));
+            const xa = Math.max(-W / 2, L.cx0(i, j) - (i === 0 ? wallOut : wall));
+            const xb = Math.min(W / 2, L.cx0(i, j) + L.cw(i, j) + (i === L.nColsAt(j) - 1 ? wallOut : wall));
             const za = Math.max(-D / 2, L.cz0(j) - (j === 0 ? wallOut : wall));
             const zb = Math.min(D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? wallOut : wall));
             const cc = (c.cells && c.cells[i + ":" + j]) || {};
@@ -1162,7 +1227,7 @@ function buildContainer(c, conn) {
             else {
                 // наклонный пол: клин, спускающийся к выбранной стороне; верх высокой
                 // кромки ограничен высотой контейнера
-                const span = fDir === "w" || fDir === "e" ? L.cw(i) : L.cd(j);
+                const span = fDir === "w" || fDir === "e" ? L.cw(i, j) : L.cd(j);
                 const rise = Math.min(span * Math.tan((fA * Math.PI) / 180), Math.max(0, H - lvl - floor - 1));
                 const yLo = lvl + floor, yHi = lvl + floor + rise;
                 let capA, capB;
@@ -1206,11 +1271,12 @@ function buildContainer(c, conn) {
                 }
             }
         }
-    // внешние стенки N/S (сегменты вдоль X), с вырезом под зоны соединителей
-    for (let i = 0; i < L.nCols; i++) {
-        const x0 = L.cx0(i), x1 = x0 + L.cw(i);
-        const bx0 = Math.max(-W / 2, x0 - wallOut), bx1 = Math.min(W / 2, x1 + wallOut);
-        for (const [side, zones] of [["n", zN], ["s", zS]]) {
+    // внешние стенки N/S (сегменты вдоль X), с вырезом под зоны соединителей;
+    // сегменты идут по ячейкам крайнего ряда — ближнего (N) или дальнего (S)
+    for (const [side, zones, jRow] of [["n", zN, 0], ["s", zS, L.nRows - 1]]) {
+        for (let i = 0; i < L.nColsAt(jRow); i++) {
+            const x0 = L.cx0(i, jRow), x1 = x0 + L.cw(i, jRow);
+            const bx0 = Math.max(-W / 2, x0 - wallOut), bx1 = Math.min(W / 2, x1 + wallOut);
             const key = `o:${side}:${i}`;
             const wc = getWall(c, key);
             if (wc.h > 0.3) {
@@ -1220,7 +1286,7 @@ function buildContainer(c, conn) {
                 for (const [a, b] of splitRange(bx0, bx1, zones))
                     pushWallAuto(key, wc, wallOut, false, a, b, bx0, bx1, mapFn);
                 const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-                addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(side === "n" ? 0 : L.nRows - 1), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, side === "n" ? 0 : L.nRows - 1), key);
+                addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(jRow), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, jRow), key);
             }
         }
     }
@@ -1255,10 +1321,11 @@ function buildContainer(c, conn) {
     if (conn.W?.male)
         for (const [a, b] of zW)
             solids.push(boxSolid(-(W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
-    // вертикальные перегородки
-    for (let i = 0; i < L.nCols - 1; i++) {
-        const xd = L.cx0(i) + L.cw(i) + wall / 2;
-        for (let j = 0; j < L.nRows; j++) {
+    // вертикальные перегородки — свои в каждом ряду («кирпичная» раскладка,
+    // перегородки соседних рядов не обязаны совпадать)
+    for (let j = 0; j < L.nRows; j++) {
+        for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+            const xd = L.cx0(i, j) + L.cw(i, j) + wall / 2;
             const key = `v:${i}:${j}`;
             const wc = getWall(c, key);
             const z0 = L.cz0(j), z1 = z0 + L.cd(j);
@@ -1266,24 +1333,27 @@ function buildContainer(c, conn) {
             if (wc.h > 0.3) {
                 pushWallAuto(key, wc, wall, true, bz0, bz1, bz0, bz1, (o, y, z) => [xd + o, y, z]);
                 const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-                addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-                addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
+                addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i, j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+                addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1, j), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
             }
         }
     }
-    // горизонтальные перегородки
+    // горизонтальные перегородки: сегменты по ячейкам ряда j (верхнего);
+    // пандус на дальнюю сторону уходит в ячейку ряда j+1, накрывающую центр
+    // сегмента — при несовпадающих перегородках это ближайшая по перекрытию
     for (let j = 0; j < L.nRows - 1; j++) {
         const zd = L.cz0(j) + L.cd(j) + wall / 2;
-        for (let i = 0; i < L.nCols; i++) {
+        for (let i = 0; i < L.nColsAt(j); i++) {
             const key = `h:${j}:${i}`;
             const wc = getWall(c, key);
-            const x0 = L.cx0(i), x1 = x0 + L.cw(i);
+            const x0 = L.cx0(i, j), x1 = x0 + L.cw(i, j);
             const bx0 = Math.max(-W / 2 + wallOut * 0.5, x0 - wallOut), bx1 = Math.min(W / 2 - wallOut * 0.5, x1 + wallOut);
             if (wc.h > 0.3) {
                 pushWallAuto(key, wc, wall, true, bx0, bx1, bx0, bx1, (o, y, x) => [x, y, zd + o]);
                 const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+                const i2 = L.cellIndexAt(j + 1, (x0 + x1) / 2);
                 addRamp("z", zd - wall / 2, -1, x0, x1, hRamp, wc.t1, L.cd(j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-                addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i, j + 1), key);
+                addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i2, j + 1), key);
             }
         }
     }
@@ -1309,8 +1379,9 @@ const makeContainer = (src, gx, gy) => ({
     walls: {},
     cells: {},
     lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
-    // явные размеры колонок/рядов и их замки (фиксация отдельных ячеек)
-    colWs: null, rowDs: null, lockedCols: {}, lockedRows: {},
+    // «кирпичная» раскладка: явные ширины ячеек по рядам (rowColWs[j]),
+    // замки ширины отдельных ячеек ("i:j") и замки глубины рядов
+    rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {},
 });
 // автосохранение в localStorage: на сервере работает всегда; там, где
 // хранилище недоступно (песочницы предпросмотра), молча пропускаем
@@ -1327,11 +1398,26 @@ function loadSaved() {
         // переводим в «количество», сохраняя фактическую сетку; глобальный
         // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
         d.containers = d.containers.map((c) => {
-            const base = c.lockCell ? { ...c, lockCell: false } : c;
-            if (base.gridMode !== "size")
-                return base;
-            const L = layout(base);
-            return { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
+            let base = c.lockCell ? { ...c, lockCell: false } : c;
+            if (base.gridMode === "size") {
+                const L = layout(base);
+                base = { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
+            }
+            // старые общеколоночные размеры/замки (colWs/lockedCols) переводим
+            // в пер-рядные: те же ширины в каждом ряду, замок — в каждом ряду
+            if (base.colWs && base.colWs.length) {
+                const L = layout(base);
+                const rowColWs = { ...(base.rowColWs || {}) };
+                const lockedCellW = { ...(base.lockedCellW || {}) };
+                for (let j = 0; j < L.nRows; j++) {
+                    if (!rowColWs[j])
+                        rowColWs[j] = base.colWs.slice();
+                    for (const i of Object.keys(base.lockedCols || {}))
+                        lockedCellW[i + ":" + j] = true;
+                }
+                base = { ...base, rowColWs, lockedCellW, colWs: null, lockedCols: {} };
+            }
+            return base;
         });
         nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
         return d;
@@ -1424,36 +1510,41 @@ function Schematic({ c, selection, onSelect }) {
     const pushSeg = (key, x, z, sw, sd) => segs.push(React.createElement("g", { key: key, style: { cursor: "pointer" }, onClick: (e) => { e.stopPropagation(); onSelect({ type: "wall", key }); } },
         React.createElement("rect", { x: x - hit, y: z - hit, width: sw + 2 * hit, height: sd + 2 * hit, fill: "transparent" }),
         React.createElement("rect", { x: x, y: z, width: sw, height: sd, fill: isSel(key) ? SEL : getWall(c, key).h > 0.3 ? "#7B8AA0" : "#E2E8F0", rx: 0.4 })));
-    for (let i = 0; i < L.nCols; i++) {
-        const x0 = W / 2 + L.cx0(i), x1 = x0 + L.cw(i);
-        pushSeg(`o:n:${i}`, x0, 0, x1 - x0, wallOut);
-        pushSeg(`o:s:${i}`, x0, D - wallOut, x1 - x0, wallOut);
+    // внешние N/S — по ячейкам крайних рядов; «кирпичная» раскладка:
+    // у каждого ряда свои перегородки
+    for (let i = 0; i < L.nColsAt(0); i++) {
+        const x0 = W / 2 + L.cx0(i, 0);
+        pushSeg(`o:n:${i}`, x0, 0, L.cw(i, 0), wallOut);
+    }
+    for (let i = 0; i < L.nColsAt(L.nRows - 1); i++) {
+        const x0 = W / 2 + L.cx0(i, L.nRows - 1);
+        pushSeg(`o:s:${i}`, x0, D - wallOut, L.cw(i, L.nRows - 1), wallOut);
     }
     for (let j = 0; j < L.nRows; j++) {
         const z0 = D / 2 + L.cz0(j), z1 = z0 + L.cd(j);
         pushSeg(`o:w:${j}`, 0, z0, wallOut, z1 - z0);
         pushSeg(`o:e:${j}`, W - wallOut, z0, wallOut, z1 - z0);
     }
-    for (let i = 0; i < L.nCols - 1; i++) {
-        const xd = W / 2 + L.cx0(i) + L.cw(i);
-        for (let j = 0; j < L.nRows; j++)
+    for (let j = 0; j < L.nRows; j++)
+        for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+            const xd = W / 2 + L.cx0(i, j) + L.cw(i, j);
             pushSeg(`v:${i}:${j}`, xd, D / 2 + L.cz0(j), wall, L.cd(j));
-    }
+        }
     for (let j = 0; j < L.nRows - 1; j++) {
         const zd = D / 2 + L.cz0(j) + L.cd(j);
-        for (let i = 0; i < L.nCols; i++)
-            pushSeg(`h:${j}:${i}`, W / 2 + L.cx0(i), zd, L.cw(i), wall);
+        for (let i = 0; i < L.nColsAt(j); i++)
+            pushSeg(`h:${j}:${i}`, W / 2 + L.cx0(i, j), zd, L.cw(i, j), wall);
     }
     const cells = [];
-    for (let i = 0; i < L.nCols; i++)
-        for (let j = 0; j < L.nRows; j++) {
-            const x0 = W / 2 + L.cx0(i), z0 = D / 2 + L.cz0(j);
+    for (let j = 0; j < L.nRows; j++)
+        for (let i = 0; i < L.nColsAt(j); i++) {
+            const x0 = W / 2 + L.cx0(i, j), z0 = D / 2 + L.cz0(j);
             const selCell = selection?.type === "cell" && selection.i === i && selection.j === j;
             const lvl = getCellLvl(c, i, j);
             cells.push(React.createElement("g", { key: `c${i}-${j}`, style: { cursor: "pointer" }, onClick: (e) => { e.stopPropagation(); onSelect({ type: "cell", i, j }); } },
-                React.createElement("rect", { x: x0, y: z0, width: L.cw(i), height: L.cd(j), fill: selCell ? "#DBEAFE" : lvl > 0 ? "#EAE4D8" : "#FFFFFF", stroke: selCell ? SEL : "none", strokeWidth: 0.5 }),
-                lvl > 0 && (React.createElement("text", { x: x0 + L.cellW / 2, y: z0 + L.cellD / 2, textAnchor: "middle", dominantBaseline: "central", fontSize: Math.min(L.cw(i), L.cd(j)) * 0.3, fill: "#8A7B5C" }, lvl)),
-                (((c.lockedCols || {})[i]) || ((c.lockedRows || {})[j])) && (React.createElement("text", { x: x0 + 1.5, y: z0 + 1.5, dominantBaseline: "hanging", fontSize: Math.min(L.cw(i), L.cd(j)) * 0.22, fill: "#64748B" }, "\uD83D\uDD12"))));
+                React.createElement("rect", { x: x0, y: z0, width: L.cw(i, j), height: L.cd(j), fill: selCell ? "#DBEAFE" : lvl > 0 ? "#EAE4D8" : "#FFFFFF", stroke: selCell ? SEL : "none", strokeWidth: 0.5 }),
+                lvl > 0 && (React.createElement("text", { x: x0 + L.cw(i, j) / 2, y: z0 + L.cd(j) / 2, textAnchor: "middle", dominantBaseline: "central", fontSize: Math.min(L.cw(i, j), L.cd(j)) * 0.3, fill: "#8A7B5C" }, lvl)),
+                (((c.lockedCellW || {})[i + ":" + j]) || ((c.lockedRows || {})[j])) && (React.createElement("text", { x: x0 + 1.5, y: z0 + 1.5, dominantBaseline: "hanging", fontSize: Math.min(L.cw(i, j), L.cd(j)) * 0.22, fill: "#64748B" }, "\uD83D\uDD12"))));
         }
     return (React.createElement("svg", { viewBox: `-2 -2 ${W + 4} ${D + 4}`, style: { width: "100%", maxHeight: 210, background: "#F1F5F9", borderRadius: 10, border: "1px solid #E4E9EF", display: "block" }, onClick: () => onSelect(null) },
         React.createElement("rect", { x: 0, y: 0, width: W, height: D, fill: "#CBD5E1", rx: 1 }),
@@ -1563,16 +1654,18 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
                 const Lc = layout(cont);
                 const lx = hit.point.x - ud.ox, lz = hit.point.z - ud.oz;
                 let ci = -1, cj = -1;
-                for (let i = 0; i < Lc.nCols; i++)
-                    if (lx >= Lc.cx0(i) - cont.wall && lx <= Lc.cx0(i) + Lc.cw(i) + cont.wall) {
-                        ci = i;
-                        break;
-                    }
+                // сначала ряд, затем ячейка в нём — у рядов свои перегородки
                 for (let j = 0; j < Lc.nRows; j++)
                     if (lz >= Lc.cz0(j) - cont.wall && lz <= Lc.cz0(j) + Lc.cd(j) + cont.wall) {
                         cj = j;
                         break;
                     }
+                if (cj >= 0)
+                    for (let i = 0; i < Lc.nColsAt(cj); i++)
+                        if (lx >= Lc.cx0(i, cj) - cont.wall && lx <= Lc.cx0(i, cj) + Lc.cw(i, cj) + cont.wall) {
+                            ci = i;
+                            break;
+                        }
                 st.setSelection(ci >= 0 && cj >= 0 ? { type: "cell", i: ci, j: cj } : null);
                 return;
             }
@@ -1702,12 +1795,13 @@ function TrayGenerator() {
         setLimits(nl);
     };
     const updCur = (patch) => {
-        // смена деления на ячейки снимает замки колонок/рядов по этой оси:
-        // явные размеры относятся к конкретной сетке
+        // смена деления на ячейки снимает замки и вписанные размеры:
+        // они привязаны к конкретной сетке (при смене рядов индексы ячеек
+        // сдвигаются, поэтому сбрасываются и ширины ячеек)
         if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
-            patch = { colWs: null, lockedCols: {}, ...patch };
+            patch = { rowColWs: null, lockedCellW: {}, ...patch };
         if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
-            patch = { rowDs: null, lockedRows: {}, ...patch };
+            patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, ...patch };
         setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
         if (patch.cols !== undefined || patch.rows !== undefined ||
             patch.gridMode !== undefined || patch.cellWt !== undefined || patch.cellDt !== undefined ||
@@ -1782,14 +1876,19 @@ function TrayGenerator() {
             const groupOf = (g) => next.filter((c) => c[gKey] === g);
             const adjustable = [...new Set(next.map((c) => c[gKey]))].filter((g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell));
             const minOf = (g) => Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
-            // расширяться может только контейнер, у которого на этой оси есть
-            // хотя бы одна незаблокированная колонка/ряд — рост впитывают
-            // свободные ячейки, зафиксированные не меняются никогда
-            const canGrow = (c) => {
-                const L = layout(c);
-                const locked = (isW ? c.lockedCols : c.lockedRows) || {};
-                const n = (isW ? L.colWs : L.rowDs).length;
-                return Object.keys(locked).filter((k) => +k >= 0 && +k < n).length < n;
+            // расширяться может только контейнер, который способен впитать рост
+            // свободными ячейками: по ширине — в КАЖДОМ ряду есть незамкнутая
+            // ячейка, по глубине — есть незамкнутый ряд
+            const canGrow = (cc) => {
+                const Lg = layout(cc);
+                if (!isW) {
+                    const locked = cc.lockedRows || {};
+                    return Object.keys(locked).filter((k) => +k >= 0 && +k < Lg.nRows).length < Lg.nRows;
+                }
+                for (let j = 0; j < Lg.nRows; j++)
+                    if (Object.keys(lockedWIn(cc, j)).length >= Lg.nColsAt(j))
+                        return false;
+                return true;
             };
             const capOf = (g) => (groupOf(g).every(canGrow) ? maxAxis : widthIn(next, g));
             const targets = new Map(adjustable.map((g) => [g, widthIn(next, g)]));
@@ -1852,18 +1951,22 @@ function TrayGenerator() {
         // вкладка не переключается — остаёмся там, где нажали сброс
     };
     const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
-    // Замок колонки/ряда: текущие размеры сетки материализуются в явные
-    // (colWs/rowDs) и дальше держатся точно. Снятие замка размеры НЕ
-    // выравнивает — вписанные вручную остаются, просто снова могут меняться.
-    const toggleColLock = (i) => {
+    // Замок ширины держит только ЭТУ ячейку: её ряд получает явные размеры
+    // (rowColWs), перегородки других рядов независимы и не обязаны совпадать.
+    // Снятие замка размеры НЕ выравнивает — вписанные вручную остаются.
+    const toggleCellWLock = (i, j) => {
         const Lc = layout(cur);
-        const locked = { ...(cur.lockedCols || {}) };
-        if (locked[i])
-            delete locked[i];
+        const key = i + ":" + j;
+        const locked = { ...(cur.lockedCellW || {}) };
+        if (locked[key])
+            delete locked[key];
         else
-            locked[i] = true;
-        updCur({ lockedCols: locked, colWs: Lc.colWs.slice() });
+            locked[key] = true;
+        const rowColWs = { ...(cur.rowColWs || {}) };
+        rowColWs[j] = Lc.rowCols[j].slice();
+        updCur({ lockedCellW: locked, rowColWs });
     };
+    // глубина у ряда общая (ряды — полосы на всю ширину), её держит замок ряда
     const toggleRowLock = (j) => {
         const Lc = layout(cur);
         const locked = { ...(cur.lockedRows || {}) };
@@ -1873,41 +1976,55 @@ function TrayGenerator() {
             locked[j] = true;
         updCur({ lockedRows: locked, rowDs: Lc.rowDs.slice() });
     };
-    // общий замок ячейки: фиксирует/освобождает сразу оба её края
+    // общий замок ячейки: её ширина + глубина её ряда
     const setCellLockBoth = (i, j, on) => {
         const Lc = layout(cur);
-        const lc = { ...(cur.lockedCols || {}) }, lr = { ...(cur.lockedRows || {}) };
+        const key = i + ":" + j;
+        const lw = { ...(cur.lockedCellW || {}) }, lr = { ...(cur.lockedRows || {}) };
         if (on) {
-            lc[i] = true;
+            lw[key] = true;
             lr[j] = true;
         }
         else {
-            delete lc[i];
+            delete lw[key];
             delete lr[j];
         }
-        updCur({ lockedCols: lc, lockedRows: lr, colWs: Lc.colWs.slice(), rowDs: Lc.rowDs.slice() });
+        const rowColWs = { ...(cur.rowColWs || {}) };
+        rowColWs[j] = Lc.rowCols[j].slice();
+        updCur({ lockedCellW: lw, lockedRows: lr, rowColWs, rowDs: Lc.rowDs.slice() });
     };
-    // Задать размер конкретной ячейки (её колонки/ряда) с панели: контейнер
-    // растёт или ужимается на разницу, остальные ячейки не трогаются. Если
-    // рост упирается в лимит принтера — недостающее добирается у свободных
-    // (незамкнутых) колонок/рядов; зафиксированные не меняются никогда.
-    const setCellSize = (axis, idx, v) => {
-        const Lc = layout(cur);
-        const col = axis === "col";
-        const locked0 = (col ? cur.lockedCols : cur.lockedRows) || {};
-        if (locked0[idx])
+    // Задать ширину конкретной ячейки: меняется только её ряд, контейнер
+    // растёт/ужимается на разницу (другие ряды подстраиваются свободными
+    // ячейками). У лимита принтера недостающее добирается у свободных
+    // ячеек этого же ряда; зафиксированные не меняются никогда.
+    const setCellWidth = (i, j, v) => {
+        if ((cur.lockedCellW || {})[i + ":" + j])
             return;
-        const sizes = (col ? Lc.colWs : Lc.rowDs).slice();
-        const dimKey = col ? "W" : "D";
-        const maxDim = col ? limits.maxW : limits.maxD;
+        const Lc = layout(cur);
+        const sizes = Lc.rowCols[j].slice();
         const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
-        // потолок: остальным ячейкам оставляем хотя бы по 10 мм
-        sizes[idx] = Math.max(10, Math.min(v, maxDim - wallSum - (sizes.length - 1) * 10));
+        // потолок: остальным ячейкам ряда оставляем хотя бы по 10 мм
+        sizes[i] = Math.max(10, Math.min(v, limits.maxW - wallSum - (sizes.length - 1) * 10));
         const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
-        const dim2 = Math.round(Math.max(30, Math.min(want, maxDim)) * 10) / 10;
-        const fitted = fitSizes(sizes, { ...locked0, [idx]: true }, dim2 - wallSum);
-        updCur(col ? { colWs: fitted } : { rowDs: fitted });
-        applyOuterDim({ [dimKey]: dim2 });
+        const W2 = Math.round(Math.max(30, Math.min(want, limits.maxW)) * 10) / 10;
+        const fitted = fitSizes(sizes, { ...lockedWIn(cur, j), [i]: true }, W2 - wallSum);
+        const rowColWs = { ...(cur.rowColWs || {}) };
+        rowColWs[j] = fitted;
+        updCur({ rowColWs });
+        applyOuterDim({ W: W2 });
+    };
+    const setRowDepth = (j, v) => {
+        if ((cur.lockedRows || {})[j])
+            return;
+        const Lc = layout(cur);
+        const sizes = Lc.rowDs.slice();
+        const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+        sizes[j] = Math.max(10, Math.min(v, limits.maxD - wallSum - (sizes.length - 1) * 10));
+        const want = sizes.reduce((s, x) => s + x, 0) + wallSum;
+        const D2 = Math.round(Math.max(30, Math.min(want, limits.maxD)) * 10) / 10;
+        const fitted = fitSizes(sizes, { ...(cur.lockedRows || {}), [j]: true }, D2 - wallSum);
+        updCur({ rowDs: fitted });
+        applyOuterDim({ D: D2 });
     };
     const updCell = (i, j, patch) => {
         setContainers((cs) => cs.map((cc, idx) => {
@@ -2241,7 +2358,7 @@ function TrayGenerator() {
         const keys = cellKeys(cur, selection.i, selection.j);
         const firstH = getWall(cur, keys[0].key).h;
         const Lsel = layout(cur);
-        const colLocked = !!(cur.lockedCols || {})[selection.i];
+        const colLocked = !!(cur.lockedCellW || {})[selection.i + ":" + selection.j];
         const rowLocked = !!(cur.lockedRows || {})[selection.j];
         const lockBtn = (on, text, onClick) => (React.createElement("button", { onClick: onClick, style: {
                 padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
@@ -2258,17 +2375,17 @@ function TrayGenerator() {
                 "\u00D7",
                 selection.j + 1),
             React.createElement("div", { style: { fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "0 0 4px" } }, "\u0420\u0430\u0437\u043C\u0435\u0440 \u044D\u0442\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438"),
-            React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: Math.round(Lsel.cw(selection.i) * 10) / 10, min: 10, max: limits.maxW, step: 0.5, disabled: colLocked, onChange: (v) => setCellSize("col", selection.i, v) }),
-            React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: Math.round(Lsel.cd(selection.j) * 10) / 10, min: 10, max: limits.maxD, step: 0.5, disabled: rowLocked, onChange: (v) => setCellSize("row", selection.j, v) }),
+            React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: Math.round(Lsel.cw(selection.i, selection.j) * 10) / 10, min: 10, max: limits.maxW, step: 0.5, disabled: colLocked, onChange: (v) => setCellWidth(selection.i, selection.j, v) }),
+            React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: Math.round(Lsel.cd(selection.j) * 10) / 10, min: 10, max: limits.maxD, step: 0.5, disabled: rowLocked, onChange: (v) => setRowDepth(selection.j, v) }),
             React.createElement("button", { onClick: () => setCellLockBoth(selection.i, selection.j, !(colLocked && rowLocked)), style: {
                     width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
                     border: colLocked && rowLocked ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 6px",
                     background: colLocked && rowLocked ? "#DBEAFE" : "#fff", color: colLocked && rowLocked ? SEL : "#3D4A5C",
                 } }, colLocked && rowLocked ? "🔒 Снять фиксацию ячейки" : "🔒 Зафиксировать эту ячейку"),
             React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" } },
-                lockBtn(colLocked, "ширина", () => toggleColLock(selection.i)),
-                lockBtn(rowLocked, "глубина", () => toggleRowLock(selection.j))),
-            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 } }, "\u0412\u043F\u0438\u0448\u0438\u0442\u0435 \u0440\u0430\u0437\u043C\u0435\u0440 \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u00AB\u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C\u00BB \u2014 \u043A\u0440\u0430\u044F \u044D\u0442\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u0434\u0435\u0440\u0436\u0430\u0442\u044C\u0441\u044F \u0442\u043E\u0447\u043D\u043E, \u0441\u043E\u0441\u0435\u0434\u043D\u0438\u0435 \u043E\u0441\u0442\u0430\u043D\u0443\u0442\u0441\u044F \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u044B\u043C\u0438. \u041F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0440\u0430\u0437\u043C\u0435\u0440\u0430 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0440\u0430\u0441\u0442\u0451\u0442 \u0438\u043B\u0438 \u0443\u0436\u0438\u043C\u0430\u0435\u0442\u0441\u044F \u043D\u0430 \u0440\u0430\u0437\u043D\u0438\u0446\u0443; \u0435\u0441\u043B\u0438 \u0440\u043E\u0441\u0442 \u0443\u043F\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430, \u043D\u0435\u0434\u043E\u0441\u0442\u0430\u044E\u0449\u0435\u0435 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0443 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u044B\u0445 \u044F\u0447\u0435\u0435\u043A. \u042F\u0447\u0435\u0439\u043A\u0438 \u0441\u0442\u043E\u044F\u0442 \u0441\u0435\u0442\u043A\u043E\u0439, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0448\u0438\u0440\u0438\u043D\u0430 \u0444\u0438\u043A\u0441\u0438\u0440\u0443\u0435\u0442\u0441\u044F \u0443 \u0432\u0441\u0435\u0439 \u043A\u043E\u043B\u043E\u043D\u043A\u0438, \u0430 \u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u2014 \u0443 \u0432\u0441\u0435\u0433\u043E \u0440\u044F\u0434\u0430 (\u0438\u043D\u0430\u0447\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0440\u0430\u0437\u044A\u0435\u0434\u0443\u0442\u0441\u044F). \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435 \u0447\u0438\u0441\u043B\u0430 \u044F\u0447\u0435\u0435\u043A \u0441\u043D\u0438\u043C\u0430\u0435\u0442 \u0437\u0430\u043C\u043A\u0438 \u0438 \u0432\u043F\u0438\u0441\u0430\u043D\u043D\u044B\u0435 \u0440\u0430\u0437\u043C\u0435\u0440\u044B."),
+                lockBtn(colLocked, "ширина (эта ячейка)", () => toggleCellWLock(selection.i, selection.j)),
+                lockBtn(rowLocked, "глубина (весь ряд)", () => toggleRowLock(selection.j))),
+            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 } }, "\u0412\u043F\u0438\u0448\u0438\u0442\u0435 \u0440\u0430\u0437\u043C\u0435\u0440 \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u00AB\u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C\u00BB \u2014 \u0437\u0430\u043C\u043E\u043A \u0448\u0438\u0440\u0438\u043D\u044B \u0434\u0435\u0440\u0436\u0438\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u044D\u0442\u0443 \u044F\u0447\u0435\u0439\u043A\u0443: \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0432 \u0440\u0430\u0437\u043D\u044B\u0445 \u0440\u044F\u0434\u0430\u0445 \u043D\u0435\u0437\u0430\u0432\u0438\u0441\u0438\u043C\u044B \u0438 \u043D\u0435 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C. \u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u0443 \u0432\u0441\u0435\u0445 \u044F\u0447\u0435\u0435\u043A \u0440\u044F\u0434\u0430 \u043E\u0431\u0449\u0430\u044F (\u0440\u044F\u0434\u044B \u2014 \u043F\u043E\u043B\u043E\u0441\u044B \u043D\u0430 \u0432\u0441\u044E \u0448\u0438\u0440\u0438\u043D\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430), \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0435\u0451 \u0437\u0430\u043C\u043E\u043A \u0434\u0435\u0440\u0436\u0438\u0442 \u0432\u0435\u0441\u044C \u0440\u044F\u0434. \u041F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0440\u0430\u0437\u043C\u0435\u0440\u0430 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0440\u0430\u0441\u0442\u0451\u0442 \u0438\u043B\u0438 \u0443\u0436\u0438\u043C\u0430\u0435\u0442\u0441\u044F \u043D\u0430 \u0440\u0430\u0437\u043D\u0438\u0446\u0443; \u0435\u0441\u043B\u0438 \u0440\u043E\u0441\u0442 \u0443\u043F\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430, \u043D\u0435\u0434\u043E\u0441\u0442\u0430\u044E\u0449\u0435\u0435 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0443 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u044B\u0445 \u044F\u0447\u0435\u0435\u043A \u044D\u0442\u043E\u0433\u043E \u0440\u044F\u0434\u0430. \u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435 \u0447\u0438\u0441\u043B\u0430 \u044F\u0447\u0435\u0435\u043A \u0441\u043D\u0438\u043C\u0430\u0435\u0442 \u0437\u0430\u043C\u043A\u0438 \u0438 \u0432\u043F\u0438\u0441\u0430\u043D\u043D\u044B\u0435 \u0440\u0430\u0437\u043C\u0435\u0440\u044B."),
             React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: firstH, min: 0, max: limits.maxH, step: 0.5, onChange: (v) => updWalls(keys.map((k) => k.key), { h: v }) }),
             React.createElement(Param, { label: "\u0423\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 (\u043B\u0435\u0441\u0435\u043D\u043A\u0430)", unit: "\u043C\u043C", value: getCellLvl(cur, selection.i, selection.j), min: 0, max: Math.max(0, cur.H - 4), step: 0.5, onChange: (v) => updCell(selection.i, selection.j, { lvl: v }) }),
             (() => {

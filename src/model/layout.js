@@ -40,15 +40,36 @@ export function fitSizes(sizes, locked, total) {
   return out;
 }
 
-// минимальный внешний габарит по оси с учётом замков колонок/рядов:
-// зафиксированные размеры + по 10 мм на каждую свободную колонку/ряд
+// замки ширины отдельных ячеек: ключ "i:j" (i — номер ячейки в ряду j)
+export const lockedWIn = (c, j) => {
+  const out = {};
+  for (const k of Object.keys(c.lockedCellW || {})) {
+    const [i, jj] = k.split(":");
+    if (+jj === j) out[+i] = true;
+  }
+  return out;
+};
+
+// минимальный внешний габарит по оси с учётом замков. Ширина: у каждого
+// ряда своя раскладка — берём самый требовательный ряд (зафиксированные
+// ячейки + по 10 мм на свободные). Глубина: замки рядов.
 export function minOuterDim(c, axis) {
   const L = layout(c);
-  const locked = (axis === "W" ? c.lockedCols : c.lockedRows) || {};
-  const sizes = axis === "W" ? L.colWs : L.rowDs;
-  let lockedSum = 0, freeN = 0;
-  sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
-  return Math.max(30, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+  if (axis === "D") {
+    const locked = c.lockedRows || {};
+    let lockedSum = 0, freeN = 0;
+    L.rowDs.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+    return Math.max(30, 2 * c.wallOut + (L.rowDs.length - 1) * c.wall + lockedSum + freeN * 10);
+  }
+  let need = 30;
+  for (let j = 0; j < L.nRows; j++) {
+    const locked = lockedWIn(c, j);
+    const sizes = L.rowCols[j];
+    let lockedSum = 0, freeN = 0;
+    sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
+    need = Math.max(need, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
+  }
+  return need;
 }
 
 export function layout(c) {
@@ -62,21 +83,52 @@ export function layout(c) {
     colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
     rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
   }
-  // явные размеры (появляются при замке колонки/ряда) фиксируют сетку:
-  // число колонок/рядов берётся из них, свободные подгоняются под габарит
-  if (c.colWs && c.colWs.length) colWs = fitSizes(c.colWs, c.lockedCols || {}, innerW - (c.colWs.length - 1) * c.wall);
+  // явные размеры рядов (появляются при замке ряда) фиксируют сетку рядов
   if (c.rowDs && c.rowDs.length) rowDs = fitSizes(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
+  const nRows = rowDs.length;
+  // «кирпичная» раскладка: у каждого ряда СВОИ ширины ячеек — вертикальные
+  // перегородки разных рядов не обязаны совпадать. rowColWs[j] — явные
+  // ширины ряда j (появляются при замке или ручном размере ячейки);
+  // без них ряд делится равномерно по colWs
+  const rowCols = [];
+  for (let j = 0; j < nRows; j++) {
+    const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length ? c.rowColWs[j] : colWs;
+    const lockedJ = {};
+    for (const k of Object.keys(c.lockedCellW || {})) {
+      const [ii, jj] = k.split(":");
+      if (+jj === j) lockedJ[+ii] = true;
+    }
+    rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall));
+  }
   const pref = (arr) => { const p = [0]; for (const v of arr) p.push(p[p.length - 1] + v); return p; };
-  const pw = pref(colWs), pd = pref(rowDs);
+  const pd = pref(rowDs);
+  const pws = rowCols.map(pref);
   const clampI = (arr, k) => arr[Math.max(0, Math.min(arr.length - 1, k))];
+  const clampJ = (j) => Math.max(0, Math.min(nRows - 1, j));
+  const cx0 = (i, j = 0) => {
+    const jj = clampJ(j);
+    return -innerW / 2 + pws[jj][Math.max(0, Math.min(rowCols[jj].length, i))] + i * c.wall;
+  };
+  const cw = (i, j = 0) => clampI(rowCols[clampJ(j)], i);
   return {
-    innerW, innerD, colWs, rowDs,
-    nCols: colWs.length, nRows: rowDs.length,
-    cx0: (i) => -innerW / 2 + pw[Math.max(0, Math.min(colWs.length, i))] + i * c.wall,
-    cz0: (j) => -innerD / 2 + pd[Math.max(0, Math.min(rowDs.length, j))] + j * c.wall,
-    cw: (i) => clampI(colWs, i),
+    innerW, innerD, rowDs, rowCols,
+    colWs: rowCols[0], // совместимость: колонки первого ряда
+    nCols: rowCols[0].length, nRows,
+    nColsAt: (j) => rowCols[clampJ(j)].length,
+    cx0,
+    cz0: (j) => -innerD / 2 + pd[Math.max(0, Math.min(nRows, j))] + j * c.wall,
+    cw,
     cd: (j) => clampI(rowDs, j),
-    cellW: colWs[0], cellD: rowDs[0],
+    // ячейка ряда j, накрывающая координату x (для стыковки рядов)
+    cellIndexAt: (j, x) => {
+      const jj = clampJ(j);
+      let best = 0;
+      for (let i = 0; i < rowCols[jj].length; i++) {
+        if (x >= cx0(i, jj) - c.wall) best = i;
+      }
+      return best;
+    },
+    cellW: rowCols[0][0], cellD: rowDs[0],
   };
 }
 
@@ -97,7 +149,8 @@ export function lineOf(c, key) {
   const Lc = layout(c);
   if (parts[0] === "o") {
     const side = parts[1];
-    const n = side === "n" || side === "s" ? Lc.nCols : Lc.nRows;
+    // сегменты N/S идут по ячейкам крайнего ряда (ближнего или дальнего)
+    const n = side === "n" ? Lc.nColsAt(0) : side === "s" ? Lc.nColsAt(Lc.nRows - 1) : Lc.nRows;
     const names = { n: "ближняя", s: "дальняя", w: "левая", e: "правая" };
     return {
       keys: Array.from({ length: n }, (_, k) => `o:${side}:${k}`),
@@ -106,16 +159,20 @@ export function lineOf(c, key) {
     };
   }
   if (parts[0] === "v") {
+    // перегородки разных рядов не обязаны совпадать — «линия» собирает
+    // сегменты с тем же номером в рядах, где такая перегородка есть
     const i = +parts[1];
+    const keys = [];
+    for (let j = 0; j < Lc.nRows; j++) if (i < Lc.nColsAt(j) - 1) keys.push(`v:${i}:${j}`);
     return {
-      keys: Array.from({ length: Lc.nRows }, (_, j) => `v:${i}:${j}`),
-      label: `Перегородка целиком (после колонки ${i + 1})`,
+      keys,
+      label: `Перегородка целиком (после ячейки ${i + 1} в каждом ряду)`,
       outer: false,
     };
   }
   const j = +parts[1];
   return {
-    keys: Array.from({ length: Lc.nCols }, (_, i) => `h:${j}:${i}`),
+    keys: Array.from({ length: Lc.nColsAt(j) }, (_, i) => `h:${j}:${i}`),
     label: `Перегородка целиком (после ряда ${j + 1})`,
     outer: false,
   };
@@ -123,11 +180,15 @@ export function lineOf(c, key) {
 
 export function cellKeys(c, i, j) {
   const L = layout(c);
+  // сегменты горизонтальной перегородки h:j идут по ячейкам ряда j;
+  // для «ближней» стенки ячейки берём сегмент ряда выше, накрывающий её центр
+  const xc = L.cx0(i, j) + L.cw(i, j) / 2;
+  const nearKey = j === 0 ? `o:n:${i}` : `h:${j - 1}:${L.cellIndexAt(j - 1, xc)}`;
   return [
-    { side: "Ближняя", key: j === 0 ? `o:n:${i}` : `h:${j - 1}:${i}`, slot: j === 0 ? "t1" : "t2" },
+    { side: "Ближняя", key: nearKey, slot: j === 0 ? "t1" : "t2" },
     { side: "Дальняя", key: j === L.nRows - 1 ? `o:s:${i}` : `h:${j}:${i}`, slot: "t1" },
     { side: "Левая", key: i === 0 ? `o:w:${j}` : `v:${i - 1}:${j}`, slot: i === 0 ? "t1" : "t2" },
-    { side: "Правая", key: i === L.nCols - 1 ? `o:e:${j}` : `v:${i}:${j}`, slot: "t1" },
+    { side: "Правая", key: i === L.nColsAt(j) - 1 ? `o:e:${j}` : `v:${i}:${j}`, slot: "t1" },
   ];
 }
 

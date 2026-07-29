@@ -18,8 +18,9 @@ export const makeContainer = (src, gx, gy) => ({
   walls: {},
   cells: {},
   lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
-  // явные размеры колонок/рядов и их замки (фиксация отдельных ячеек)
-  colWs: null, rowDs: null, lockedCols: {}, lockedRows: {},
+  // «кирпичная» раскладка: явные ширины ячеек по рядам (rowColWs[j]),
+  // замки ширины отдельных ячеек ("i:j") и замки глубины рядов
+  rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {},
 });
 
 // автосохранение в localStorage: на сервере работает всегда; там, где
@@ -35,10 +36,24 @@ export function loadSaved() {
     // переводим в «количество», сохраняя фактическую сетку; глобальный
     // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
     d.containers = d.containers.map((c) => {
-      const base = c.lockCell ? { ...c, lockCell: false } : c;
-      if (base.gridMode !== "size") return base;
-      const L = layout(base);
-      return { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
+      let base = c.lockCell ? { ...c, lockCell: false } : c;
+      if (base.gridMode === "size") {
+        const L = layout(base);
+        base = { ...base, gridMode: "count", cols: L.nCols, rows: L.nRows };
+      }
+      // старые общеколоночные размеры/замки (colWs/lockedCols) переводим
+      // в пер-рядные: те же ширины в каждом ряду, замок — в каждом ряду
+      if (base.colWs && base.colWs.length) {
+        const L = layout(base);
+        const rowColWs = { ...(base.rowColWs || {}) };
+        const lockedCellW = { ...(base.lockedCellW || {}) };
+        for (let j = 0; j < L.nRows; j++) {
+          if (!rowColWs[j]) rowColWs[j] = base.colWs.slice();
+          for (const i of Object.keys(base.lockedCols || {})) lockedCellW[i + ":" + j] = true;
+        }
+        base = { ...base, rowColWs, lockedCellW, colWs: null, lockedCols: {} };
+      }
+      return base;
     });
     nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
     return d;

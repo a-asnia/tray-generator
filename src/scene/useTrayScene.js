@@ -101,10 +101,12 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
         const Lc = layout(cont);
         const lx = hit.point.x - ud.ox, lz = hit.point.z - ud.oz;
         let ci = -1, cj = -1;
-        for (let i = 0; i < Lc.nCols; i++)
-          if (lx >= Lc.cx0(i) - cont.wall && lx <= Lc.cx0(i) + Lc.cw(i) + cont.wall) { ci = i; break; }
+        // сначала ряд, затем ячейка в нём — у рядов свои перегородки
         for (let j = 0; j < Lc.nRows; j++)
           if (lz >= Lc.cz0(j) - cont.wall && lz <= Lc.cz0(j) + Lc.cd(j) + cont.wall) { cj = j; break; }
+        if (cj >= 0)
+          for (let i = 0; i < Lc.nColsAt(cj); i++)
+            if (lx >= Lc.cx0(i, cj) - cont.wall && lx <= Lc.cx0(i, cj) + Lc.cw(i, cj) + cont.wall) { ci = i; break; }
         st.setSelection(ci >= 0 && cj >= 0 ? { type: "cell", i: ci, j: cj } : null);
         return;
       }

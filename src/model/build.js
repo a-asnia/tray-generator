@@ -516,15 +516,16 @@ export function buildContainer(c, conn) {
 
   // пол — по ячейкам: у каждой свой уровень (лесенка). Плита заходит под
   // окружающие стенки (они и есть «ножки»); под поднятым полом — пустота.
+  // Раскладка «кирпичная»: у каждого ряда свои ячейки (i — индекс в ряду j).
   const cellLvl = (i, j) => Math.min(getCellLvl(c, i, j), H - 4);
-  for (let i = 0; i < L.nCols; i++)
-    for (let j = 0; j < L.nRows; j++) {
+  for (let j = 0; j < L.nRows; j++)
+    for (let i = 0; i < L.nColsAt(j); i++) {
       const lvl = cellLvl(i, j);
       // заход плиты под стенки — строго по толщине конкретной стенки:
       // под внешнюю на wallOut, под перегородку на wall. Ни плита, ни
       // рёбра под ней не пересекают внутренний объём соседней ячейки.
-      const xa = Math.max(-W / 2, L.cx0(i) - (i === 0 ? wallOut : wall));
-      const xb = Math.min(W / 2, L.cx0(i) + L.cw(i) + (i === L.nCols - 1 ? wallOut : wall));
+      const xa = Math.max(-W / 2, L.cx0(i, j) - (i === 0 ? wallOut : wall));
+      const xb = Math.min(W / 2, L.cx0(i, j) + L.cw(i, j) + (i === L.nColsAt(j) - 1 ? wallOut : wall));
       const za = Math.max(-D / 2, L.cz0(j) - (j === 0 ? wallOut : wall));
       const zb = Math.min(D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? wallOut : wall));
       const cc = (c.cells && c.cells[i + ":" + j]) || {};
@@ -535,7 +536,7 @@ export function buildContainer(c, conn) {
       } else {
         // наклонный пол: клин, спускающийся к выбранной стороне; верх высокой
         // кромки ограничен высотой контейнера
-        const span = fDir === "w" || fDir === "e" ? L.cw(i) : L.cd(j);
+        const span = fDir === "w" || fDir === "e" ? L.cw(i, j) : L.cd(j);
         const rise = Math.min(span * Math.tan((fA * Math.PI) / 180), Math.max(0, H - lvl - floor - 1));
         const yLo = lvl + floor, yHi = lvl + floor + rise;
         let capA, capB;
@@ -573,11 +574,12 @@ export function buildContainer(c, conn) {
       }
     }
 
-  // внешние стенки N/S (сегменты вдоль X), с вырезом под зоны соединителей
-  for (let i = 0; i < L.nCols; i++) {
-    const x0 = L.cx0(i), x1 = x0 + L.cw(i);
-    const bx0 = Math.max(-W / 2, x0 - wallOut), bx1 = Math.min(W / 2, x1 + wallOut);
-    for (const [side, zones] of [["n", zN], ["s", zS]]) {
+  // внешние стенки N/S (сегменты вдоль X), с вырезом под зоны соединителей;
+  // сегменты идут по ячейкам крайнего ряда — ближнего (N) или дальнего (S)
+  for (const [side, zones, jRow] of [["n", zN, 0], ["s", zS, L.nRows - 1]]) {
+    for (let i = 0; i < L.nColsAt(jRow); i++) {
+      const x0 = L.cx0(i, jRow), x1 = x0 + L.cw(i, jRow);
+      const bx0 = Math.max(-W / 2, x0 - wallOut), bx1 = Math.min(W / 2, x1 + wallOut);
       const key = `o:${side}:${i}`;
       const wc = getWall(c, key);
       if (wc.h > 0.3) {
@@ -586,7 +588,7 @@ export function buildContainer(c, conn) {
           : (o, y, x) => [x, y, D / 2 - o];
         for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bx0, bx1, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-        addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(side === "n" ? 0 : L.nRows - 1), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, side === "n" ? 0 : L.nRows - 1), key);
+        addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(jRow), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, jRow), key);
       }
     }
   }
@@ -617,10 +619,11 @@ export function buildContainer(c, conn) {
   if (conn.W?.male) for (const [a, b] of zW)
     solids.push(boxSolid(-(W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
 
-  // вертикальные перегородки
-  for (let i = 0; i < L.nCols - 1; i++) {
-    const xd = L.cx0(i) + L.cw(i) + wall / 2;
-    for (let j = 0; j < L.nRows; j++) {
+  // вертикальные перегородки — свои в каждом ряду («кирпичная» раскладка,
+  // перегородки соседних рядов не обязаны совпадать)
+  for (let j = 0; j < L.nRows; j++) {
+    for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+      const xd = L.cx0(i, j) + L.cw(i, j) + wall / 2;
       const key = `v:${i}:${j}`;
       const wc = getWall(c, key);
       const z0 = L.cz0(j), z1 = z0 + L.cd(j);
@@ -628,24 +631,27 @@ export function buildContainer(c, conn) {
       if (wc.h > 0.3) {
         pushWallAuto(key, wc, wall, true, bz0, bz1, bz0, bz1, (o, y, z) => [xd + o, y, z]);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-        addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-        addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
+        addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i, j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+        addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1, j), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
       }
     }
   }
-  // горизонтальные перегородки
+  // горизонтальные перегородки: сегменты по ячейкам ряда j (верхнего);
+  // пандус на дальнюю сторону уходит в ячейку ряда j+1, накрывающую центр
+  // сегмента — при несовпадающих перегородках это ближайшая по перекрытию
   for (let j = 0; j < L.nRows - 1; j++) {
     const zd = L.cz0(j) + L.cd(j) + wall / 2;
-    for (let i = 0; i < L.nCols; i++) {
+    for (let i = 0; i < L.nColsAt(j); i++) {
       const key = `h:${j}:${i}`;
       const wc = getWall(c, key);
-      const x0 = L.cx0(i), x1 = x0 + L.cw(i);
+      const x0 = L.cx0(i, j), x1 = x0 + L.cw(i, j);
       const bx0 = Math.max(-W / 2 + wallOut * 0.5, x0 - wallOut), bx1 = Math.min(W / 2 - wallOut * 0.5, x1 + wallOut);
       if (wc.h > 0.3) {
         pushWallAuto(key, wc, wall, true, bx0, bx1, bx0, bx1, (o, y, x) => [x, y, zd + o]);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+        const i2 = L.cellIndexAt(j + 1, (x0 + x1) / 2);
         addRamp("z", zd - wall / 2, -1, x0, x1, hRamp, wc.t1, L.cd(j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-        addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i, j + 1), key);
+        addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i2, j + 1), key);
       }
     }
   }
