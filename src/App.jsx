@@ -285,7 +285,12 @@ export default function TrayGenerator() {
   };
   const updFixed = (k, patch) =>
     updCur({ fixedCells: (cur.fixedCells || []).map((f, idx) => (idx === k ? { ...f, ...patch } : f)) });
-  const unfixCell = (k) => {
+  // Снятие фиксации. dissolve=false: бокс становится обычной ячейкой
+  // сетки на своём месте (ширина сохраняется, соседи по ряду ужимаются).
+  // dissolve=true: бокс исчезает, место забирают соседние ячейки.
+  const unfixCell = (k, dissolve) => {
+    const Lc = layout(cur);
+    const f = Lc.fixed.find((x) => x.k === k);
     // настройки стенок бокса (fw:k:*) удаляются, индексы последующих сдвигаются
     const walls = {};
     for (const [wk, wv] of Object.entries(cur.walls || {})) {
@@ -295,7 +300,35 @@ export default function TrayGenerator() {
       if (idx === k) continue;
       walls[idx > k ? `fw:${idx - 1}:${m[2]}` : wk] = wv;
     }
-    updCur({ fixedCells: (cur.fixedCells || []).filter((_, idx) => idx !== k), walls });
+    const patch = { fixedCells: (cur.fixedCells || []).filter((_, idx) => idx !== k), walls };
+    if (!dissolve && f) {
+      // ряд, накрывающий центр бокса, и позиция вставки по X
+      const zc = (f.z0 + f.z1) / 2;
+      let j = 0;
+      for (let jj = 0; jj < Lc.nRows; jj++)
+        if (zc >= Lc.cz0(jj) - cur.wall && zc <= Lc.cz0(jj) + Lc.cd(jj) + cur.wall) { j = jj; break; }
+      const sizes = Lc.rowCols[j].slice();
+      let idx = sizes.length;
+      for (let i = 0; i < sizes.length; i++)
+        if (f.x0 < Lc.cx0(i, j) + Lc.cw(i, j) / 2) { idx = i; break; }
+      sizes.splice(idx, 0, f.x1 - f.x0);
+      const wallSum = 2 * cur.wallOut + (sizes.length - 1) * cur.wall;
+      // замки ширины в этом ряду сдвигаются вслед за вставкой
+      const lockedJ = {};
+      for (const key of Object.keys(cur.lockedCellW || {})) {
+        const [ii, jj] = key.split(":").map(Number);
+        if (jj !== j) continue;
+        lockedJ[ii >= idx ? ii + 1 : ii] = true;
+      }
+      const lockedCellW = {};
+      for (const key of Object.keys(cur.lockedCellW || {})) {
+        const [ii, jj] = key.split(":").map(Number);
+        lockedCellW[jj === j && ii >= idx ? `${ii + 1}:${jj}` : key] = true;
+      }
+      patch.rowColWs = { ...(cur.rowColWs || {}), [j]: fitSizes(sizes, { ...lockedJ, [idx]: true }, cur.W - wallSum) };
+      patch.lockedCellW = lockedCellW;
+    }
+    updCur(patch);
     setSelection(null);
   };
 
@@ -843,7 +876,7 @@ export default function TrayGenerator() {
                 {[["none", "Нет"], ["n", "Ближней"], ["s", "Дальней"], ["w", "Левой"], ["e", "Правой"]].map(([d, t]) => (
                   <button
                     key={d}
-                    onClick={() => updCell(selection.i, selection.j, { tiltDir: d })}
+                    onClick={() => updCell(selection.i, selection.j, { tiltDir: d, tiltA: cc.tiltA || 5 })}
                     style={{
                       padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
                       border: fDir === d ? `2px solid ${SEL}` : "1px solid #D6DDE6",
@@ -908,14 +941,23 @@ export default function TrayGenerator() {
           ))}
         </div>
         <Param label="Уровень пола (лесенка)" unit="мм" value={fc.lvl || 0} min={0} max={Math.max(0, cur.H - 4)} step={0.5} onChange={(v) => updFixed(k, { lvl: v })} />
-        <button
-          onClick={() => unfixCell(k)}
-          style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" }}
-        >
-          Снять фиксацию (растворить в сетке)
-        </button>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button
+            onClick={() => unfixCell(k, false)}
+            style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#3D4A5C" }}
+          >
+            🔓 Снять фиксацию
+          </button>
+          <button
+            onClick={() => unfixCell(k, true)}
+            style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" }}
+          >
+            Растворить в сетке
+          </button>
+        </div>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0 0", lineHeight: 1.4 }}>
           Это контейнер внутри контейнера: размер жёсткий, позиция — только якорь (угол или стенка), без координат. При изменении размеров контейнера бокс скользит вместе со своей стенкой, а сетка ячеек обтекает его — ряды и колонки не блокируются. Стенки бокса настраиваются кликом по ним в 3D (высота, наклон внутрь, соты/линии).
+          <br /><b>Снять фиксацию</b> — ячейка остаётся на месте и становится обычной ячейкой сетки (размер сохраняется, но дальше может меняться). <b>Растворить в сетке</b> — ячейка исчезает, её место забирают соседние.
         </p>
       </div>
     );
