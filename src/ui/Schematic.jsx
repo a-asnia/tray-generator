@@ -78,6 +78,23 @@ export function Schematic({ c, selection, onSelect }) {
       );
     }
 
+  // фиксированные ячейки — «контейнеры внутри контейнера», рисуются поверх
+  const fixedRects = L.fixed.map((f) => {
+    const selF = selection?.type === "fixed" && selection.k === f.k;
+    return (
+      <g key={`f${f.k}`} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); onSelect({ type: "fixed", k: f.k }); }}>
+        <rect
+          x={W / 2 + f.fx0} y={D / 2 + f.fz0} width={f.fx1 - f.fx0} height={f.fz1 - f.fz0}
+          fill={selF ? "#DBEAFE" : "#FFF3EB"} stroke={selF ? SEL : "#F2620F"} strokeWidth={0.7}
+        />
+        <text x={W / 2 + (f.x0 + f.x1) / 2} y={D / 2 + (f.z0 + f.z1) / 2} textAnchor="middle" dominantBaseline="central"
+          fontSize={Math.min(f.x1 - f.x0, f.z1 - f.z0) * 0.25} fill="#8A5A2B">
+          🔒
+        </text>
+      </g>
+    );
+  });
+
   return (
     <svg
       viewBox={`-2 -2 ${W + 4} ${D + 4}`}
@@ -87,6 +104,7 @@ export function Schematic({ c, selection, onSelect }) {
       <rect x={0} y={0} width={W} height={D} fill="#CBD5E1" rx={1} />
       {cells}
       {segs}
+      {fixedRects}
     </svg>
   );
 }

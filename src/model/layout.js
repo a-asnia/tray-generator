@@ -59,7 +59,10 @@ export function minOuterDim(c, axis) {
     const locked = c.lockedRows || {};
     let lockedSum = 0, freeN = 0;
     L.rowDs.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
-    return Math.max(30, 2 * c.wallOut + (L.rowDs.length - 1) * c.wall + lockedSum + freeN * 10);
+    let needD = Math.max(30, 2 * c.wallOut + (L.rowDs.length - 1) * c.wall + lockedSum + freeN * 10);
+    for (const f of c.fixedCells || [])
+      needD = Math.max(needD, 2 * c.wallOut + (f.d || 40) + 2 * c.wall + 5);
+    return needD;
   }
   let need = 30;
   for (let j = 0; j < L.nRows; j++) {
@@ -69,6 +72,9 @@ export function minOuterDim(c, axis) {
     sizes.forEach((s, k) => (locked[k] ? (lockedSum += s) : freeN++));
     need = Math.max(need, 2 * c.wallOut + (sizes.length - 1) * c.wall + lockedSum + freeN * 10);
   }
+  // фиксированные ячейки: контейнер не может стать уже их полостей
+  for (const f of c.fixedCells || [])
+    need = Math.max(need, 2 * c.wallOut + (f.w || 40) + 2 * c.wall + 5);
   return need;
 }
 
@@ -100,6 +106,40 @@ export function layout(c) {
     }
     rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall));
   }
+  // Фиксированные ячейки — «контейнер внутри контейнера»: жёсткий размер
+  // (полость w×d) и якорь к углу или стенке, без точных координат; бокс
+  // скользит вместе со стенками при изменении габаритов. Стороны, не
+  // прижатые к внешней стенке, получают собственную перегородку (wall).
+  const fixed = (c.fixedCells || []).map((f, k) => {
+    const w = Math.min(f.w || 40, innerW - 1), d = Math.min(f.d || 40, innerD - 1);
+    const a = f.anchor || "nw";
+    const sameWall = (c.fixedCells || []).filter((g) => (g.anchor || "nw") === a);
+    const slot = sameWall.indexOf(f), m = sameWall.length;
+    let x0, z0;
+    // углы: прижат к двум стенкам, последующие с тем же якорем — вдоль стенки
+    if (a === "nw") { x0 = -innerW / 2 + slot * (w + c.wall); z0 = -innerD / 2; }
+    else if (a === "ne") { x0 = innerW / 2 - w - slot * (w + c.wall); z0 = -innerD / 2; }
+    else if (a === "sw") { x0 = -innerW / 2 + slot * (w + c.wall); z0 = innerD / 2 - d; }
+    else if (a === "se") { x0 = innerW / 2 - w - slot * (w + c.wall); z0 = innerD / 2 - d; }
+    // стенки: прижат к стенке, вдоль неё распределение поровну
+    else if (a === "n") { x0 = -innerW / 2 + (innerW * (slot + 1)) / (m + 1) - w / 2; z0 = -innerD / 2; }
+    else if (a === "s") { x0 = -innerW / 2 + (innerW * (slot + 1)) / (m + 1) - w / 2; z0 = innerD / 2 - d; }
+    else if (a === "w") { x0 = -innerW / 2; z0 = -innerD / 2 + (innerD * (slot + 1)) / (m + 1) - d / 2; }
+    else { x0 = innerW / 2 - w; z0 = -innerD / 2 + (innerD * (slot + 1)) / (m + 1) - d / 2; }
+    x0 = Math.max(-innerW / 2, Math.min(x0, innerW / 2 - w));
+    z0 = Math.max(-innerD / 2, Math.min(z0, innerD / 2 - d));
+    const own = {
+      n: z0 > -innerD / 2 + 0.01, s: z0 + d < innerD / 2 - 0.01,
+      w: x0 > -innerW / 2 + 0.01, e: x0 + w < innerW / 2 - 0.01,
+    };
+    return {
+      k, anchor: a, x0, z0, x1: x0 + w, z1: z0 + d, own,
+      // footprint: полость + собственные стенки — зона, которую обтекает сетка
+      fx0: x0 - (own.w ? c.wall : 0), fz0: z0 - (own.n ? c.wall : 0),
+      fx1: x0 + w + (own.e ? c.wall : 0), fz1: z0 + d + (own.s ? c.wall : 0),
+    };
+  });
+
   const pref = (arr) => { const p = [0]; for (const v of arr) p.push(p[p.length - 1] + v); return p; };
   const pd = pref(rowDs);
   const pws = rowCols.map(pref);
@@ -111,7 +151,7 @@ export function layout(c) {
   };
   const cw = (i, j = 0) => clampI(rowCols[clampJ(j)], i);
   return {
-    innerW, innerD, rowDs, rowCols,
+    innerW, innerD, rowDs, rowCols, fixed,
     colWs: rowCols[0], // совместимость: колонки первого ряда
     nCols: rowCols[0].length, nRows,
     nColsAt: (j) => rowCols[clampJ(j)].length,
@@ -195,7 +235,7 @@ export function cellKeys(c, i, j) {
 // подписи концов сегмента для спуска кромки (вдоль оси сегмента)
 export const endLabels = (key) => {
   const p = key.split(":");
-  const t = p[0] === "o" ? p[1] : p[0];
+  const t = p[0] === "o" ? p[1] : p[0] === "fw" ? p[2] : p[0];
   // сегменты вдоль Z (верт. перегородки, стенки W/E): ближний/дальний край
   if (t === "v" || t === "w" || t === "e") return ["К ближнему краю", "К дальнему краю"];
   return ["Влево", "Вправо"]; // сегменты вдоль X
@@ -204,5 +244,6 @@ export const endLabels = (key) => {
 export const wallTitle = (key) => {
   const [t] = key.split(":");
   if (t === "o") return "Внешняя стенка";
+  if (t === "fw") return "Стенка фиксированной ячейки";
   return t === "v" ? "Перегородка (между колонками)" : "Перегородка (между рядами)";
 };

@@ -97,6 +97,9 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       if (!cont) return;
       if (ud.cIdx !== st.sel) st.setSel(ud.cIdx);
       if (tag === "conn") { st.setSelection(null); return; }
+      // фиксированные ячейки: пол выбирает бокс, стенки — обычный редактор стенки
+      if (tag.startsWith("fx:")) { st.setSelection({ type: "fixed", k: +tag.split(":")[1] }); return; }
+      if (tag.startsWith("fw:")) { st.setSelection({ type: "wall", key: tag }); return; }
       if (tag === "floor") {
         const Lc = layout(cont);
         const lx = hit.point.x - ud.ox, lz = hit.point.z - ud.oz;
@@ -153,6 +156,10 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     if (selection?.type === "wall") selKeys.add(selection.key);
     if (selection?.type === "line") selection.keys.forEach((k) => selKeys.add(k));
     if (selection?.type === "cell") cellKeys(cur, selection.i, selection.j).forEach((k) => selKeys.add(k.key));
+    if (selection?.type === "fixed") {
+      selKeys.add(`fx:${selection.k}`);
+      for (const s of ["n", "s", "w", "e"]) selKeys.add(`fw:${selection.k}:${s}`);
+    }
 
     built.items.forEach(({ solids, ox, oz }, idx) => {
       const base = [], hi = [], baseTags = [], hiTags = [];

@@ -233,15 +233,52 @@ export default function TrayGenerator() {
     if (locked[j]) delete locked[j]; else locked[j] = true;
     updCur({ lockedRows: locked, rowDs: Lc.rowDs.slice() });
   };
-  // общий замок ячейки: её ширина + глубина её ряда
-  const setCellLockBoth = (i, j, on) => {
+  // «Зафиксировать эту ячейку» — превращает ячейку сетки в фиксированную:
+  // отдельный контейнер внутри контейнера с жёстким размером и якорем к
+  // ближайшему углу или стенке (без координат — бокс скользит со стенкой).
+  // Ряд и колонка при этом НЕ блокируются: сетка обтекает бокс.
+  const convertToFixed = (i, j) => {
     const Lc = layout(cur);
-    const key = i + ":" + j;
-    const lw = { ...(cur.lockedCellW || {}) }, lr = { ...(cur.lockedRows || {}) };
-    if (on) { lw[key] = true; lr[j] = true; } else { delete lw[key]; delete lr[j]; }
-    const rowColWs = { ...(cur.rowColWs || {}) };
-    rowColWs[j] = Lc.rowCols[j].slice();
-    updCur({ lockedCellW: lw, lockedRows: lr, rowColWs, rowDs: Lc.rowDs.slice() });
+    const az = j === 0 ? "n" : j === Lc.nRows - 1 ? "s" : "";
+    const ax = i === 0 ? "w" : i === Lc.nColsAt(j) - 1 ? "e" : "";
+    const anchor = az && ax ? az + ax : ax || az || "w";
+    const fc = {
+      w: Math.round(Lc.cw(i, j) * 10) / 10,
+      d: Math.round(Lc.cd(j) * 10) / 10,
+      anchor,
+      lvl: getCellLvl(cur, i, j),
+    };
+    let patch = { fixedCells: [...(cur.fixedCells || []), fc] };
+    // ячейка уходит из сетки ряда, остальные растекаются на её место
+    const rowW = Lc.rowCols[j];
+    if (rowW.length > 1) {
+      const rowColWs = { ...(cur.rowColWs || {}) };
+      rowColWs[j] = rowW.filter((_, kk) => kk !== i);
+      const lw = {};
+      for (const key of Object.keys(cur.lockedCellW || {})) {
+        const [ii, jj] = key.split(":").map(Number);
+        if (jj !== j || ii < i) lw[key] = true;
+        else if (ii > i) lw[ii - 1 + ":" + jj] = true;
+      }
+      patch = { ...patch, rowColWs, lockedCellW: lw };
+    }
+    updCur(patch);
+    setSelection({ type: "fixed", k: (cur.fixedCells || []).length });
+  };
+  const updFixed = (k, patch) =>
+    updCur({ fixedCells: (cur.fixedCells || []).map((f, idx) => (idx === k ? { ...f, ...patch } : f)) });
+  const unfixCell = (k) => {
+    // настройки стенок бокса (fw:k:*) удаляются, индексы последующих сдвигаются
+    const walls = {};
+    for (const [wk, wv] of Object.entries(cur.walls || {})) {
+      const m = wk.match(/^fw:(\d+):(.+)$/);
+      if (!m) { walls[wk] = wv; continue; }
+      const idx = +m[1];
+      if (idx === k) continue;
+      walls[idx > k ? `fw:${idx - 1}:${m[2]}` : wk] = wv;
+    }
+    updCur({ fixedCells: (cur.fixedCells || []).filter((_, idx) => idx !== k), walls });
+    setSelection(null);
   };
 
   // Задать ширину конкретной ячейки: меняется только её ряд, контейнер
@@ -712,21 +749,20 @@ export default function TrayGenerator() {
           onChange={(v) => setRowDepth(selection.j, v)}
         />
         <button
-          onClick={() => setCellLockBoth(selection.i, selection.j, !(colLocked && rowLocked))}
+          onClick={() => convertToFixed(selection.i, selection.j)}
           style={{
             width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-            border: colLocked && rowLocked ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 6px",
-            background: colLocked && rowLocked ? "#DBEAFE" : "#fff", color: colLocked && rowLocked ? SEL : "#3D4A5C",
+            border: "1px solid #D6DDE6", margin: "0 0 6px", background: "#fff", color: "#3D4A5C",
           }}
         >
-          {colLocked && rowLocked ? "🔒 Снять фиксацию ячейки" : "🔒 Зафиксировать эту ячейку"}
+          🔒 Зафиксировать эту ячейку
         </button>
         <div style={{ display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" }}>
           {lockBtn(colLocked, "ширина (эта ячейка)", () => toggleCellWLock(selection.i, selection.j))}
           {lockBtn(rowLocked, "глубина (весь ряд)", () => toggleRowLock(selection.j))}
         </div>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
-          Впишите размер и нажмите «Зафиксировать» — замок ширины держит только эту ячейку: перегородки в разных рядах независимы и не обязаны совпадать. Глубина у всех ячеек ряда общая (ряды — полосы на всю ширину контейнера), поэтому её замок держит весь ряд. При изменении размера свободной ячейки контейнер растёт или ужимается на разницу; если рост упирается в лимит принтера, недостающее забирается у свободных ячеек этого ряда. Изменение числа ячеек снимает замки и вписанные размеры.
+          «Зафиксировать эту ячейку» превращает её в контейнер внутри контейнера: жёсткий размер и якорь к ближайшему углу или стенке (без координат — при изменениях бокс скользит вместе со стенкой, сетка обтекает его; ряд и колонка не блокируются). Мелкие замки ниже — для настройки сетки: замок ширины держит только эту ячейку в её ряду, замок глубины — весь ряд (глубина у ряда общая, это полоса).
         </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
@@ -775,6 +811,51 @@ export default function TrayGenerator() {
         ))}
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
           Высота выше {cur.H} мм делает ячейку-башенку. Под поднятым полом — редкая сетка рёбер (шаг ~12 мм): она печатается со стола и служит опорой, поддержки не нужны.
+        </p>
+      </div>
+    );
+  }
+
+  if (selection?.type === "fixed" && (cur.fixedCells || [])[selection.k]) {
+    const k = selection.k;
+    const fc = cur.fixedCells[k];
+    const anchors = [
+      ["nw", "↖ угол"], ["n", "↑ стенка"], ["ne", "↗ угол"],
+      ["w", "← стенка"], ["e", "→ стенка"],
+      ["sw", "↙ угол"], ["s", "↓ стенка"], ["se", "↘ угол"],
+    ];
+    editor = (
+      <div style={{ background: "#FFF3EB", border: "1px solid #F2620F55", borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, marginBottom: 8 }}>
+          🔒 Фиксированная ячейка {k + 1}
+        </div>
+        <Param label="Ширина (внутри)" unit="мм" value={fc.w} min={10} max={limits.maxW} step={0.5} onChange={(v) => updFixed(k, { w: v })} />
+        <Param label="Глубина (внутри)" unit="мм" value={fc.d} min={10} max={limits.maxD} step={0.5} onChange={(v) => updFixed(k, { d: v })} />
+        <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Прижата к</div>
+        <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
+          {anchors.map(([a, t]) => (
+            <button
+              key={a}
+              onClick={() => updFixed(k, { anchor: a })}
+              style={{
+                padding: "4px 9px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: (fc.anchor || "nw") === a ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: (fc.anchor || "nw") === a ? "#FFE4D1" : "#fff", color: (fc.anchor || "nw") === a ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <Param label="Уровень пола (лесенка)" unit="мм" value={fc.lvl || 0} min={0} max={Math.max(0, cur.H - 4)} step={0.5} onChange={(v) => updFixed(k, { lvl: v })} />
+        <button
+          onClick={() => unfixCell(k)}
+          style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" }}
+        >
+          Снять фиксацию (растворить в сетке)
+        </button>
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0 0", lineHeight: 1.4 }}>
+          Это контейнер внутри контейнера: размер жёсткий, позиция — только якорь (угол или стенка), без координат. При изменении размеров контейнера бокс скользит вместе со своей стенкой, а сетка ячеек обтекает его — ряды и колонки не блокируются. Стенки бокса настраиваются кликом по ним в 3D (высота, наклон внутрь, соты/линии).
         </p>
       </div>
     );

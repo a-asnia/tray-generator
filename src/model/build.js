@@ -514,6 +514,38 @@ export function buildContainer(c, conn) {
     else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn);
   };
 
+  // ── Фиксированные ячейки: вычитание их зоны из плит и рёбер ──
+  // Вычесть footprint всех боксов из прямоугольника: остаётся ≤4 куска
+  // на бокс — сетка и полы обтекают «контейнер внутри контейнера»
+  const rectMinusBoxes = (xa, za, xb, zb) => {
+    let rects = [[xa, za, xb, zb]];
+    for (const f of L.fixed) {
+      const out = [];
+      for (const [x0, z0, x1, z1] of rects) {
+        if (f.fx1 <= x0 + 0.01 || f.fx0 >= x1 - 0.01 || f.fz1 <= z0 + 0.01 || f.fz0 >= z1 - 0.01) {
+          out.push([x0, z0, x1, z1]);
+          continue;
+        }
+        const iz0 = Math.max(z0, f.fz0), iz1 = Math.min(z1, f.fz1);
+        if (iz0 > z0 + 0.05) out.push([x0, z0, x1, iz0]);
+        if (iz1 < z1 - 0.05) out.push([x0, iz1, x1, z1]);
+        const ix0 = Math.max(x0, f.fx0), ix1 = Math.min(x1, f.fx1);
+        if (ix0 > x0 + 0.05) out.push([x0, iz0, ix0, iz1]);
+        if (ix1 < x1 - 0.05) out.push([ix1, iz0, x1, iz1]);
+      }
+      rects = out;
+    }
+    return rects.filter(([x0, z0, x1, z1]) => x1 - x0 > 0.1 && z1 - z0 > 0.1);
+  };
+  // зоны боксов, пересекающих линию x=const (для подрезки верт. перегородок)
+  const boxZonesAtX = (x) =>
+    L.fixed.filter((f) => x > f.fx0 - 0.01 && x < f.fx1 + 0.01).map((f) => [f.fz0, f.fz1]).sort((a, b) => a[0] - b[0]);
+  const boxZonesAtZ = (z) =>
+    L.fixed.filter((f) => z > f.fz0 - 0.01 && z < f.fz1 + 0.01).map((f) => [f.fx0, f.fx1]).sort((a, b) => a[0] - b[0]);
+  // зоны боксов, прижатых к внешней стенке (для подрезки её пандусов)
+  const boxZonesAtWall = (side) =>
+    L.fixed.filter((f) => !f.own[side]).map((f) => (side === "n" || side === "s" ? [f.fx0, f.fx1] : [f.fz0, f.fz1])).sort((a, b) => a[0] - b[0]);
+
   // пол — по ячейкам: у каждой свой уровень (лесенка). Плита заходит под
   // окружающие стенки (они и есть «ножки»); под поднятым полом — пустота.
   // Раскладка «кирпичная»: у каждого ряда свои ячейки (i — индекс в ряду j).
@@ -529,10 +561,12 @@ export function buildContainer(c, conn) {
       const za = Math.max(-D / 2, L.cz0(j) - (j === 0 ? wallOut : wall));
       const zb = Math.min(D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? wallOut : wall));
       const cc = (c.cells && c.cells[i + ":" + j]) || {};
-      const fDir = cc.tiltDir || "none";
+      const boxOverlap = L.fixed.some((f) => f.fx1 > xa && f.fx0 < xb && f.fz1 > za && f.fz0 < zb);
+      const fDir = boxOverlap ? "none" : (cc.tiltDir || "none"); // наклонный пол не должен войти в бокс
       const fA = cc.tiltA || 0;
       if (fDir === "none" || fA < 0.5) {
-        solids.push(boxSolid((xa + xb) / 2, lvl + floor / 2, (za + zb) / 2, xb - xa, floor, zb - za, "floor"));
+        for (const [px0, pz0, px1, pz1] of rectMinusBoxes(xa, za, xb, zb))
+          solids.push(boxSolid((px0 + px1) / 2, lvl + floor / 2, (pz0 + pz1) / 2, px1 - px0, floor, pz1 - pz0, "floor"));
       } else {
         // наклонный пол: клин, спускающийся к выбранной стороне; верх высокой
         // кромки ограничен высотой контейнера
@@ -564,12 +598,14 @@ export function buildContainer(c, conn) {
         const nAlongX = Math.max(0, Math.floor((zb - za) / spacing));
         for (let k = 1; k <= nAlongX; k++) {
           const z = za + ((zb - za) * k) / (nAlongX + 1);
-          solids.push(boxSolid((xa + xb) / 2, (lvl + 0.4) / 2, z, xb - xa, lvl + 0.4, ribT, "floor"));
+          for (const [a, b] of splitRange(xa, xb, boxZonesAtZ(z)))
+            solids.push(boxSolid((a + b) / 2, (lvl + 0.4) / 2, z, b - a, lvl + 0.4, ribT, "floor"));
         }
         const nAlongZ = Math.max(0, Math.floor((xb - xa) / spacing));
         for (let k = 1; k <= nAlongZ; k++) {
           const x = xa + ((xb - xa) * k) / (nAlongZ + 1);
-          solids.push(boxSolid(x, (lvl + 0.4) / 2, (za + zb) / 2, ribT, lvl + 0.4, zb - za, "floor"));
+          for (const [a, b] of splitRange(za, zb, boxZonesAtX(x)))
+            solids.push(boxSolid(x, (lvl + 0.4) / 2, (a + b) / 2, ribT, lvl + 0.4, b - a, "floor"));
         }
       }
     }
@@ -588,7 +624,9 @@ export function buildContainer(c, conn) {
           : (o, y, x) => [x, y, D / 2 - o];
         for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bx0, bx1, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-        addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, x0, x1, hRamp, wc.t1, L.cd(jRow), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, jRow), key);
+        // пандус не должен войти в полость прижатого к стенке бокса
+        for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
+          addRamp("z", side === "n" ? -D / 2 + wallOut : D / 2 - wallOut, side === "n" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cd(jRow), wallOut - 0.4, wallOut, wc, floor + cellLvl(i, jRow), key);
       }
     }
   }
@@ -605,7 +643,8 @@ export function buildContainer(c, conn) {
           : (o, y, z) => [W / 2 - o, y, z];
         for (const [a, b] of splitRange(bz0, bz1, zones)) pushWallAuto(key, wc, wallOut, false, a, b, bz0, bz1, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-        addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, z0, z1, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nCols - 1), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nCols - 1, j), key);
+        for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
+          addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);
       }
     }
   }
@@ -629,10 +668,14 @@ export function buildContainer(c, conn) {
       const z0 = L.cz0(j), z1 = z0 + L.cd(j);
       const bz0 = Math.max(-D / 2 + wallOut * 0.5, z0 - wallOut), bz1 = Math.min(D / 2 - wallOut * 0.5, z1 + wallOut);
       if (wc.h > 0.3) {
-        pushWallAuto(key, wc, wall, true, bz0, bz1, bz0, bz1, (o, y, z) => [xd + o, y, z]);
+        // сегменты перегородки обтекают фиксированные боксы
+        const bZones = boxZonesAtX(xd);
+        for (const [a, b] of splitRange(bz0, bz1, bZones)) pushWallAuto(key, wc, wall, true, a, b, bz0, bz1, (o, y, z) => [xd + o, y, z]);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
-        addRamp("x", xd - wall / 2, -1, z0, z1, hRamp, wc.t1, L.cw(i, j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-        addRamp("x", xd + wall / 2, 1, z0, z1, hRamp, wc.t2, L.cw(i + 1, j), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
+        for (const [a, b] of splitRange(z0, z1, bZones)) {
+          addRamp("x", xd - wall / 2, -1, a, b, hRamp, wc.t1, L.cw(i, j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+          addRamp("x", xd + wall / 2, 1, a, b, hRamp, wc.t2, L.cw(i + 1, j), wall / 2, wall, wc, floor + cellLvl(i + 1, j), key);
+        }
       }
     }
   }
@@ -647,11 +690,61 @@ export function buildContainer(c, conn) {
       const x0 = L.cx0(i, j), x1 = x0 + L.cw(i, j);
       const bx0 = Math.max(-W / 2 + wallOut * 0.5, x0 - wallOut), bx1 = Math.min(W / 2 - wallOut * 0.5, x1 + wallOut);
       if (wc.h > 0.3) {
-        pushWallAuto(key, wc, wall, true, bx0, bx1, bx0, bx1, (o, y, x) => [x, y, zd + o]);
+        const bZones = boxZonesAtZ(zd);
+        for (const [a, b] of splitRange(bx0, bx1, bZones)) pushWallAuto(key, wc, wall, true, a, b, bx0, bx1, (o, y, x) => [x, y, zd + o]);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         const i2 = L.cellIndexAt(j + 1, (x0 + x1) / 2);
-        addRamp("z", zd - wall / 2, -1, x0, x1, hRamp, wc.t1, L.cd(j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
-        addRamp("z", zd + wall / 2, 1, x0, x1, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i2, j + 1), key);
+        for (const [a, b] of splitRange(x0, x1, bZones)) {
+          addRamp("z", zd - wall / 2, -1, a, b, hRamp, wc.t1, L.cd(j), wall / 2, wall, wc, floor + cellLvl(i, j), key);
+          addRamp("z", zd + wall / 2, 1, a, b, hRamp, wc.t2, L.cd(j + 1), wall / 2, wall, wc, floor + cellLvl(i2, j + 1), key);
+        }
+      }
+    }
+  }
+
+  // ── Фиксированные ячейки: собственные стенки и пол ──
+  // Бокс — «контейнер внутри контейнера»: полость x0..x1 × z0..z1;
+  // стороны, не прижатые к внешней стенке, несут собственную перегородку
+  // (ключи fw:k:сторона — редактируются кликом, как обычные стенки)
+  for (const f of L.fixed) {
+    const fc = (c.fixedCells || [])[f.k] || {};
+    const lvl = Math.min(fc.lvl || 0, H - 4);
+    const sides = [
+      ["n", f.own.n, "z", f.z0, 1, f.fx0, f.fx1, (o, y, x) => [x, y, f.z0 - wall / 2 + o]],
+      ["s", f.own.s, "z", f.z1, -1, f.fx0, f.fx1, (o, y, x) => [x, y, f.z1 + wall / 2 + o]],
+      ["w", f.own.w, "x", f.x0, 1, f.fz0, f.fz1, (o, y, z) => [f.x0 - wall / 2 + o, y, z]],
+      ["e", f.own.e, "x", f.x1, -1, f.fz0, f.fz1, (o, y, z) => [f.x1 + wall / 2 + o, y, z]],
+    ];
+    for (const [side, has, orient, facePos, dir, s0, s1, mapFn] of sides) {
+      if (!has) continue;
+      const key = `fw:${f.k}:${side}`;
+      const wc = getWall(c, key);
+      if (wc.h <= 0.3) continue;
+      pushWallAuto(key, wc, wall, true, s0, s1, s0, s1, mapFn);
+      // наклон внутрь полости бокса (t1)
+      const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
+      const span = orient === "z" ? [f.x0, f.x1] : [f.z0, f.z1];
+      const cellSize = orient === "z" ? f.z1 - f.z0 : f.x1 - f.x0;
+      addRamp(orient, facePos, dir, span[0], span[1], hRamp, wc.t1, cellSize, wall / 2, wall, wc, floor + lvl, key);
+    }
+    // пол бокса: полость + заход под собственные стенки; у прижатых
+    // сторон — под внешнюю стенку
+    const pxa = f.own.w ? f.fx0 : -W / 2;
+    const pxb = f.own.e ? f.fx1 : W / 2;
+    const pza = f.own.n ? f.fz0 : -D / 2;
+    const pzb = f.own.s ? f.fz1 : D / 2;
+    solids.push(boxSolid((pxa + pxb) / 2, lvl + floor / 2, (pza + pzb) / 2, pxb - pxa, floor, pzb - pza, `fx:${f.k}`));
+    if (lvl > 2) {
+      const ribT = 1.0, spacing = 12;
+      const nAx = Math.max(0, Math.floor((pzb - pza) / spacing));
+      for (let k2 = 1; k2 <= nAx; k2++) {
+        const z = pza + ((pzb - pza) * k2) / (nAx + 1);
+        solids.push(boxSolid((pxa + pxb) / 2, (lvl + 0.4) / 2, z, pxb - pxa, lvl + 0.4, ribT, `fx:${f.k}`));
+      }
+      const nAz = Math.max(0, Math.floor((pxb - pxa) / spacing));
+      for (let k2 = 1; k2 <= nAz; k2++) {
+        const x = pxa + ((pxb - pxa) * k2) / (nAz + 1);
+        solids.push(boxSolid(x, (lvl + 0.4) / 2, (pza + pzb) / 2, ribT, lvl + 0.4, pzb - pza, `fx:${f.k}`));
       }
     }
   }
