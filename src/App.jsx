@@ -15,7 +15,22 @@ import { MONO, ACCENT, SEL } from "./ui/theme.js";
 import { Param, Stepper, Collapse, SectionTitle } from "./ui/controls.jsx";
 import { Schematic } from "./ui/Schematic.jsx";
 
+// дурацкие цитаты «в тему» — по одной на сеанс, внизу панели
+const QUOTES = [
+  "«Хаос — это просто лоток, которого ещё нет».",
+  "«Идеальный органайзер тот, в котором осталась одна свободная ячейка».",
+  "«Сначала мы подбираем ячейки под вещи, потом вещи под ячейки».",
+  "«Пустая ячейка — явление временное».",
+  "«Печатать органайзер для деталей принтера — вот он, замкнутый цикл».",
+  "«Порядок начинается с полутора миллиметров стенки».",
+  "«Дай человеку коробку — он приберётся сегодня. Дай генератор лотков — он не остановится никогда».",
+  "«У каждой мелочи должно быть место, где её потом не найдут».",
+  "«Не бывает лишних перегородок, бывает мало мелочей».",
+  "«Измерь дважды — напечатай трижды».",
+];
+
 export default function TrayGenerator() {
+  const [quote] = useState(() => QUOTES[Math.floor(Math.random() * QUOTES.length)]);
   const [containers, setContainers] = useState(() => (SAVED ? SAVED.containers : [{ ...makeContainer(null, 0, 0), id: 1 }]));
   const [sel, setSel] = useState(0);
   const [selection, setSelection] = useState(null);
@@ -1162,6 +1177,14 @@ export default function TrayGenerator() {
         </Collapse>
 
         </div>)}
+
+        {/* воздух под кнопками + случайная цитата (одна на сеанс) */}
+        <div style={{ height: 44 }} />
+        <div style={{ borderTop: "1px solid #E4E9EF", paddingTop: 14, paddingBottom: 10 }}>
+          <p style={{ fontSize: 12, lineHeight: 1.5, color: "#A9B4C2", fontStyle: "italic", margin: 0, textAlign: "center" }}>
+            {quote}
+          </p>
+        </div>
       </div>
 
       <div style={{ flex: "1 1 420px", display: "flex", flexDirection: "column", minWidth: 320, height: "100vh" }}>
