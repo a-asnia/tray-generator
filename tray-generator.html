@@ -599,25 +599,35 @@ function lineOf(c, key) {
         };
     }
     if (parts[0] === "v") {
-        // перегородки разных рядов не обязаны совпадать — «линия» собирает
-        // сегменты с тем же номером в рядах, где такая перегородка есть
-        const i = +parts[1];
+        // Перегородки разных рядов не обязаны совпадать по индексу, поэтому
+        // «линия» собирается по ФАКТИЧЕСКОЙ координате: берутся сегменты,
+        // лежащие на одной прямой с выбранным (перекрывающиеся по толщине).
+        const i = +parts[1], j = +parts[2];
+        const xAt = (ii, jj) => Lc.cx0(ii, jj) + Lc.cw(ii, jj) + c.wall / 2;
+        const xRef = xAt(i, j);
+        const tol = Math.max(0.5, c.wall * 0.5);
         const keys = [];
-        for (let j = 0; j < Lc.nRows; j++)
-            if (i < Lc.nColsAt(j) - 1)
-                keys.push(`v:${i}:${j}`);
+        for (let jj = 0; jj < Lc.nRows; jj++)
+            for (let ii = 0; ii < Lc.nColsAt(jj) - 1; ii++)
+                if (Math.abs(xAt(ii, jj) - xRef) < tol)
+                    keys.push(`v:${ii}:${jj}`);
         return {
-            keys,
-            label: `Перегородка целиком (после ячейки ${i + 1} в каждом ряду)`,
+            keys: keys.length ? keys : [key],
+            label: `Перегородка целиком (${keys.length} сегм. на одной линии)`,
             outer: false,
         };
     }
-    const j = +parts[1];
-    return {
-        keys: Array.from({ length: Lc.nColsAt(j) }, (_, i) => `h:${j}:${i}`),
-        label: `Перегородка целиком (после ряда ${j + 1})`,
-        outer: false,
-    };
+    if (parts[0] === "h") {
+        // сегменты горизонтальной перегородки ряда j уже лежат на одной линии
+        const j = +parts[1];
+        return {
+            keys: Array.from({ length: Lc.nColsAt(j) }, (_, i) => `h:${j}:${i}`),
+            label: `Перегородка целиком (после ряда ${j + 1})`,
+            outer: false,
+        };
+    }
+    // стенки фиксированных боксов (fw:k:сторона) линий не образуют
+    return { keys: [key], label: "Стенка фиксированной ячейки", outer: false };
 }
 function cellKeys(c, i, j) {
     const L = layout(c);
