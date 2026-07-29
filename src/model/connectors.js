@@ -2,7 +2,7 @@
 // Паз не выступает ни внутрь ячейки, ни наружу; стенки соседей
 // смыкаются вплотную. Требование: внешняя стенка ≥ minWall.
 
-import { prismSolid, boxSolid } from "../geometry/solids.js";
+import { prismSolid, boxSolid, wallProfile } from "../geometry/solids.js";
 
 // Зазор (clr) — на сторону, между рельсом и пазом. Рекомендации для FDM:
 // 0.1 мм — press fit, детали приходится вдавливать (PLA, жёсткая посадка);
@@ -46,7 +46,10 @@ export function splitRange(a, b, zones) {
 // стенки (упор снизу + задний слой + две щёчки-ласточки). Внутренняя грань
 // стенки не меняется — ячейки остаются ровно заданного размера, а наружные
 // плоскости соседей смыкаются вплотную по всей длине.
-export function addConnUnits(solids, c, side, vs) {
+// rnd — радиус скругления верхней кромки стенки этой стороны: задний
+// слой паза получает такое же скругление у внутренней грани, иначе в
+// кромке остаётся провал в зоне замка
+export function addConnUnits(solids, c, side, vs, rnd = 0) {
   const { W, D, H, wallOut } = c;
   const CONN = connOf(c); // зазор берётся из настройки контейнера
   const dg = CONN.dg;
@@ -75,7 +78,16 @@ export function addConnUnits(solids, c, side, vs) {
         else solids.push(boxSolid(cv, (y0 + y1) / 2, cu, sv, y1 - y0, su, "conn"));
       };
       pushBox(0, wallOut, 0, CONN.stop, vc - CONN.bossW / 2, vc + CONN.bossW / 2); // упор снизу
-      pushBox(dg, wallOut, CONN.stop, H, vc - CONN.bossW / 2, vc + CONN.bossW / 2); // задний слой (дно паза)
+      // задний слой (дно паза) — профилем, чтобы верхняя кромка была
+      // скруглена так же, как у остальной стенки
+      const thkBack = wallOut - dg;
+      const parts = wallProfile(thkBack, H - CONN.stop, rnd, false);
+      const v0 = vc - CONN.bossW / 2, v1 = vc + CONN.bossW / 2;
+      for (const quad of parts) {
+        const qa = quad.map(([o, y]) => mk(uAt(dg + o), CONN.stop + y, v0));
+        const qb = quad.map(([o, y]) => mk(uAt(dg + o), CONN.stop + y, v1));
+        solids.push(prismSolid(qa, qb, "conn"));
+      }
       const cw1 = CONN.w1 / 2 + CONN.clr, cw2 = CONN.w2 / 2 + CONN.clr;
       for (const sg of [-1, 1]) {
         const q = (y) => [

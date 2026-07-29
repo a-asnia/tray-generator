@@ -5,7 +5,7 @@
 // пол с лесенкой и рёбрами, зоны соединителей.
 // ══════════════════════════════════════════════════════════════
 
-import { prismSolid, boxSolid, rampSolid, wallProfile } from "../geometry/solids.js";
+import { prismSolid, boxSolid, rampSolid, wallProfile, outerInsetAt } from "../geometry/solids.js";
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl } from "./layout.js";
@@ -49,6 +49,16 @@ export function buildContainer(c, conn, opts = {}) {
     const w = getWall(c, key);
     return w.t1 < 0.5 && w.t2 < 0.5;
   };
+  // Фактический радиус скругления кромки стенки (как в wallProfile).
+  // Галтель должна заканчиваться там, где начинается скругление, иначе
+  // торчит «пеньком» выше скруглённой кромки — в углах и на стыках.
+  const rEff = (key, thk, sym) => {
+    const w = getWall(c, key);
+    return Math.max(0, Math.min(w.rnd, sym ? thk / 2 : thk - 0.4, w.h * 0.9));
+  };
+  // Скругление НАРУЖНОЙ кромки стенки: у стороны с замком наружная
+  // плоскость строго ровная, поэтому радиус там нулевой.
+  const rOuter = (key, thk, sym) => (sym ? rEff(key, thk, sym) : 0);
   // высота стенки на её конце (учитывая спуск кромки)
   const hAtEnd = (wc, atStart) => {
     if (wc.drop === "none") return wc.h;
@@ -74,11 +84,34 @@ export function buildContainer(c, conn, opts = {}) {
     else solids.push(rampSolid(orient, facePos, dir, s0, s1, h, yBase, run, embed, tag));
   };
 
+  // Профиль скругления наружной кромки ПЕРПЕНДИКУЛЯРНОЙ стенки как функция
+  // высоты. Нужен для подрезки торцов в углу корпуса: у соседней стенки
+  // наружная плоскость сверху уходит внутрь, и квадратный торец вылезал бы
+  // из её скруглённого валика «зубчиком». Функция возвращает null, если
+  // скруглять нечего (сторона с замком — плоскость строго ровная).
+  const outerInsetFn = (key, thk, sym) => {
+    const w = getWall(c, key);
+    const r = rOuter(key, thk, sym);
+    if (r < 0.05 || w.h <= 0.3) return null;
+    return (y) => outerInsetAt(w.h, r, y);
+  };
   // экструзия профиля стенки вдоль отрезка s0..s1; mapFn(смещение, y, s) → точка
-  const pushProfiled = (parts, mapFn, s0, s1, tag) => {
+  // trim = {a, b} — функции подрезки торцов (см. outerInsetFn). Каждый ломтик
+  // профиля укорачивается на отступ соседа на своей высоте, поэтому валик
+  // обходит угол непрерывно; недорез добирается телом самой соседней стенки.
+  const pushProfiled = (parts, mapFn, s0, s1, tag, trim) => {
+    const fA = trim && trim.a, fB = trim && trim.b;
     for (const quad of parts) {
-      const qa = quad.map(([o, y]) => mapFn(o, y, s0));
-      const qb = quad.map(([o, y]) => mapFn(o, y, s1));
+      let a = s0, b = s1;
+      if (fA || fB) {
+        let yTop = -Infinity;
+        for (const [, y] of quad) yTop = Math.max(yTop, y);
+        if (fA) a = s0 + fA(yTop);
+        if (fB) b = s1 - fB(yTop);
+        if (b - a < 0.02) continue;
+      }
+      const qa = quad.map(([o, y]) => mapFn(o, y, a));
+      const qb = quad.map(([o, y]) => mapFn(o, y, b));
       solids.push(prismSolid(qa, qb, tag));
     }
   };
@@ -95,10 +128,10 @@ export function buildContainer(c, conn, opts = {}) {
   // тело стенки с учётом спуска кромки: сегмент режется на ломтики вдоль
   // длины, каждый ломтик — призма между профилями двух соседних высот.
   // S0..S1 — полный пролёт сегмента (для непрерывности дуги через вырезы зон)
-  const pushWallBody = (key, wc, thk, sym, s0, s1, S0, S1, mapFn) => {
+  const pushWallBody = (key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim) => {
     const dropH = Math.min(wc.dropH, wc.h);
     if (wc.drop === "none" || wc.h - dropH < 0.3) {
-      pushProfiled(wallProfile(thk, wc.h, wc.rnd, sym), mapFn, s0, s1, key);
+      pushProfiled(wallProfile(thk, wc.h, wc.rnd, sym), mapFn, s0, s1, key, trim);
       return;
     }
     const N = 12;
@@ -110,9 +143,17 @@ export function buildContainer(c, conn, opts = {}) {
       const h1 = Math.max(0.4, heightAt((sb - S0) / span, wc.h, wc.drop, dropH));
       const pa = wallProfile(thk, h0, wc.rnd, sym);
       const pb = wallProfile(thk, h1, wc.rnd, sym);
+      // подрезка торцов — только у крайних ломтиков сегмента
+      const fA = k === 0 && trim ? trim.a : null;
+      const fB = k === N - 1 && trim ? trim.b : null;
       for (let q = 0; q < Math.max(pa.length, pb.length); q++) {
-        const qa = (pa[q] ?? pa[pa.length - 1]).map(([o, y]) => mapFn(o, y, sa));
-        const qb = (pb[q] ?? pb[pb.length - 1]).map(([o, y]) => mapFn(o, y, sb));
+        const qa0 = pa[q] ?? pa[pa.length - 1], qb0 = pb[q] ?? pb[pb.length - 1];
+        let yTop = -Infinity;
+        if (fA || fB) for (const [, y] of qa0) yTop = Math.max(yTop, y);
+        const saT = sa + (fA ? fA(yTop) : 0), sbT = sb - (fB ? fB(yTop) : 0);
+        if (sbT - saT < 0.02) continue;
+        const qa = qa0.map(([o, y]) => mapFn(o, y, saT));
+        const qb = qb0.map(([o, y]) => mapFn(o, y, sbT));
         solids.push(prismSolid(qa, qb, key));
       }
     }
@@ -121,7 +162,7 @@ export function buildContainer(c, conn, opts = {}) {
   // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
   // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
   // печатается вертикально без поддержек. Верхний пояс несёт скругление.
-  const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn) => {
+  const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
     const strut = Math.max(1.2, Math.min(2.2, thk));
     const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
     const rect = (sa, sb, ya, yb) => {
@@ -136,13 +177,13 @@ export function buildContainer(c, conn, opts = {}) {
     const sA = s0 + rail, sB = s1 - rail;
     if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
       // окно слишком маленькое — сплошная стенка
-      pushProfiled(parts, mapFn, s0, s1, key);
+      pushProfiled(parts, mapFn, s0, s1, key, trim);
       return;
     }
     // рамка
     rect(s0, s1, 0, yA); // нижний пояс
     const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-    pushProfiled(topParts, mapFn, s0, s1, key); // верхний пояс (со скруглением)
+    pushProfiled(topParts, mapFn, s0, s1, key, trim); // верхний пояс (со скруглением)
     rect(s0, sA, yA, yB);
     rect(sB, s1, yA, yB); // боковые пояса
     // решётка
@@ -178,7 +219,7 @@ export function buildContainer(c, conn, opts = {}) {
     let rows = 0;
     while (yA + R + rows * 1.5 * R + R <= yB + 0.01) rows++;
     if (rows < 1) {
-      pushProfiled(parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yA : y]) : q)), mapFn, s0, s1, key);
+      pushProfiled(parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yA : y]) : q)), mapFn, s0, s1, key, trim);
       return;
     }
     const colsN = Math.ceil((sB - sA) / Whex) + 2;
@@ -213,7 +254,7 @@ export function buildContainer(c, conn, opts = {}) {
   // Стенка с фоном из изогнутых случайных линий: рамка как у сот + два
   // семейства волнистых диагональных прядей (±45°, печатаются без поддержек).
   // Узор детерминированный: сид зависит от стенки; «перемешать» меняет сид.
-  const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn) => {
+  const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
     const strut = Math.max(1.2, Math.min(2.2, thk));
     const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
     const rect = (sa, sb, ya, yb) => {
@@ -228,12 +269,12 @@ export function buildContainer(c, conn, opts = {}) {
     const sA = s0 + rail, sB = s1 - rail;
     const sp = Math.max(4, wc.lineStep);
     if (sB - sA < sp || yB - yA < sp) {
-      pushProfiled(parts, mapFn, s0, s1, key);
+      pushProfiled(parts, mapFn, s0, s1, key, trim);
       return;
     }
     rect(s0, s1, 0, yA);
     const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-    pushProfiled(topParts, mapFn, s0, s1, key);
+    pushProfiled(topParts, mapFn, s0, s1, key, trim);
     rect(s0, sA, yA, yB);
     rect(sB, s1, yA, yB);
     const clipSeg = (P1, P2) => {
@@ -552,10 +593,10 @@ export function buildContainer(c, conn, opts = {}) {
   };
 
   // диспетчер: узорные заполнения (если нет спуска) либо обычное тело стенки
-  const pushWallAuto = (key, wc, thk, sym, s0, s1, S0, S1, mapFn) => {
-    if (wc.face === "hex" && wc.drop === "none") buildHexWall(key, wc, thk, sym, s0, s1, mapFn);
-    else if (wc.face === "lines" && wc.drop === "none") buildLinesWall(key, wc, thk, sym, s0, s1, mapFn);
-    else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn);
+  const pushWallAuto = (key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim) => {
+    if (wc.face === "hex" && wc.drop === "none") buildHexWall(key, wc, thk, sym, s0, s1, mapFn, trim);
+    else if (wc.face === "lines" && wc.drop === "none") buildLinesWall(key, wc, thk, sym, s0, s1, mapFn, trim);
+    else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim);
   };
 
   // ── Фиксированные ячейки: вычитание их зоны из плит и рёбер ──
@@ -670,7 +711,14 @@ export function buildContainer(c, conn, opts = {}) {
         const mapFn = side === "n"
           ? (o, y, x) => [x, y, -D / 2 + off + o]
           : (o, y, x) => [x, y, D / 2 - off - o];
-        for (const [a, b] of splitRange(bx0, bx1, zones)) pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn);
+        // в углах корпуса торец подрезается под скругление W/E-стенки
+        const fW = outerInsetFn(`o:w:${jRow}`, wallOut, !conn.W);
+        const fE = outerInsetFn(`o:e:${jRow}`, wallOut, !conn.E);
+        for (const [a, b] of splitRange(bx0, bx1, zones))
+          pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
+            a: a <= -W / 2 + 0.01 ? fW : null,
+            b: b >= W / 2 - 0.01 ? fE : null,
+          });
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         // пандус не должен войти в полость прижатого к стенке бокса
         for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
@@ -691,7 +739,15 @@ export function buildContainer(c, conn, opts = {}) {
         const mapFn = side === "w"
           ? (o, y, z) => [-W / 2 + off + o, y, z]
           : (o, y, z) => [W / 2 - off - o, y, z];
-        for (const [a, b] of splitRange(bz0, bz1, zones)) pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn);
+        // подрезка торцов под скругление N/S-стенок в углах корпуса
+        const nKey = side === "w" ? "o:n:0" : `o:n:${L.nColsAt(0) - 1}`;
+        const sKey = side === "w" ? "o:s:0" : `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
+        const fN = outerInsetFn(nKey, wallOut, !conn.N), fS = outerInsetFn(sKey, wallOut, !conn.S);
+        for (const [a, b] of splitRange(bz0, bz1, zones))
+          pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
+            a: a <= -D / 2 + 0.01 ? fN : null,
+            b: b >= D / 2 - 0.01 ? fS : null,
+          });
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
           addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);
@@ -704,21 +760,32 @@ export function buildContainer(c, conn, opts = {}) {
     const nL = "o:n:0", nR = `o:n:${L.nColsAt(0) - 1}`;
     const sL = "o:s:0", sR = `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
     const wT = "o:w:0", wB = `o:w:${L.nRows - 1}`, eT = "o:e:0", eB = `o:e:${L.nRows - 1}`;
-    if (flatWall(nL) && flatWall(wT)) addFillet(-cx, -cz, 1, 1, Math.min(getWall(c, nL).h, getWall(c, wT).h), nL);
-    if (flatWall(nR) && flatWall(eT)) addFillet(cx, -cz, -1, 1, Math.min(getWall(c, nR).h, getWall(c, eT).h), nR);
-    if (flatWall(sL) && flatWall(wB)) addFillet(-cx, cz, 1, -1, Math.min(getWall(c, sL).h, getWall(c, wB).h), sL);
-    if (flatWall(sR) && flatWall(eB)) addFillet(cx, cz, -1, -1, Math.min(getWall(c, sR).h, getWall(c, eB).h), sR);
+    // высота галтели — до начала скругления кромок обеих стенок
+    const symN = !conn.N, symS = !conn.S, symW = !conn.W, symE = !conn.E;
+    const hCorner = (kA, symA, kB, symB) =>
+      Math.min(getWall(c, kA).h - rEff(kA, wallOut, symA), getWall(c, kB).h - rEff(kB, wallOut, symB));
+    if (flatWall(nL) && flatWall(wT)) addFillet(-cx, -cz, 1, 1, hCorner(nL, symN, wT, symW), nL);
+    if (flatWall(nR) && flatWall(eT)) addFillet(cx, -cz, -1, 1, hCorner(nR, symN, eT, symE), nR);
+    if (flatWall(sL) && flatWall(wB)) addFillet(-cx, cz, 1, -1, hCorner(sL, symS, wB, symW), sL);
+    if (flatWall(sR) && flatWall(eB)) addFillet(cx, cz, -1, -1, hCorner(sR, symS, eB, symE), sR);
   }
 
-  // в male-зонах стенка ставится обратно на полную высоту (несёт рельс)
-  if (conn.S?.male) for (const [a, b] of zS)
-    solids.push(boxSolid((a + b) / 2, H / 2, (D - wallOut) / 2, b - a, H, wallOut, "conn"));
-  if (conn.N?.male) for (const [a, b] of zN)
-    solids.push(boxSolid((a + b) / 2, H / 2, -(D - wallOut) / 2, b - a, H, wallOut, "conn"));
-  if (conn.E?.male) for (const [a, b] of zE)
-    solids.push(boxSolid((W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
-  if (conn.W?.male) for (const [a, b] of zW)
-    solids.push(boxSolid(-(W - wallOut) / 2, H / 2, (a + b) / 2, wallOut, H, b - a, "conn"));
+  // В male-зонах стенка ставится обратно на полную высоту (несёт рельс) —
+  // тем же профилем, что и остальная стенка, иначе в скруглённой верхней
+  // кромке остаётся прямоугольный провал на месте замка
+  const zoneWall = (side, a, b) => {
+    const key = `o:${side}:0`;
+    const rnd = getWall(c, key).rnd;
+    const mapFn = side === "n" ? (o, y, x) => [x, y, -D / 2 + o]
+      : side === "s" ? (o, y, x) => [x, y, D / 2 - o]
+      : side === "w" ? (o, y, z) => [-W / 2 + o, y, z]
+      : (o, y, z) => [W / 2 - o, y, z];
+    pushProfiled(wallProfile(wallOut, H, rnd, false), mapFn, a, b, "conn");
+  };
+  if (conn.S?.male) for (const [a, b] of zS) zoneWall("s", a, b);
+  if (conn.N?.male) for (const [a, b] of zN) zoneWall("n", a, b);
+  if (conn.E?.male) for (const [a, b] of zE) zoneWall("e", a, b);
+  if (conn.W?.male) for (const [a, b] of zW) zoneWall("w", a, b);
 
   // вертикальные перегородки — свои в каждом ряду («кирпичная» раскладка,
   // перегородки соседних рядов не обязаны совпадать)
@@ -754,11 +821,13 @@ export function buildContainer(c, conn, opts = {}) {
         // (Т-стыки, в том числе кирпичные) — если конец дошёл до стыка
         // и обе смыкающиеся стенки вертикальны (без пандусов)
         const meFlat = flatWall(key);
+        const rMe = rEff(key, wall, true); // скругление самой перегородки
         if (segs.length && segs[0][0] <= bz0 + 0.01) {
           const other = j === 0 ? `o:n:${i}` : `h:${j - 1}:${L.cellIndexAt(j - 1, xd)}`;
           if (meFlat && flatWall(other)) {
             const zA = j === 0 ? -D / 2 + wallOut : z0;
-            const hF = Math.min(hAtEnd(wc, true), getWall(c, other).h);
+            const rOther = j === 0 ? rEff(other, wallOut, !conn.N) : rEff(other, wall, true);
+            const hF = Math.min(hAtEnd(wc, true) - rMe, getWall(c, other).h - rOther);
             addFillet(xd - wall / 2, zA, -1, 1, hF, key);
             addFillet(xd + wall / 2, zA, 1, 1, hF, key);
           }
@@ -767,20 +836,22 @@ export function buildContainer(c, conn, opts = {}) {
           const other = j === L.nRows - 1 ? `o:s:${i}` : `h:${j}:${i}`;
           if (meFlat && flatWall(other)) {
             const zB = j === L.nRows - 1 ? D / 2 - wallOut : z1;
-            const hF = Math.min(hAtEnd(wc, false), getWall(c, other).h);
+            const rOther = j === L.nRows - 1 ? rEff(other, wallOut, !conn.S) : rEff(other, wall, true);
+            const hF = Math.min(hAtEnd(wc, false) - rMe, getWall(c, other).h - rOther);
             addFillet(xd - wall / 2, zB, -1, -1, hF, key);
             addFillet(xd + wall / 2, zB, 1, -1, hF, key);
           }
         }
         // концы, упирающиеся в стенку фиксированного бокса
         if (meFlat) for (const [a, b] of segs) {
+          const hB = wc.h - rMe;
           if (a > bz0 + 0.01) {
-            addFillet(xd - wall / 2, a, -1, 1, wc.h, key);
-            addFillet(xd + wall / 2, a, 1, 1, wc.h, key);
+            addFillet(xd - wall / 2, a, -1, 1, hB, key);
+            addFillet(xd + wall / 2, a, 1, 1, hB, key);
           }
           if (b < bz1 - 0.01) {
-            addFillet(xd - wall / 2, b, -1, -1, wc.h, key);
-            addFillet(xd + wall / 2, b, 1, -1, wc.h, key);
+            addFillet(xd - wall / 2, b, -1, -1, hB, key);
+            addFillet(xd + wall / 2, b, 1, -1, hB, key);
           }
         }
       }
@@ -808,25 +879,29 @@ export function buildContainer(c, conn, opts = {}) {
         }
         // галтели в углах примыкания к корпусу (только вертикальные стенки)
         const meFlatH = flatWall(key);
+        const rMeH = rEff(key, wall, true);
+        const rW = Math.max(rEff(`o:w:${j}`, wallOut, !conn.W), rEff(`o:w:${j + 1}`, wallOut, !conn.W));
+        const rE = Math.max(rEff(`o:e:${j}`, wallOut, !conn.E), rEff(`o:e:${j + 1}`, wallOut, !conn.E));
         if (i === 0 && segs.length && segs[0][0] <= bx0 + 0.01 && meFlatH && flatWall(`o:w:${j}`) && flatWall(`o:w:${j + 1}`)) {
-          const hF = Math.min(hAtEnd(wc, true), getWall(c, `o:w:${j}`).h, getWall(c, `o:w:${j + 1}`).h);
+          const hF = Math.min(hAtEnd(wc, true) - rMeH, getWall(c, `o:w:${j}`).h - rW, getWall(c, `o:w:${j + 1}`).h - rW);
           addFillet(-W / 2 + wallOut, zd - wall / 2, 1, -1, hF, key);
           addFillet(-W / 2 + wallOut, zd + wall / 2, 1, 1, hF, key);
         }
         if (i === L.nColsAt(j) - 1 && segs.length && segs[segs.length - 1][1] >= bx1 - 0.01 && meFlatH && flatWall(`o:e:${j}`) && flatWall(`o:e:${j + 1}`)) {
-          const hF = Math.min(hAtEnd(wc, false), getWall(c, `o:e:${j}`).h, getWall(c, `o:e:${j + 1}`).h);
+          const hF = Math.min(hAtEnd(wc, false) - rMeH, getWall(c, `o:e:${j}`).h - rE, getWall(c, `o:e:${j + 1}`).h - rE);
           addFillet(W / 2 - wallOut, zd - wall / 2, -1, -1, hF, key);
           addFillet(W / 2 - wallOut, zd + wall / 2, -1, 1, hF, key);
         }
         // концы, упирающиеся в стенку фиксированного бокса
         if (meFlatH) for (const [a, b] of segs) {
+          const hB = wc.h - rMeH;
           if (a > bx0 + 0.01) {
-            addFillet(a, zd - wall / 2, 1, -1, wc.h, key);
-            addFillet(a, zd + wall / 2, 1, 1, wc.h, key);
+            addFillet(a, zd - wall / 2, 1, -1, hB, key);
+            addFillet(a, zd + wall / 2, 1, 1, hB, key);
           }
           if (b < bx1 - 0.01) {
-            addFillet(b, zd - wall / 2, -1, -1, wc.h, key);
-            addFillet(b, zd + wall / 2, -1, 1, wc.h, key);
+            addFillet(b, zd - wall / 2, -1, -1, hB, key);
+            addFillet(b, zd + wall / 2, -1, 1, hB, key);
           }
         }
       }
@@ -857,27 +932,29 @@ export function buildContainer(c, conn, opts = {}) {
       const span = orient === "z" ? [f.x0, f.x1] : [f.z0, f.z1];
       const cellSize = orient === "z" ? f.z1 - f.z0 : f.x1 - f.x0;
       addRamp(orient, facePos, dir, span[0], span[1], hRamp, wc.t1, cellSize, wall / 2, wall, wc, floor + lvl, key);
-      // галтели там, где стенка бокса упирается в корпус (без пандусов)
+      // галтели там, где стенка бокса упирается в корпус (без пандусов);
+      // высота — до начала скругления кромки, иначе галтель торчит
+      const hBoxF = wc.h - rEff(key, wall, true);
       if (!flatWall(key)) { /* наклонная стенка бокса — галтели не нужны */ }
       else if (orient === "x") {
         const faceLo = side === "w" ? f.x0 - wall : f.x1, faceHi = side === "w" ? f.x0 : f.x1 + wall;
         if (!f.own.n) {
-          addFillet(faceLo, -D / 2 + wallOut, -1, 1, wc.h, key);
-          addFillet(faceHi, -D / 2 + wallOut, 1, 1, wc.h, key);
+          addFillet(faceLo, -D / 2 + wallOut, -1, 1, hBoxF, key);
+          addFillet(faceHi, -D / 2 + wallOut, 1, 1, hBoxF, key);
         }
         if (!f.own.s) {
-          addFillet(faceLo, D / 2 - wallOut, -1, -1, wc.h, key);
-          addFillet(faceHi, D / 2 - wallOut, 1, -1, wc.h, key);
+          addFillet(faceLo, D / 2 - wallOut, -1, -1, hBoxF, key);
+          addFillet(faceHi, D / 2 - wallOut, 1, -1, hBoxF, key);
         }
       } else {
         const faceLo = side === "n" ? f.z0 - wall : f.z1, faceHi = side === "n" ? f.z0 : f.z1 + wall;
         if (!f.own.w) {
-          addFillet(-W / 2 + wallOut, faceLo, 1, -1, wc.h, key);
-          addFillet(-W / 2 + wallOut, faceHi, 1, 1, wc.h, key);
+          addFillet(-W / 2 + wallOut, faceLo, 1, -1, hBoxF, key);
+          addFillet(-W / 2 + wallOut, faceHi, 1, 1, hBoxF, key);
         }
         if (!f.own.e) {
-          addFillet(W / 2 - wallOut, faceLo, -1, -1, wc.h, key);
-          addFillet(W / 2 - wallOut, faceHi, -1, 1, wc.h, key);
+          addFillet(W / 2 - wallOut, faceLo, -1, -1, hBoxF, key);
+          addFillet(W / 2 - wallOut, faceHi, -1, 1, hBoxF, key);
         }
       }
     }
@@ -889,13 +966,16 @@ export function buildContainer(c, conn, opts = {}) {
         if (s === "s") return getWall(c, `o:s:${Math.min(L.cellIndexAt(L.nRows - 1, (f.x0 + f.x1) / 2), L.nColsAt(L.nRows - 1) - 1)}`).h;
         return getWall(c, `o:${s}:0`).h;
       };
-      const hSide = (s) => (f.own[s] ? getWall(c, `fw:${f.k}:${s}`).h : outerH(s));
       const sideKey = (s) => {
         if (f.own[s]) return `fw:${f.k}:${s}`;
         if (s === "n") return `o:n:${Math.min(L.cellIndexAt(0, (f.x0 + f.x1) / 2), L.nColsAt(0) - 1)}`;
         if (s === "s") return `o:s:${Math.min(L.cellIndexAt(L.nRows - 1, (f.x0 + f.x1) / 2), L.nColsAt(L.nRows - 1) - 1)}`;
         return `o:${s}:0`;
       };
+      // высота — до начала скругления кромки соответствующей стенки
+      const hSide = (s) => f.own[s]
+        ? getWall(c, sideKey(s)).h - rEff(sideKey(s), wall, true)
+        : outerH(s) - rEff(sideKey(s), wallOut, !conn[s.toUpperCase()]);
       const pair = (a, b) => flatWall(sideKey(a)) && flatWall(sideKey(b));
       if (pair("n", "w")) addFillet(f.x0, f.z0, 1, 1, Math.min(hSide("n"), hSide("w")), `fx:${f.k}`, f.k);
       if (pair("n", "e")) addFillet(f.x1, f.z0, -1, 1, Math.min(hSide("n"), hSide("e")), `fx:${f.k}`, f.k);
@@ -924,9 +1004,12 @@ export function buildContainer(c, conn, opts = {}) {
     }
   }
 
-  // соединители
+  // соединители (скругление кромки в зоне паза — как у стенки этой стороны)
   for (const side of ["N", "S", "W", "E"])
-    if (conn[side]) addConnUnits(solids, c, side, conn[side].vs);
+    if (conn[side]) {
+      const key = `o:${side.toLowerCase()}:0`;
+      addConnUnits(solids, c, side, conn[side].vs, rEff(key, wallOut, false));
+    }
 
   return solids;
 }
