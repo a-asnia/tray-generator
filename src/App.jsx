@@ -1180,7 +1180,7 @@ export default function TrayGenerator() {
 
         {/* воздух под кнопками + случайная цитата (одна на сеанс) */}
         <div style={{ height: 44 }} />
-        <div style={{ borderTop: "1px solid #E4E9EF", paddingTop: 14, paddingBottom: 10 }}>
+        <div style={{ borderTop: "1px solid #E4E9EF", paddingTop: 14, paddingBottom: 48 }}>
           <p style={{ fontSize: 12, lineHeight: 1.5, color: "#A9B4C2", fontStyle: "italic", margin: 0, textAlign: "center" }}>
             {quote}
           </p>
