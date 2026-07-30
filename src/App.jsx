@@ -6,7 +6,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
-import { CONN, connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
+import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -404,6 +404,11 @@ export default function TrayGenerator() {
     return m;
   }, [containers]);
 
+  // Геометрия кэшируется по объекту контейнера: правка одного контейнера
+  // не должна пересобирать остальные. Объекты неизменяемые (обновление
+  // делает новый объект только для затронутого), поэтому ссылка — надёжный
+  // ключ, а WeakMap не держит устаревшие записи.
+  const geoCache = useRef(new WeakMap());
   // ── сборка: соединители по соседям + раскладка сеткой ──
   const built = useMemo(() => {
     const nb = (c, dx, dy) => {
@@ -438,9 +443,15 @@ export default function TrayGenerator() {
             S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
             N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
           };
+      const ck = `${limits.connClr}|${JSON.stringify(conn)}`;
+      let hit = geoCache.current.get(c);
+      if (!hit || hit.key !== ck) {
+        hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr }, conn) };
+        geoCache.current.set(c, hit);
+      }
       return {
         c,
-        solids: buildContainer({ ...c, connClr: limits.connClr }, conn),
+        solids: hit.solids,
         ox: colX[c.gx] - totalW / 2,
         oz: rowZ[c.gy] - totalD / 2,
       };

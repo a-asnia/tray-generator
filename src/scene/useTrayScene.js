@@ -15,6 +15,15 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
   const mountRef = useRef(null);
   const groupRef = useRef(null);
   const cameraRef = useRef(null);
+  // Материалы создаются один раз и переиспользуются. Если создавать их
+  // заново на каждую перестройку, three.js каждый раз компилирует и
+  // линкует шейдерную программу — это самая дорогая операция при
+  // изменении параметра (десятки миллисекунд на пустом месте).
+  const matsRef = useRef(null);
+  // меши по индексу контейнера: пересобираются только те, чья геометрия
+  // или подсветка изменилась
+  const meshRef = useRef(new Map());
+  const frameRef = useRef(null);
   const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, lastX: 0, lastY: 0 });
 
   const applyCamera = useCallback(() => {
@@ -53,6 +62,14 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     const group = new THREE.Group();
     groupRef.current = group;
     scene.add(group);
+    const body = (color, opacity) =>
+      new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true, transparent: opacity < 1, opacity });
+    matsRef.current = {
+      sel: body(0xf2620f, 1),          // выбранный контейнер
+      other: body(0xf5a06a, 0.92),     // остальные — полупрозрачные
+      hi: body(0x2563eb, 1),           // выбранная стенка/ячейка
+      frame: new THREE.LineBasicMaterial({ color: 0x8a97a8 }), // рамка лимита
+    };
     applyCamera();
 
     let raf;
@@ -138,6 +155,12 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       window.removeEventListener("pointerup", onUp);
       el.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", onResize);
+      for (const e of meshRef.current.values()) for (const m of e.meshes) m.geometry.dispose();
+      meshRef.current.clear();
+      frameRef.current?.geometry.dispose();
+      frameRef.current = null;
+      for (const m of Object.values(matsRef.current || {})) m.dispose();
+      matsRef.current = null;
       renderer.dispose();
       mount.removeChild(el);
     };
@@ -146,12 +169,8 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
   useEffect(() => {
     const group = groupRef.current;
     if (!group) return;
-    while (group.children.length) {
-      const ch = group.children.pop();
-      ch.geometry?.dispose();
-      ch.material?.dispose();
-      group.remove(ch);
-    }
+    const mats = matsRef.current;
+    if (!mats) return;
     const selKeys = new Set();
     if (selection?.type === "wall") selKeys.add(selection.key);
     if (selection?.type === "line") selection.keys.forEach((k) => selKeys.add(k));
@@ -160,47 +179,73 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       selKeys.add(`fx:${selection.k}`);
       for (const s of ["n", "s", "w", "e"]) selKeys.add(`fw:${selection.k}:${s}`);
     }
+    // подпись подсветки: она делит тела контейнера на два меша, поэтому при
+    // её изменении буферы этого контейнера нужно пересобрать
+    const hiSig = [...selKeys].sort().join(",");
 
+    const cache = meshRef.current;
     built.items.forEach(({ solids, ox, oz }, idx) => {
-      const base = [], hi = [], baseTags = [], hiTags = [];
-      for (const s of solids) {
-        const isHi = idx === sel && selKeys.has(s.tag);
-        const arr = isHi ? hi : base;
-        const tagArr = isHi ? hiTags : baseTags;
-        for (const [a, b, c] of s.tris) { arr.push(...a, ...b, ...c); tagArr.push(s.tag); }
+      const sig = idx === sel ? hiSig : "";
+      let e = cache.get(idx);
+      if (!e || e.solids !== solids || e.sig !== sig) {
+        // геометрия действительно изменилась — собираем буферы заново
+        if (e) for (const m of e.meshes) { m.geometry.dispose(); group.remove(m); }
+        const base = [], hi = [], baseTags = [], hiTags = [];
+        for (const s of solids) {
+          const isHi = idx === sel && selKeys.has(s.tag);
+          const arr = isHi ? hi : base;
+          const tagArr = isHi ? hiTags : baseTags;
+          for (const [a, b, c] of s.tris) { arr.push(...a, ...b, ...c); tagArr.push(s.tag); }
+        }
+        const meshes = [];
+        const addMesh = (arr, mat, tags) => {
+          if (!arr.length) return;
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(arr), 3));
+          geo.computeVertexNormals();
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.userData = { tags, cIdx: idx, ox, oz };
+          meshes.push(mesh);
+          group.add(mesh);
+        };
+        addMesh(base, idx === sel ? mats.sel : mats.other, baseTags);
+        addMesh(hi, mats.hi, hiTags);
+        e = { solids, sig, meshes };
+        cache.set(idx, e);
       }
-      const addMesh = (arr, color, opacity, tags) => {
-        if (!arr.length) return;
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(arr), 3));
-        geo.computeVertexNormals();
-        const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true, transparent: opacity < 1, opacity });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.set(ox, 0, oz);
-        mesh.userData = { tags, cIdx: idx, ox, oz };
-        group.add(mesh);
-      };
-      addMesh(base, idx === sel ? 0xf2620f : 0xf5a06a, idx === sel ? 1 : 0.92, baseTags);
-      addMesh(hi, 0x2563eb, 1, hiTags);
+      // без пересборки: подвинуть и, если сменился выбранный контейнер,
+      // переключить материал корпуса — шейдеры при этом не перекомпилируются
+      for (const m of e.meshes) {
+        m.position.set(ox, 0, oz);
+        m.userData.ox = ox; m.userData.oz = oz;
+        if (m.material !== mats.hi) m.material = idx === sel ? mats.sel : mats.other;
+      }
     });
+    // контейнеры, которых больше нет
+    for (const [idx, e] of cache)
+      if (idx >= built.items.length) {
+        for (const m of e.meshes) { m.geometry.dispose(); group.remove(m); }
+        cache.delete(idx);
+      }
 
     // рамка лимита раскладки на столе — видно, как сборка «липнет» к краям
     const bw = limits.layW * 10, bd = limits.layD * 10;
-    const bGeo = new THREE.BufferGeometry();
-    bGeo.setAttribute(
-      "position",
-      new THREE.BufferAttribute(
-        new Float32Array([
-          -bw / 2, 0.08, -bd / 2, bw / 2, 0.08, -bd / 2,
-          bw / 2, 0.08, bd / 2, -bw / 2, 0.08, bd / 2,
-        ]),
-        3
-      )
-    );
-    const bLine = new THREE.LineLoop(bGeo, new THREE.LineBasicMaterial({ color: 0x8a97a8 }));
-    bLine.userData = {};
-    bLine.raycast = () => {}; // рамка не должна перехватывать клики выбора
-    group.add(bLine);
+    if (!frameRef.current) {
+      const bGeo = new THREE.BufferGeometry();
+      bGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(12), 3));
+      const bLine = new THREE.LineLoop(bGeo, mats.frame);
+      bLine.userData = {};
+      bLine.raycast = () => {}; // рамка не должна перехватывать клики выбора
+      frameRef.current = bLine;
+      group.add(bLine);
+    }
+    const pos = frameRef.current.geometry.getAttribute("position");
+    pos.copyArray([
+      -bw / 2, 0.08, -bd / 2, bw / 2, 0.08, -bd / 2,
+      bw / 2, 0.08, bd / 2, -bw / 2, 0.08, bd / 2,
+    ]);
+    pos.needsUpdate = true;
+    frameRef.current.geometry.computeBoundingSphere();
   }, [built, selection, sel, cur, limits]);
 
   return mountRef;

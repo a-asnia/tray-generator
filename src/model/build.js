@@ -13,7 +13,7 @@ import { layout, getWall, getCellLvl } from "./layout.js";
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
 export function buildContainer(c, conn, opts = {}) {
-  const { W, D, H, cols, rows, wall, wallOut, floor } = c;
+  const { W, D, H, wall, wallOut, floor } = c;
   const L = layout(c);
   const solids = [];
   const tan = (deg) => Math.tan((deg * Math.PI) / 180);
@@ -159,38 +159,40 @@ export function buildContainer(c, conn, opts = {}) {
     }
   };
 
-  // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
-  // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
-  // печатается вертикально без поддержек. Верхний пояс несёт скругление.
-  const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
+  // Общая обвязка узорных стенок (соты и линии): геометрия рамки вокруг
+  // узора, окно узора и примитивы «прямоугольник» / «брусок». Рамка —
+  // две толщины этой стенки с каждой стороны; верхний пояс несёт
+  // скругление кромки, поэтому рисуется профилем.
+  const patternCtx = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
     const strut = Math.max(1.2, Math.min(2.2, thk));
     const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
     const rect = (sa, sb, ya, yb) => {
       const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
       solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     };
-    // рамка вокруг узора — две толщины этой стенки с каждой стороны
     const rail = 2 * thk;
     const yA = floor + rail;
     const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-    const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
+    const hbTop = parts.length > 1 ? parts[0][2][1] : wc.h; // высота начала скругления
+    const yB = Math.min(wc.h - rail, parts.length > 1 ? hbTop : wc.h - rail);
     const sA = s0 + rail, sB = s1 - rail;
-    if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
-      // окно слишком маленькое — сплошная стенка
-      pushProfiled(parts, mapFn, s0, s1, key, trim);
-      return;
-    }
-    // рамка
-    rect(s0, s1, 0, yA); // нижний пояс
-    const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-    pushProfiled(topParts, mapFn, s0, s1, key, trim); // верхний пояс (со скруглением)
-    rect(s0, sA, yA, yB);
-    rect(sB, s1, yA, yB); // боковые пояса
-    // решётка
-    const clipSeg = (P1, P2) => {
+    // сплошная стенка — когда окно узора не набирается
+    const solidWall = (yFrom) =>
+      pushProfiled(
+        yFrom === undefined ? parts : parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yFrom : y]) : q)),
+        mapFn, s0, s1, key, trim
+      );
+    const drawFrame = () => {
+      rect(s0, s1, 0, yA);   // нижний пояс
+      solidWall(yB);         // верхний пояс (со скруглением кромки)
+      rect(s0, sA, yA, yB);
+      rect(sB, s1, yA, yB);  // боковые пояса
+    };
+    // отсечение отрезка по окну узора (алгоритм Лианга — Барски)
+    const clipTo = (P1, P2, wLo, wHi, hLo, hHi) => {
       let t0 = 0, t1 = 1;
       const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-      const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
+      const p = [-dx, dx, -dy, dy], q = [P1[0] - wLo, wHi - P1[0], P1[1] - hLo, hHi - P1[1]];
       for (let i = 0; i < 4; i++) {
         if (p[i] === 0) { if (q[i] < 0) return null; }
         else {
@@ -199,8 +201,13 @@ export function buildContainer(c, conn, opts = {}) {
           else { if (r < t0) return null; if (r < t1) t1 = r; }
         }
       }
-      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
+      return { A: [P1[0] + t0 * dx, P1[1] + t0 * dy], B: [P1[0] + t1 * dx, P1[1] + t1 * dy], t0, t1 };
     };
+    const clipSeg = (P1, P2) => {
+      const c2 = clipTo(P1, P2, sA, sB, yA, yB);
+      return c2 && [c2.A, c2.B];
+    };
+    // брусок решётки: отрезок, расширенный до полосы шириной strut
     const bar = (P1, P2) => {
       const c2 = clipSeg(P1, P2);
       if (!c2) return;
@@ -212,6 +219,20 @@ export function buildContainer(c, conn, opts = {}) {
       const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
       solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     };
+    return { strut, oA, oB, rect, yA, yB, sA, sB, hbTop, solidWall, drawFrame, clipTo, clipSeg, bar };
+  };
+
+  // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
+  // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
+  // печатается вертикально без поддержек. Верхний пояс несёт скругление.
+  const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
+    const { oA, oB, rect, yA, yB, sA, sB, solidWall, drawFrame, bar } =
+      patternCtx(key, wc, thk, sym, s0, s1, mapFn, trim);
+    if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
+      solidWall(); // окно слишком маленькое — сплошная стенка
+      return;
+    }
+    drawFrame();
     const Whex = wc.hexSize;               // ширина соты между вертикальными гранями
     const R = Whex / Math.sqrt(3);         // радиус до вершины
     // только ЦЕЛЫЕ ряды сот по высоте: неполный верхний ряд не рисуется,
@@ -219,7 +240,7 @@ export function buildContainer(c, conn, opts = {}) {
     let rows = 0;
     while (yA + R + rows * 1.5 * R + R <= yB + 0.01) rows++;
     if (rows < 1) {
-      pushProfiled(parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yA : y]) : q)), mapFn, s0, s1, key, trim);
+      solidWall(yA); // ни одного целого ряда сот — заливаем окно
       return;
     }
     const colsN = Math.ceil((sB - sA) / Whex) + 2;
@@ -239,14 +260,13 @@ export function buildContainer(c, conn, opts = {}) {
     const yTip = yA + R + (rows - 1) * 1.5 * R + R;
     const yValley = yTip - R / 2;
     const shiftN = rows % 2 === 1 ? Whex / 2 : 0;
-    const oA2 = sym ? -thk / 2 : 0, oB2 = sym ? thk / 2 : thk;
     for (let ci = -1; ci < colsN + 1; ci++) {
       const sc = sA + Whex / 2 + ci * Whex + shiftN;
       const P = [[sc, yValley], [sc - Whex / 2, yTip], [sc + Whex / 2, yTip]]
         .map(([sv, yv]) => [Math.min(sB, Math.max(sA, sv)), yv]);
       if (Math.max(P[0][0], P[1][0], P[2][0]) - Math.min(P[0][0], P[1][0], P[2][0]) < 0.3) continue;
       const q = [P[0], P[1], P[2], P[2]];
-      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA2, yv, sv)), q.map(([sv, yv]) => mapFn(oB2, yv, sv)), key));
+      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     }
     if (yB - yTip > 0.05) rect(sA, sB, yTip, yB);
   };
@@ -255,74 +275,21 @@ export function buildContainer(c, conn, opts = {}) {
   // семейства волнистых диагональных прядей (±45°, печатаются без поддержек).
   // Узор детерминированный: сид зависит от стенки; «перемешать» меняет сид.
   const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
-    const strut = Math.max(1.2, Math.min(2.2, thk));
-    const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
-    const rect = (sa, sb, ya, yb) => {
-      const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
-      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
-    };
-    // рамка вокруг узора — две толщины этой стенки с каждой стороны
-    const rail = 2 * thk;
-    const yA = floor + rail;
-    const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-    const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
-    const sA = s0 + rail, sB = s1 - rail;
+    const { strut, oA, oB, yA, yB, sA, sB, hbTop, solidWall, drawFrame, clipTo } =
+      patternCtx(key, wc, thk, sym, s0, s1, mapFn, trim);
     const sp = Math.max(4, wc.lineStep);
     if (sB - sA < sp || yB - yA < sp) {
-      pushProfiled(parts, mapFn, s0, s1, key, trim);
+      solidWall();
       return;
     }
-    rect(s0, s1, 0, yA);
-    const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-    pushProfiled(topParts, mapFn, s0, s1, key, trim);
-    rect(s0, sA, yA, yB);
-    rect(sB, s1, yA, yB);
-    const clipSeg = (P1, P2) => {
-      let t0 = 0, t1 = 1;
-      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-      const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
-      for (let i = 0; i < 4; i++) {
-        if (p[i] === 0) { if (q[i] < 0) return null; }
-        else {
-          const r = q[i] / p[i];
-          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
-          else { if (r < t0) return null; if (r < t1) t1 = r; }
-        }
-      }
-      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
-    };
-    const bar = (P1, P2) => {
-      const c2 = clipSeg(P1, P2);
-      if (!c2) return;
-      const [A, B] = c2;
-      const dx = B[0] - A[0], dy = B[1] - A[1];
-      const len = Math.hypot(dx, dy);
-      if (len < 0.4) return;
-      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
-      const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
-      solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
-    };
+    drawFrame();
     // расширенное окно клипа: концы прядей заходят вглубь поясов рамки
     // и сращиваются с ними — без зазоров на стыке
     const ext = 2.3;
     const sAe = sA - ext, sBe = sB + ext;
-    const hbTop = parts.length > 1 ? parts[0][2][1] : wc.h;
     const yAe = Math.max(0.4, yA - 2.6);
     const yBe = Math.min(yB + 3, hbTop - 0.15, wc.h - 0.4);
-    const clipT = (P1, P2) => {
-      let t0 = 0, t1 = 1;
-      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-      const p = [-dx, dx, -dy, dy], q = [P1[0] - sAe, sBe - P1[0], P1[1] - yAe, yBe - P1[1]];
-      for (let i = 0; i < 4; i++) {
-        if (p[i] === 0) { if (q[i] < 0) return null; }
-        else {
-          const r = q[i] / p[i];
-          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
-          else { if (r < t0) return null; if (r < t1) t1 = r; }
-        }
-      }
-      return { A: [P1[0] + t0 * dx, P1[1] + t0 * dy], B: [P1[0] + t1 * dx, P1[1] + t1 * dy], t0, t1 };
-    };
+    const clipT = (P1, P2) => clipTo(P1, P2, sAe, sBe, yAe, yBe);
     // жёсткие границы тела стенки: лента (с учётом полуширины!) никогда
     // не выходит за края сегмента, ниже дна и выше начала скругления
     const pushQ = (q0) => {
@@ -495,30 +462,6 @@ export function buildContainer(c, conn, opts = {}) {
     pushQuadUS([[uA, s0], [uB, s0], [uB, sA], [uA, sA]]);
     pushQuadUS([[uA, sB], [uB, sB], [uB, s1], [uA, s1]]);
     const strut = Math.max(1.2, Math.min(2.2, thk));
-    const clipSeg = (P1, P2) => {
-      let t0 = 0, t1 = 1;
-      const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-      const p = [-dx, dx, -dy, dy], q = [P1[0] - uA, uB - P1[0], P1[1] - sA, sB - P1[1]];
-      for (let i = 0; i < 4; i++) {
-        if (p[i] === 0) { if (q[i] < 0) return null; }
-        else {
-          const r = q[i] / p[i];
-          if (p[i] < 0) { if (r > t1) return null; if (r > t0) t0 = r; }
-          else { if (r < t0) return null; if (r < t1) t1 = r; }
-        }
-      }
-      return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
-    };
-    const bar = (P1, P2) => {
-      const c2 = clipSeg(P1, P2);
-      if (!c2) return;
-      const [A, B] = c2;
-      const dx = B[0] - A[0], dy = B[1] - A[1];
-      const len = Math.hypot(dx, dy);
-      if (len < 0.4) return;
-      const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
-      pushQuadUS([[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]]);
-    };
     const ext = 2.3;
     const sAe = sA - ext, sBe = sB + ext;
     const uAe = Math.max(0.3, uA - 2.6);

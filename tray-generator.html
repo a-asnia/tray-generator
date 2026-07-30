@@ -723,7 +723,7 @@ const wallTitle = (key) => {
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
 function buildContainer(c, conn, opts = {}) {
-    const { W, D, H, cols, rows, wall, wallOut, floor } = c;
+    const { W, D, H, wall, wallOut, floor } = c;
     const L = layout(c);
     const solids = [];
     const tan = (deg) => Math.tan((deg * Math.PI) / 180);
@@ -878,193 +878,36 @@ function buildContainer(c, conn, opts = {}) {
             }
         }
     };
-    // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
-    // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
-    // печатается вертикально без поддержек. Верхний пояс несёт скругление.
-    const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
+    // Общая обвязка узорных стенок (соты и линии): геометрия рамки вокруг
+    // узора, окно узора и примитивы «прямоугольник» / «брусок». Рамка —
+    // две толщины этой стенки с каждой стороны; верхний пояс несёт
+    // скругление кромки, поэтому рисуется профилем.
+    const patternCtx = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
         const strut = Math.max(1.2, Math.min(2.2, thk));
         const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
         const rect = (sa, sb, ya, yb) => {
             const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
             solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
         };
-        // рамка вокруг узора — две толщины этой стенки с каждой стороны
         const rail = 2 * thk;
         const yA = floor + rail;
         const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-        const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
+        const hbTop = parts.length > 1 ? parts[0][2][1] : wc.h; // высота начала скругления
+        const yB = Math.min(wc.h - rail, parts.length > 1 ? hbTop : wc.h - rail);
         const sA = s0 + rail, sB = s1 - rail;
-        if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
-            // окно слишком маленькое — сплошная стенка
-            pushProfiled(parts, mapFn, s0, s1, key, trim);
-            return;
-        }
-        // рамка
-        rect(s0, s1, 0, yA); // нижний пояс
-        const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-        pushProfiled(topParts, mapFn, s0, s1, key, trim); // верхний пояс (со скруглением)
-        rect(s0, sA, yA, yB);
-        rect(sB, s1, yA, yB); // боковые пояса
-        // решётка
-        const clipSeg = (P1, P2) => {
+        // сплошная стенка — когда окно узора не набирается
+        const solidWall = (yFrom) => pushProfiled(yFrom === undefined ? parts : parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yFrom : y]) : q)), mapFn, s0, s1, key, trim);
+        const drawFrame = () => {
+            rect(s0, s1, 0, yA); // нижний пояс
+            solidWall(yB); // верхний пояс (со скруглением кромки)
+            rect(s0, sA, yA, yB);
+            rect(sB, s1, yA, yB); // боковые пояса
+        };
+        // отсечение отрезка по окну узора (алгоритм Лианга — Барски)
+        const clipTo = (P1, P2, wLo, wHi, hLo, hHi) => {
             let t0 = 0, t1 = 1;
             const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-            const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
-            for (let i = 0; i < 4; i++) {
-                if (p[i] === 0) {
-                    if (q[i] < 0)
-                        return null;
-                }
-                else {
-                    const r = q[i] / p[i];
-                    if (p[i] < 0) {
-                        if (r > t1)
-                            return null;
-                        if (r > t0)
-                            t0 = r;
-                    }
-                    else {
-                        if (r < t0)
-                            return null;
-                        if (r < t1)
-                            t1 = r;
-                    }
-                }
-            }
-            return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
-        };
-        const bar = (P1, P2) => {
-            const c2 = clipSeg(P1, P2);
-            if (!c2)
-                return;
-            const [A, B] = c2;
-            const dx = B[0] - A[0], dy = B[1] - A[1];
-            const len = Math.hypot(dx, dy);
-            if (len < 0.4)
-                return;
-            const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
-            const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
-            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
-        };
-        const Whex = wc.hexSize; // ширина соты между вертикальными гранями
-        const R = Whex / Math.sqrt(3); // радиус до вершины
-        // только ЦЕЛЫЕ ряды сот по высоте: неполный верхний ряд не рисуется,
-        // остаток до верхнего пояса заливается пластиком
-        let rows = 0;
-        while (yA + R + rows * 1.5 * R + R <= yB + 0.01)
-            rows++;
-        if (rows < 1) {
-            pushProfiled(parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yA : y]) : q)), mapFn, s0, s1, key, trim);
-            return;
-        }
-        const colsN = Math.ceil((sB - sA) / Whex) + 2;
-        for (let r = 0; r < rows; r++) {
-            const yc = yA + R + r * 1.5 * R;
-            const shift = r % 2 === 1 ? Whex / 2 : 0;
-            for (let ci = -1; ci < colsN; ci++) {
-                const sc = sA + Whex / 2 + ci * Whex + shift;
-                const V = [
-                    [sc, yc + R], [sc + Whex / 2, yc + R / 2], [sc + Whex / 2, yc - R / 2],
-                    [sc, yc - R], [sc - Whex / 2, yc - R / 2], [sc - Whex / 2, yc + R / 2],
-                ];
-                for (let e = 0; e < 6; e++)
-                    bar(V[e], V[(e + 1) % 6]);
-            }
-        }
-        // заливка над последним целым рядом: клинья между вершинами + сплошная полоса
-        const yTip = yA + R + (rows - 1) * 1.5 * R + R;
-        const yValley = yTip - R / 2;
-        const shiftN = rows % 2 === 1 ? Whex / 2 : 0;
-        const oA2 = sym ? -thk / 2 : 0, oB2 = sym ? thk / 2 : thk;
-        for (let ci = -1; ci < colsN + 1; ci++) {
-            const sc = sA + Whex / 2 + ci * Whex + shiftN;
-            const P = [[sc, yValley], [sc - Whex / 2, yTip], [sc + Whex / 2, yTip]]
-                .map(([sv, yv]) => [Math.min(sB, Math.max(sA, sv)), yv]);
-            if (Math.max(P[0][0], P[1][0], P[2][0]) - Math.min(P[0][0], P[1][0], P[2][0]) < 0.3)
-                continue;
-            const q = [P[0], P[1], P[2], P[2]];
-            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA2, yv, sv)), q.map(([sv, yv]) => mapFn(oB2, yv, sv)), key));
-        }
-        if (yB - yTip > 0.05)
-            rect(sA, sB, yTip, yB);
-    };
-    // Стенка с фоном из изогнутых случайных линий: рамка как у сот + два
-    // семейства волнистых диагональных прядей (±45°, печатаются без поддержек).
-    // Узор детерминированный: сид зависит от стенки; «перемешать» меняет сид.
-    const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
-        const strut = Math.max(1.2, Math.min(2.2, thk));
-        const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
-        const rect = (sa, sb, ya, yb) => {
-            const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
-            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
-        };
-        // рамка вокруг узора — две толщины этой стенки с каждой стороны
-        const rail = 2 * thk;
-        const yA = floor + rail;
-        const parts = wallProfile(thk, wc.h, wc.rnd, sym);
-        const yB = Math.min(wc.h - rail, parts.length > 1 ? parts[0][2][1] : wc.h - rail);
-        const sA = s0 + rail, sB = s1 - rail;
-        const sp = Math.max(4, wc.lineStep);
-        if (sB - sA < sp || yB - yA < sp) {
-            pushProfiled(parts, mapFn, s0, s1, key, trim);
-            return;
-        }
-        rect(s0, s1, 0, yA);
-        const topParts = parts.map((q, qi) => (qi === 0 ? q.map(([o, y]) => [o, y === 0 ? yB : y]) : q));
-        pushProfiled(topParts, mapFn, s0, s1, key, trim);
-        rect(s0, sA, yA, yB);
-        rect(sB, s1, yA, yB);
-        const clipSeg = (P1, P2) => {
-            let t0 = 0, t1 = 1;
-            const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-            const p = [-dx, dx, -dy, dy], q = [P1[0] - sA, sB - P1[0], P1[1] - yA, yB - P1[1]];
-            for (let i = 0; i < 4; i++) {
-                if (p[i] === 0) {
-                    if (q[i] < 0)
-                        return null;
-                }
-                else {
-                    const r = q[i] / p[i];
-                    if (p[i] < 0) {
-                        if (r > t1)
-                            return null;
-                        if (r > t0)
-                            t0 = r;
-                    }
-                    else {
-                        if (r < t0)
-                            return null;
-                        if (r < t1)
-                            t1 = r;
-                    }
-                }
-            }
-            return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
-        };
-        const bar = (P1, P2) => {
-            const c2 = clipSeg(P1, P2);
-            if (!c2)
-                return;
-            const [A, B] = c2;
-            const dx = B[0] - A[0], dy = B[1] - A[1];
-            const len = Math.hypot(dx, dy);
-            if (len < 0.4)
-                return;
-            const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
-            const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
-            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
-        };
-        // расширенное окно клипа: концы прядей заходят вглубь поясов рамки
-        // и сращиваются с ними — без зазоров на стыке
-        const ext = 2.3;
-        const sAe = sA - ext, sBe = sB + ext;
-        const hbTop = parts.length > 1 ? parts[0][2][1] : wc.h;
-        const yAe = Math.max(0.4, yA - 2.6);
-        const yBe = Math.min(yB + 3, hbTop - 0.15, wc.h - 0.4);
-        const clipT = (P1, P2) => {
-            let t0 = 0, t1 = 1;
-            const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-            const p = [-dx, dx, -dy, dy], q = [P1[0] - sAe, sBe - P1[0], P1[1] - yAe, yBe - P1[1]];
+            const p = [-dx, dx, -dy, dy], q = [P1[0] - wLo, wHi - P1[0], P1[1] - hLo, hHi - P1[1]];
             for (let i = 0; i < 4; i++) {
                 if (p[i] === 0) {
                     if (q[i] < 0)
@@ -1088,6 +931,95 @@ function buildContainer(c, conn, opts = {}) {
             }
             return { A: [P1[0] + t0 * dx, P1[1] + t0 * dy], B: [P1[0] + t1 * dx, P1[1] + t1 * dy], t0, t1 };
         };
+        const clipSeg = (P1, P2) => {
+            const c2 = clipTo(P1, P2, sA, sB, yA, yB);
+            return c2 && [c2.A, c2.B];
+        };
+        // брусок решётки: отрезок, расширенный до полосы шириной strut
+        const bar = (P1, P2) => {
+            const c2 = clipSeg(P1, P2);
+            if (!c2)
+                return;
+            const [A, B] = c2;
+            const dx = B[0] - A[0], dy = B[1] - A[1];
+            const len = Math.hypot(dx, dy);
+            if (len < 0.4)
+                return;
+            const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
+            const q = [[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]];
+            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+        };
+        return { strut, oA, oB, rect, yA, yB, sA, sB, hbTop, solidWall, drawFrame, clipTo, clipSeg, bar };
+    };
+    // Сотовая стенка: рамка (низ/верх/бока) + гексагональная решётка из
+    // брусков. Гексы вершиной вверх: потолки отверстий — два ската по 60°,
+    // печатается вертикально без поддержек. Верхний пояс несёт скругление.
+    const buildHexWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
+        const { oA, oB, rect, yA, yB, sA, sB, solidWall, drawFrame, bar } = patternCtx(key, wc, thk, sym, s0, s1, mapFn, trim);
+        if (sB - sA < wc.hexSize * 0.9 || yB - yA < wc.hexSize * 0.9) {
+            solidWall(); // окно слишком маленькое — сплошная стенка
+            return;
+        }
+        drawFrame();
+        const Whex = wc.hexSize; // ширина соты между вертикальными гранями
+        const R = Whex / Math.sqrt(3); // радиус до вершины
+        // только ЦЕЛЫЕ ряды сот по высоте: неполный верхний ряд не рисуется,
+        // остаток до верхнего пояса заливается пластиком
+        let rows = 0;
+        while (yA + R + rows * 1.5 * R + R <= yB + 0.01)
+            rows++;
+        if (rows < 1) {
+            solidWall(yA); // ни одного целого ряда сот — заливаем окно
+            return;
+        }
+        const colsN = Math.ceil((sB - sA) / Whex) + 2;
+        for (let r = 0; r < rows; r++) {
+            const yc = yA + R + r * 1.5 * R;
+            const shift = r % 2 === 1 ? Whex / 2 : 0;
+            for (let ci = -1; ci < colsN; ci++) {
+                const sc = sA + Whex / 2 + ci * Whex + shift;
+                const V = [
+                    [sc, yc + R], [sc + Whex / 2, yc + R / 2], [sc + Whex / 2, yc - R / 2],
+                    [sc, yc - R], [sc - Whex / 2, yc - R / 2], [sc - Whex / 2, yc + R / 2],
+                ];
+                for (let e = 0; e < 6; e++)
+                    bar(V[e], V[(e + 1) % 6]);
+            }
+        }
+        // заливка над последним целым рядом: клинья между вершинами + сплошная полоса
+        const yTip = yA + R + (rows - 1) * 1.5 * R + R;
+        const yValley = yTip - R / 2;
+        const shiftN = rows % 2 === 1 ? Whex / 2 : 0;
+        for (let ci = -1; ci < colsN + 1; ci++) {
+            const sc = sA + Whex / 2 + ci * Whex + shiftN;
+            const P = [[sc, yValley], [sc - Whex / 2, yTip], [sc + Whex / 2, yTip]]
+                .map(([sv, yv]) => [Math.min(sB, Math.max(sA, sv)), yv]);
+            if (Math.max(P[0][0], P[1][0], P[2][0]) - Math.min(P[0][0], P[1][0], P[2][0]) < 0.3)
+                continue;
+            const q = [P[0], P[1], P[2], P[2]];
+            solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
+        }
+        if (yB - yTip > 0.05)
+            rect(sA, sB, yTip, yB);
+    };
+    // Стенка с фоном из изогнутых случайных линий: рамка как у сот + два
+    // семейства волнистых диагональных прядей (±45°, печатаются без поддержек).
+    // Узор детерминированный: сид зависит от стенки; «перемешать» меняет сид.
+    const buildLinesWall = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
+        const { strut, oA, oB, yA, yB, sA, sB, hbTop, solidWall, drawFrame, clipTo } = patternCtx(key, wc, thk, sym, s0, s1, mapFn, trim);
+        const sp = Math.max(4, wc.lineStep);
+        if (sB - sA < sp || yB - yA < sp) {
+            solidWall();
+            return;
+        }
+        drawFrame();
+        // расширенное окно клипа: концы прядей заходят вглубь поясов рамки
+        // и сращиваются с ними — без зазоров на стыке
+        const ext = 2.3;
+        const sAe = sA - ext, sBe = sB + ext;
+        const yAe = Math.max(0.4, yA - 2.6);
+        const yBe = Math.min(yB + 3, hbTop - 0.15, wc.h - 0.4);
+        const clipT = (P1, P2) => clipTo(P1, P2, sAe, sBe, yAe, yBe);
         // жёсткие границы тела стенки: лента (с учётом полуширины!) никогда
         // не выходит за края сегмента, ниже дна и выше начала скругления
         const pushQ = (q0) => {
@@ -1287,45 +1219,6 @@ function buildContainer(c, conn, opts = {}) {
         pushQuadUS([[uA, s0], [uB, s0], [uB, sA], [uA, sA]]);
         pushQuadUS([[uA, sB], [uB, sB], [uB, s1], [uA, s1]]);
         const strut = Math.max(1.2, Math.min(2.2, thk));
-        const clipSeg = (P1, P2) => {
-            let t0 = 0, t1 = 1;
-            const dx = P2[0] - P1[0], dy = P2[1] - P1[1];
-            const p = [-dx, dx, -dy, dy], q = [P1[0] - uA, uB - P1[0], P1[1] - sA, sB - P1[1]];
-            for (let i = 0; i < 4; i++) {
-                if (p[i] === 0) {
-                    if (q[i] < 0)
-                        return null;
-                }
-                else {
-                    const r = q[i] / p[i];
-                    if (p[i] < 0) {
-                        if (r > t1)
-                            return null;
-                        if (r > t0)
-                            t0 = r;
-                    }
-                    else {
-                        if (r < t0)
-                            return null;
-                        if (r < t1)
-                            t1 = r;
-                    }
-                }
-            }
-            return [[P1[0] + t0 * dx, P1[1] + t0 * dy], [P1[0] + t1 * dx, P1[1] + t1 * dy]];
-        };
-        const bar = (P1, P2) => {
-            const c2 = clipSeg(P1, P2);
-            if (!c2)
-                return;
-            const [A, B] = c2;
-            const dx = B[0] - A[0], dy = B[1] - A[1];
-            const len = Math.hypot(dx, dy);
-            if (len < 0.4)
-                return;
-            const nx = (-dy / len) * (strut / 2), ny = (dx / len) * (strut / 2);
-            pushQuadUS([[A[0] - nx, A[1] - ny], [A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny], [B[0] - nx, B[1] - ny]]);
-        };
         const ext = 2.3;
         const sAe = sA - ext, sBe = sB + ext;
         const uAe = Math.max(0.3, uA - 2.6);
@@ -1896,15 +1789,103 @@ const makeContainer = (src, gx, gy) => ({
     // или стенке ({w, d, anchor, lvl}); сетка обтекает их
     fixedCells: [],
 });
+// ── Приведение чисел к разумным пределам ──
+// Файл проекта можно открыть чужой, битый или отредактированный руками.
+// Одно значение вида rows: 0 или W: null роняло построение геометрии, и
+// поскольку состояние сразу уходит в автосохранение, приложение оставалось
+// сломанным и после перезагрузки. Поэтому каждое число проверяется.
+const num = (v, def, lo, hi) => {
+    const n = typeof v === "number" ? v : parseFloat(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+};
+const int = (v, def, lo, hi) => Math.round(num(v, def, lo, hi));
+const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+const ANCHORS = ["nw", "n", "ne", "w", "e", "sw", "s", "se"];
+const sanitizeWall = (w) => {
+    const o = obj(w), out = {};
+    // сохраняем только заданные поля: остальное берётся из defWall
+    if (o.h !== undefined)
+        out.h = num(o.h, 30, 0, 400);
+    if (o.t1 !== undefined)
+        out.t1 = num(o.t1, 0, 0, 60);
+    if (o.t2 !== undefined)
+        out.t2 = num(o.t2, 0, 0, 60);
+    if (o.rnd !== undefined)
+        out.rnd = num(o.rnd, 0, 0, 10);
+    if (o.dropH !== undefined)
+        out.dropH = num(o.dropH, 3, 0, 400);
+    if (o.hexSize !== undefined)
+        out.hexSize = num(o.hexSize, 8, 2, 100);
+    if (o.lineStep !== undefined)
+        out.lineStep = num(o.lineStep, 14, 2, 100);
+    if (o.seed !== undefined)
+        out.seed = int(o.seed, 1, 0, 1e9);
+    if (["none", "a", "b"].includes(o.drop))
+        out.drop = o.drop;
+    if (["solid", "hex", "lines"].includes(o.face))
+        out.face = o.face;
+    return out;
+};
+const sanitizeContainer = (c0) => {
+    const c = { ...c0 };
+    c.gx = int(c.gx, 0, -999, 999);
+    c.gy = int(c.gy, 0, -999, 999);
+    c.W = num(c.W, 170, 10, 2000);
+    c.D = num(c.D, 170, 10, 2000);
+    c.H = num(c.H, 30, 1, 500);
+    c.cols = int(c.cols, 1, 1, 60);
+    c.rows = int(c.rows, 1, 1, 60);
+    c.cellWt = num(c.cellWt, 40, 2, 2000);
+    c.cellDt = num(c.cellDt, 40, 2, 2000);
+    c.wall = num(c.wall, 1.6, 0.2, 40);
+    c.wallOut = num(c.wallOut, CONN.minWall, 0.2, 40);
+    c.floor = num(c.floor, 1.6, 0.2, 40);
+    c.gridMode = c.gridMode === "size" ? "size" : "count";
+    c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
+    c.cells = Object.fromEntries(Object.entries(obj(c.cells)).map(([k, v]) => {
+        const o = obj(v), out = {};
+        if (o.lvl !== undefined)
+            out.lvl = num(o.lvl, 0, 0, 500);
+        if (["n", "s", "w", "e"].includes(o.tiltDir))
+            out.tiltDir = o.tiltDir;
+        if (o.tiltA !== undefined)
+            out.tiltA = num(o.tiltA, 5, 0, 60);
+        return [k, out];
+    }));
+    c.fixedCells = (Array.isArray(c.fixedCells) ? c.fixedCells : [])
+        .map((f) => ({
+        w: num(f?.w, 30, 1, 2000),
+        d: num(f?.d, 30, 1, 2000),
+        anchor: ANCHORS.includes(f?.anchor) ? f.anchor : "nw",
+        lvl: num(f?.lvl, 0, 0, 500),
+    }));
+    c.lockedCellW = obj(c.lockedCellW);
+    c.lockedRows = obj(c.lockedRows);
+    // явные размеры по рядам: только конечные положительные числа
+    const sizes = (v) => {
+        if (!v || typeof v !== "object")
+            return null;
+        const out = {};
+        for (const [k, arr] of Object.entries(v))
+            if (Array.isArray(arr) && arr.length)
+                out[k] = arr.map((x) => num(x, 10, 0.5, 2000));
+        return Object.keys(out).length ? out : null;
+    };
+    c.rowColWs = sizes(c.rowColWs);
+    c.rowDs = Array.isArray(c.rowDs) ? c.rowDs.map((x) => num(x, 10, 0.5, 2000)) : sizes(c.rowDs);
+    if (c.connClr !== undefined)
+        c.connClr = num(c.connClr, 0.2, 0, 1);
+    return c;
+};
 // Приведение сохранённого/импортированного проекта к текущей модели:
-// добавляет недостающие поля и мигрирует старые форматы. Возвращает
-// null, если данные не похожи на проект.
+// добавляет недостающие поля, чинит невозможные значения и мигрирует
+// старые форматы. Возвращает null, если данные не похожи на проект.
 function normalizeProject(d) {
     try {
         if (!d || !Array.isArray(d.containers) || !d.containers.length)
             return null;
         d = { ...d };
-        d.containers = d.containers.map((c) => ({ ...makeContainer(null, c.gx ?? 0, c.gy ?? 0), ...c }));
+        d.containers = d.containers.map((c) => sanitizeContainer({ ...makeContainer(null, c?.gx ?? 0, c?.gy ?? 0), ...obj(c) }));
         // миграция старых сохранений: режим «размер ячейки» убран из UI —
         // переводим в «количество», сохраняя фактическую сетку; глобальный
         // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
@@ -1930,6 +1911,25 @@ function normalizeProject(d) {
             }
             return base;
         });
+        // лимиты принтера и раскладки — тоже из файла, тоже проверяем
+        const lim = obj(d.limits);
+        d.limits = {
+            maxW: num(lim.maxW, 170, 30, 2000),
+            maxD: num(lim.maxD, 170, 30, 2000),
+            maxH: num(lim.maxH, 175, 5, 2000),
+            layW: num(lim.layW, 40, 3, 500),
+            layD: num(lim.layD, 40, 3, 500),
+            connClr: num(lim.connClr, 0.2, 0, 1),
+        };
+        // габариты не могут превышать лимиты принтера — приложение держит этот
+        // инвариант при смене лимитов, файл проекта тоже обязан ему подчиняться
+        d.containers = d.containers.map((c) => ({
+            ...c,
+            W: Math.min(c.W, d.limits.maxW),
+            D: Math.min(c.D, d.limits.maxD),
+            H: Math.min(c.H, d.limits.maxH),
+            walls: Object.fromEntries(Object.entries(c.walls).map(([k, w]) => [k, w.h === undefined ? w : { ...w, h: Math.min(w.h, d.limits.maxH) }])),
+        }));
         nextId = Math.max(...d.containers.map((c) => c.id || 0), 1) + 1;
         return d;
     }
@@ -2123,6 +2123,15 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
     const mountRef = useRef(null);
     const groupRef = useRef(null);
     const cameraRef = useRef(null);
+    // Материалы создаются один раз и переиспользуются. Если создавать их
+    // заново на каждую перестройку, three.js каждый раз компилирует и
+    // линкует шейдерную программу — это самая дорогая операция при
+    // изменении параметра (десятки миллисекунд на пустом месте).
+    const matsRef = useRef(null);
+    // меши по индексу контейнера: пересобираются только те, чья геометрия
+    // или подсветка изменилась
+    const meshRef = useRef(new Map());
+    const frameRef = useRef(null);
     const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, lastX: 0, lastY: 0 });
     const applyCamera = useCallback(() => {
         const cam = cameraRef.current, o = orbitRef.current;
@@ -2159,6 +2168,13 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         const group = new THREE.Group();
         groupRef.current = group;
         scene.add(group);
+        const body = (color, opacity) => new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true, transparent: opacity < 1, opacity });
+        matsRef.current = {
+            sel: body(0xf2620f, 1), // выбранный контейнер
+            other: body(0xf5a06a, 0.92), // остальные — полупрозрачные
+            hi: body(0x2563eb, 1), // выбранная стенка/ячейка
+            frame: new THREE.LineBasicMaterial({ color: 0x8a97a8 }), // рамка лимита
+        };
         applyCamera();
         let raf;
         const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
@@ -2264,6 +2280,15 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
             window.removeEventListener("pointerup", onUp);
             el.removeEventListener("wheel", onWheel);
             window.removeEventListener("resize", onResize);
+            for (const e of meshRef.current.values())
+                for (const m of e.meshes)
+                    m.geometry.dispose();
+            meshRef.current.clear();
+            frameRef.current?.geometry.dispose();
+            frameRef.current = null;
+            for (const m of Object.values(matsRef.current || {}))
+                m.dispose();
+            matsRef.current = null;
             renderer.dispose();
             mount.removeChild(el);
         };
@@ -2272,12 +2297,9 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         const group = groupRef.current;
         if (!group)
             return;
-        while (group.children.length) {
-            const ch = group.children.pop();
-            ch.geometry?.dispose();
-            ch.material?.dispose();
-            group.remove(ch);
-        }
+        const mats = matsRef.current;
+        if (!mats)
+            return;
         const selKeys = new Set();
         if (selection?.type === "wall")
             selKeys.add(selection.key);
@@ -2290,43 +2312,84 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
             for (const s of ["n", "s", "w", "e"])
                 selKeys.add(`fw:${selection.k}:${s}`);
         }
+        // подпись подсветки: она делит тела контейнера на два меша, поэтому при
+        // её изменении буферы этого контейнера нужно пересобрать
+        const hiSig = [...selKeys].sort().join(",");
+        const cache = meshRef.current;
         built.items.forEach(({ solids, ox, oz }, idx) => {
-            const base = [], hi = [], baseTags = [], hiTags = [];
-            for (const s of solids) {
-                const isHi = idx === sel && selKeys.has(s.tag);
-                const arr = isHi ? hi : base;
-                const tagArr = isHi ? hiTags : baseTags;
-                for (const [a, b, c] of s.tris) {
-                    arr.push(...a, ...b, ...c);
-                    tagArr.push(s.tag);
+            const sig = idx === sel ? hiSig : "";
+            let e = cache.get(idx);
+            if (!e || e.solids !== solids || e.sig !== sig) {
+                // геометрия действительно изменилась — собираем буферы заново
+                if (e)
+                    for (const m of e.meshes) {
+                        m.geometry.dispose();
+                        group.remove(m);
+                    }
+                const base = [], hi = [], baseTags = [], hiTags = [];
+                for (const s of solids) {
+                    const isHi = idx === sel && selKeys.has(s.tag);
+                    const arr = isHi ? hi : base;
+                    const tagArr = isHi ? hiTags : baseTags;
+                    for (const [a, b, c] of s.tris) {
+                        arr.push(...a, ...b, ...c);
+                        tagArr.push(s.tag);
+                    }
                 }
+                const meshes = [];
+                const addMesh = (arr, mat, tags) => {
+                    if (!arr.length)
+                        return;
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(arr), 3));
+                    geo.computeVertexNormals();
+                    const mesh = new THREE.Mesh(geo, mat);
+                    mesh.userData = { tags, cIdx: idx, ox, oz };
+                    meshes.push(mesh);
+                    group.add(mesh);
+                };
+                addMesh(base, idx === sel ? mats.sel : mats.other, baseTags);
+                addMesh(hi, mats.hi, hiTags);
+                e = { solids, sig, meshes };
+                cache.set(idx, e);
             }
-            const addMesh = (arr, color, opacity, tags) => {
-                if (!arr.length)
-                    return;
-                const geo = new THREE.BufferGeometry();
-                geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(arr), 3));
-                geo.computeVertexNormals();
-                const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true, transparent: opacity < 1, opacity });
-                const mesh = new THREE.Mesh(geo, mat);
-                mesh.position.set(ox, 0, oz);
-                mesh.userData = { tags, cIdx: idx, ox, oz };
-                group.add(mesh);
-            };
-            addMesh(base, idx === sel ? 0xf2620f : 0xf5a06a, idx === sel ? 1 : 0.92, baseTags);
-            addMesh(hi, 0x2563eb, 1, hiTags);
+            // без пересборки: подвинуть и, если сменился выбранный контейнер,
+            // переключить материал корпуса — шейдеры при этом не перекомпилируются
+            for (const m of e.meshes) {
+                m.position.set(ox, 0, oz);
+                m.userData.ox = ox;
+                m.userData.oz = oz;
+                if (m.material !== mats.hi)
+                    m.material = idx === sel ? mats.sel : mats.other;
+            }
         });
+        // контейнеры, которых больше нет
+        for (const [idx, e] of cache)
+            if (idx >= built.items.length) {
+                for (const m of e.meshes) {
+                    m.geometry.dispose();
+                    group.remove(m);
+                }
+                cache.delete(idx);
+            }
         // рамка лимита раскладки на столе — видно, как сборка «липнет» к краям
         const bw = limits.layW * 10, bd = limits.layD * 10;
-        const bGeo = new THREE.BufferGeometry();
-        bGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array([
+        if (!frameRef.current) {
+            const bGeo = new THREE.BufferGeometry();
+            bGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(12), 3));
+            const bLine = new THREE.LineLoop(bGeo, mats.frame);
+            bLine.userData = {};
+            bLine.raycast = () => { }; // рамка не должна перехватывать клики выбора
+            frameRef.current = bLine;
+            group.add(bLine);
+        }
+        const pos = frameRef.current.geometry.getAttribute("position");
+        pos.copyArray([
             -bw / 2, 0.08, -bd / 2, bw / 2, 0.08, -bd / 2,
             bw / 2, 0.08, bd / 2, -bw / 2, 0.08, bd / 2,
-        ]), 3));
-        const bLine = new THREE.LineLoop(bGeo, new THREE.LineBasicMaterial({ color: 0x8a97a8 }));
-        bLine.userData = {};
-        bLine.raycast = () => { }; // рамка не должна перехватывать клики выбора
-        group.add(bLine);
+        ]);
+        pos.needsUpdate = true;
+        frameRef.current.geometry.computeBoundingSphere();
     }, [built, selection, sel, cur, limits]);
     return mountRef;
 }
@@ -2731,6 +2794,11 @@ function TrayGenerator() {
         containers.forEach((c, i) => m.set(`${c.gx},${c.gy}`, i));
         return m;
     }, [containers]);
+    // Геометрия кэшируется по объекту контейнера: правка одного контейнера
+    // не должна пересобирать остальные. Объекты неизменяемые (обновление
+    // делает новый объект только для затронутого), поэтому ссылка — надёжный
+    // ключ, а WeakMap не держит устаревшие записи.
+    const geoCache = useRef(new WeakMap());
     // ── сборка: соединители по соседям + раскладка сеткой ──
     const built = useMemo(() => {
         const nb = (c, dx, dy) => {
@@ -2770,9 +2838,15 @@ function TrayGenerator() {
                     S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
                     N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
                 };
+            const ck = `${limits.connClr}|${JSON.stringify(conn)}`;
+            let hit = geoCache.current.get(c);
+            if (!hit || hit.key !== ck) {
+                hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr }, conn) };
+                geoCache.current.set(c, hit);
+            }
             return {
                 c,
-                solids: buildContainer({ ...c, connClr: limits.connClr }, conn),
+                solids: hit.solids,
                 ox: colX[c.gx] - totalW / 2,
                 oz: rowZ[c.gy] - totalD / 2,
             };
@@ -3333,8 +3407,51 @@ function TrayGenerator() {
 }
 // ── src/main.jsx ──
 // ── монтирование ──
+// Если что-то всё же сломается, показываем понятный экран с кнопкой
+// сброса вместо белой страницы: состояние лежит в localStorage, и без
+// сброса перезагрузка не помогла бы.
+class Guard extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { err: null };
+    }
+    static getDerivedStateFromError(err) {
+        return { err };
+    }
+    render() {
+        if (!this.state.err)
+            return this.props.children;
+        const reset = () => {
+            try {
+                window.localStorage.removeItem("trayGenState");
+            }
+            catch (e) { /* хранилище недоступно */ }
+            window.location.reload();
+        };
+        const box = {
+            maxWidth: 520, margin: "12vh auto", padding: 24, background: "#fff",
+            border: "1px solid #E4E9EF", borderRadius: 14, fontFamily: "system-ui, sans-serif", color: "#16202E",
+        };
+        return React.createElement("div", { style: box }, [
+            React.createElement("h2", { key: "t", style: { margin: "0 0 8px", fontSize: 19 } }, "Не получилось построить проект"),
+            React.createElement("p", { key: "p", style: { margin: "0 0 16px", fontSize: 14, lineHeight: 1.5, color: "#5A6B80" } }, "Скорее всего сохранённый проект повреждён. Нажмите «Начать заново» — вернутся настройки по умолчанию. " +
+                "Если у вас есть выгруженный файл проекта, после сброса его можно открыть заново на вкладке «Принтер»."),
+            React.createElement("button", {
+                key: "b", onClick: reset,
+                style: {
+                    padding: "9px 16px", borderRadius: 9, border: "none", background: "#F2620F",
+                    color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer",
+                },
+            }, "Начать заново"),
+            React.createElement("pre", {
+                key: "e",
+                style: { marginTop: 18, fontSize: 11, color: "#8A97A8", whiteSpace: "pre-wrap", maxHeight: 140, overflow: "auto" },
+            }, String(this.state.err?.stack || this.state.err)),
+        ]);
+    }
+}
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(React.createElement(TrayGenerator));
+root.render(React.createElement(Guard, null, React.createElement(TrayGenerator)));
 </script>
 </body>
 </html>

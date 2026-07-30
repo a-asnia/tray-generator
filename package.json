@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "test": "node tests/run.mjs --quiet",
+    "test:browser": "node tests/run-browser.mjs",
     "dev": "vite",
     "build:vite": "vite build && cp dist/index.html tray-generator.html",
     "preview": "vite preview"
