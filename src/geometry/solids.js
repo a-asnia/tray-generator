@@ -60,21 +60,6 @@ export function rampSolid(orient, facePos, dir, s0, s1, yTop, yBot, run, embed, 
 // остаётся идеально ровной для плотной стыковки и пазов соединителей.
 export const ARC_SEGS = 7;
 
-// Отступ наружной кромки внутрь на высоте y — тот же гранёный профиль,
-// что строит wallProfile. Нужен, чтобы торец соседней стенки в углу
-// подрезался ровно по этому скруглению и не торчал из валика.
-export function outerInsetAt(h, r, y) {
-  if (r < 0.05) return 0;
-  const hb = h - r;
-  if (y <= hb + 1e-9) return 0;
-  let ins = 0;
-  for (let k = 1; k <= ARC_SEGS; k++) {
-    const t = (k / ARC_SEGS) * (Math.PI / 2);
-    ins = r * (1 - Math.cos(t));
-    if (hb + r * Math.sin(t) >= y - 1e-9) break;
-  }
-  return ins;
-}
 export function wallProfile(thk, h, rnd, symmetric) {
   const r = Math.max(0, Math.min(rnd, symmetric ? thk / 2 : thk - 0.4, h * 0.9));
   const parts = [];

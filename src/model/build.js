@@ -5,7 +5,7 @@
 // пол с лесенкой и рёбрами, зоны соединителей.
 // ══════════════════════════════════════════════════════════════
 
-import { prismSolid, boxSolid, rampSolid, wallProfile, outerInsetAt } from "../geometry/solids.js";
+import { prismSolid, boxSolid, rampSolid, wallProfile, ARC_SEGS } from "../geometry/solids.js";
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl } from "./layout.js";
@@ -84,32 +84,93 @@ export function buildContainer(c, conn, opts = {}) {
     else solids.push(rampSolid(orient, facePos, dir, s0, s1, h, yBase, run, embed, tag));
   };
 
-  // Профиль скругления наружной кромки ПЕРПЕНДИКУЛЯРНОЙ стенки как функция
-  // высоты. Нужен для подрезки торцов в углу корпуса: у соседней стенки
-  // наружная плоскость сверху уходит внутрь, и квадратный торец вылезал бы
-  // из её скруглённого валика «зубчиком». Функция возвращает null, если
-  // скруглять нечего (сторона с замком — плоскость строго ровная).
-  const outerInsetFn = (key, thk, sym) => {
+  // Тело наружного угла: снизу четверть-цилиндра радиуса r, сверху
+  // сектор, радиус которого сходит к нулю по той же дуге, что и скругление
+  // кромки (ρ = r·cos t при подъёме r·sin t). На каждой высоте крайняя
+  // точка сектора лежит ровно в плоскости соответствующей стенки, отступив
+  // внутрь на o = r − ρ, — поэтому стык со стенками получается заподлицо.
+  const addCorner = (px, pz, sx, sz, h, r, tag) => {
+    if (r < 0.05) return;
+    const SEG = 6; // клиньев в секторе (угол 90°)
+    const ring = (rho) => {
+      const pts = [[px, pz]];
+      for (let k = 0; k <= SEG; k++) {
+        const a = (k / SEG) * (Math.PI / 2);
+        pts.push([px + sx * rho * Math.cos(a), pz + sz * rho * Math.sin(a)]);
+      }
+      return pts;
+    };
+    // слой между двумя высотами: сектор радиуса rA снизу и rB сверху
+    const layer = (rA, rB, y0, y1) => {
+      if (y1 - y0 < 0.005) return;
+      const a = ring(rA), b = ring(rB);
+      for (let k = 1; k <= SEG; k++) {
+        const qa = [a[0], a[k], a[k + 1], a[k + 1]].map(([x, z]) => [x, y0, z]);
+        const qb = [b[0], b[k], b[k + 1], b[k + 1]].map(([x, z]) => [x, y1, z]);
+        solids.push(prismSolid(qa, qb, tag));
+      }
+    };
+    const hb = h - r;
+    layer(r, r, 0, hb); // вертикальная часть
+    let prevR = r, prevY = hb;
+    for (let k = 1; k <= ARC_SEGS; k++) {
+      const t = (k / ARC_SEGS) * (Math.PI / 2);
+      const rho = Math.max(0.02, r * Math.cos(t));
+      const y = hb + r * Math.sin(t);
+      layer(prevR, rho, prevY, y);
+      prevR = rho; prevY = y;
+    }
+  };
+
+  // Радиус скругления НАРУЖНОГО ВЕРТИКАЛЬНОГО угла корпуса.
+  // Скругление верхних кромок нельзя честно свести в остром углу: два
+  // валика пересекаются под 45°, и в углу либо вырастает горб, либо (если
+  // подрезать торцы) остаются щели между ломтиками. Поэтому угол
+  // скругляется тем же радиусом и по плану: получается четверть-цилиндра,
+  // переходящая сверху в сферический сектор, — и валик обходит угол
+  // непрерывно. Плоскости стенок остаются идеально ровными, уходит только
+  // сам угол. Скругление ставится, если обе смежные стенки одинаковы по
+  // скруглению и высоте; иначе угол остаётся как был (без подрезки).
+  // Отступ наружной кромки стенки внутрь на высоте y — той же гранёной
+  // дугой, что строит wallProfile. Нужен там, где угол скруглить нельзя
+  // (у одной из стенок замок и её плоскость обязана быть ровной): торец
+  // стенки с замком подрезается по дуге свободной стенки, а недорез
+  // закрывает тело самой свободной стенки — щелей не остаётся.
+  const arcInsetFn = (key, sym) => {
     const w = getWall(c, key);
-    const r = rOuter(key, thk, sym);
-    if (r < 0.05 || w.h <= 0.3) return null;
-    return (y) => outerInsetAt(w.h, r, y);
+    const r = rOuter(key, wallOut, sym);
+    if (r < 0.05 || w.h <= r + 0.3) return 0;
+    const hb = w.h - r;
+    return (y) => {
+      if (y <= hb + 1e-9) return 0;
+      let ins = 0;
+      for (let k = 1; k <= ARC_SEGS; k++) {
+        const t = (k / ARC_SEGS) * (Math.PI / 2);
+        ins = r * (1 - Math.cos(t));
+        if (hb + r * Math.sin(t) >= y - 1e-9) break;
+      }
+      return ins;
+    };
+  };
+  const cornerR = (kA, symA, kB, symB) => {
+    const rA = rOuter(kA, wallOut, symA), rB = rOuter(kB, wallOut, symB);
+    if (rA < 0.05 || Math.abs(rA - rB) > 0.01) return 0;
+    const wA = getWall(c, kA), wB = getWall(c, kB);
+    if (Math.abs(wA.h - wB.h) > 0.01 || wA.h <= rA + 0.3) return 0;
+    return rA;
   };
   // экструзия профиля стенки вдоль отрезка s0..s1; mapFn(смещение, y, s) → точка
-  // trim = {a, b} — функции подрезки торцов (см. outerInsetFn). Каждый ломтик
-  // профиля укорачивается на отступ соседа на своей высоте, поэтому валик
-  // обходит угол непрерывно; недорез добирается телом самой соседней стенки.
+  // trim = {a, b} — насколько укоротить торцы: в углу корпуса на радиус
+  // скругления угла, чтобы освободить место телу угла (см. addCorner)
+  // Подрезка задаётся числом (постоянная — освобождает место телу угла)
+  // либо функцией высоты (дуга соседней стенки в смешанном углу).
+  const trimAt = (t, y) => (typeof t === "function" ? t(y) : t || 0);
   const pushProfiled = (parts, mapFn, s0, s1, tag, trim) => {
-    const fA = trim && trim.a, fB = trim && trim.b;
     for (const quad of parts) {
-      let a = s0, b = s1;
-      if (fA || fB) {
-        let yTop = -Infinity;
-        for (const [, y] of quad) yTop = Math.max(yTop, y);
-        if (fA) a = s0 + fA(yTop);
-        if (fB) b = s1 - fB(yTop);
-        if (b - a < 0.02) continue;
-      }
+      let yTop = 0;
+      for (const [, y] of quad) yTop = Math.max(yTop, y);
+      const a = s0 + trimAt(trim?.a, yTop), b = s1 - trimAt(trim?.b, yTop);
+      if (b - a < 0.02) continue;
       const qa = quad.map(([o, y]) => mapFn(o, y, a));
       const qb = quad.map(([o, y]) => mapFn(o, y, b));
       solids.push(prismSolid(qa, qb, tag));
@@ -144,13 +205,12 @@ export function buildContainer(c, conn, opts = {}) {
       const pa = wallProfile(thk, h0, wc.rnd, sym);
       const pb = wallProfile(thk, h1, wc.rnd, sym);
       // подрезка торцов — только у крайних ломтиков сегмента
-      const fA = k === 0 && trim ? trim.a : null;
-      const fB = k === N - 1 && trim ? trim.b : null;
       for (let q = 0; q < Math.max(pa.length, pb.length); q++) {
         const qa0 = pa[q] ?? pa[pa.length - 1], qb0 = pb[q] ?? pb[pb.length - 1];
-        let yTop = -Infinity;
-        if (fA || fB) for (const [, y] of qa0) yTop = Math.max(yTop, y);
-        const saT = sa + (fA ? fA(yTop) : 0), sbT = sb - (fB ? fB(yTop) : 0);
+        let yTop = 0;
+        for (const [, y] of qa0) yTop = Math.max(yTop, y);
+        const saT = sa + (k === 0 ? trimAt(trim?.a, yTop) : 0);
+        const sbT = sb - (k === N - 1 ? trimAt(trim?.b, yTop) : 0);
         if (sbT - saT < 0.02) continue;
         const qa = qa0.map(([o, y]) => mapFn(o, y, saT));
         const qb = qb0.map(([o, y]) => mapFn(o, y, sbT));
@@ -166,7 +226,11 @@ export function buildContainer(c, conn, opts = {}) {
   const patternCtx = (key, wc, thk, sym, s0, s1, mapFn, trim) => {
     const strut = Math.max(1.2, Math.min(2.2, thk));
     const oA = sym ? -thk / 2 : 0, oB = sym ? thk / 2 : thk;
-    const rect = (sa, sb, ya, yb) => {
+    const eA0 = typeof trim?.a === "number" ? trim.a : 0;
+    const eB0 = typeof trim?.b === "number" ? trim.b : 0;
+    const rect = (sa0, sb0, ya, yb) => {
+      const sa = Math.max(sa0, s0 + eA0), sb = Math.min(sb0, s1 - eB0);
+      if (sb - sa < 0.02) return;
       const q = [[sa, ya], [sb, ya], [sb, yb], [sa, yb]];
       solids.push(prismSolid(q.map(([sv, yv]) => mapFn(oA, yv, sv)), q.map(([sv, yv]) => mapFn(oB, yv, sv)), key));
     };
@@ -542,6 +606,61 @@ export function buildContainer(c, conn, opts = {}) {
     else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim);
   };
 
+  // ── Радиусы наружных вертикальных углов ──
+  // Считаются до построения стенок и пола: стенки укорачивают торцы на эту
+  // величину, пол вырезает у себя квадратик угла, а само тело угла ставится
+  // отдельно (addCorner).
+  const symN = !conn.N, symS = !conn.S, symW = !conn.W, symE = !conn.E;
+  const kN0 = "o:n:0", kNL = `o:n:${L.nColsAt(0) - 1}`;
+  const kS0 = "o:s:0", kSL = `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
+  const kW0 = "o:w:0", kWL = `o:w:${L.nRows - 1}`;
+  const kE0 = "o:e:0", kEL = `o:e:${L.nRows - 1}`;
+  const rNW = cornerR(kN0, symN, kW0, symW);
+  const rNE = cornerR(kNL, symN, kE0, symE);
+  const rSW = cornerR(kS0, symS, kWL, symW);
+  const rSE = cornerR(kSL, symS, kEL, symE);
+  // Что подрезать в углу. Скруглённый угол: обе стенки на постоянный
+  // радиус (место для тела угла). Смешанный угол (у одной стенки замок):
+  // только стенка с замком, по дуге свободной — иначе валик свободной
+  // стенки упирался бы в квадратный торец соседа.
+  const cut = (r, meKey, meSym, otherKey, otherSym) => {
+    if (r >= 0.05) return r;
+    const rMe = rOuter(meKey, wallOut, meSym), rOther = rOuter(otherKey, wallOut, otherSym);
+    return rMe < 0.05 && rOther >= 0.05 ? arcInsetFn(otherKey, otherSym) : 0;
+  };
+  const cutNW_ns = cut(rNW, kN0, symN, kW0, symW), cutNW_we = cut(rNW, kW0, symW, kN0, symN);
+  const cutNE_ns = cut(rNE, kNL, symN, kE0, symE), cutNE_we = cut(rNE, kE0, symE, kNL, symN);
+  const cutSW_ns = cut(rSW, kS0, symS, kWL, symW), cutSW_we = cut(rSW, kWL, symW, kS0, symS);
+  const cutSE_ns = cut(rSE, kSL, symS, kEL, symE), cutSE_we = cut(rSE, kEL, symE, kSL, symS);
+  // квадратики углов, которые пол не должен занимать (их закрывает тело угла)
+  const cornerCuts = [
+    [-W / 2, -D / 2, rNW], [W / 2, -D / 2, rNE],
+    [-W / 2, D / 2, rSW], [W / 2, D / 2, rSE],
+  ].filter(([, , r]) => r >= 0.05);
+  // прямоугольник плиты минус квадратики углов: угол становится скруглённым
+  const rectMinusCorners = (x0, z0, x1, z1) => {
+    let out = [[x0, z0, x1, z1]];
+    for (const [cx, cz, r] of cornerCuts) {
+      const nx = [];
+      for (const [a0, b0, a1, b1] of out) {
+        const qx0 = Math.min(cx, cx + (cx < 0 ? r : -r)), qx1 = Math.max(cx, cx + (cx < 0 ? r : -r));
+        const qz0 = Math.min(cz, cz + (cz < 0 ? r : -r)), qz1 = Math.max(cz, cz + (cz < 0 ? r : -r));
+        if (qx1 <= a0 + 0.001 || qx0 >= a1 - 0.001 || qz1 <= b0 + 0.001 || qz0 >= b1 - 0.001) { nx.push([a0, b0, a1, b1]); continue; }
+        // режем по X, затем остаток по Z — всегда не больше двух кусков
+        if (qx0 <= a0 + 0.001) { if (qx1 < a1 - 0.001) nx.push([qx1, b0, a1, b1]); }
+        else nx.push([a0, b0, qx0, b1]);
+        const rx0 = Math.max(a0, qx0), rx1 = Math.min(a1, qx1);
+        if (rx1 - rx0 > 0.001) {
+          if (qz0 <= b0 + 0.001) { if (qz1 < b1 - 0.001) nx.push([rx0, qz1, rx1, b1]); }
+          else nx.push([rx0, b0, rx1, qz0]);
+        }
+        if (qx0 > a0 + 0.001 && qx1 < a1 - 0.001) nx.push([qx1, b0, a1, b1]);
+      }
+      out = nx;
+    }
+    return out.filter(([a0, b0, a1, b1]) => a1 - a0 > 0.05 && b1 - b0 > 0.05);
+  };
+
   // ── Фиксированные ячейки: вычитание их зоны из плит и рёбер ──
   // Вычесть footprint всех боксов из прямоугольника: остаётся ≤4 куска
   // на бокс — сетка и полы обтекают «контейнер внутри контейнера»
@@ -593,8 +712,9 @@ export function buildContainer(c, conn, opts = {}) {
       const fDir = boxOverlap ? "none" : (cc.tiltDir || "none"); // наклонный пол не должен войти в бокс
       const fA = cc.tiltA ?? 5; // сторона выбрана — наклон есть, угол по умолчанию 5°
       if (fDir === "none" || fA < 0.5) {
-        for (const [px0, pz0, px1, pz1] of rectMinusBoxes(xa, za, xb, zb))
-          solids.push(boxSolid((px0 + px1) / 2, lvl + floor / 2, (pz0 + pz1) / 2, px1 - px0, floor, pz1 - pz0, "floor"));
+        for (const [bx0b, bz0b, bx1b, bz1b] of rectMinusBoxes(xa, za, xb, zb))
+          for (const [px0, pz0, px1, pz1] of rectMinusCorners(bx0b, bz0b, bx1b, bz1b))
+            solids.push(boxSolid((px0 + px1) / 2, lvl + floor / 2, (pz0 + pz1) / 2, px1 - px0, floor, pz1 - pz0, "floor"));
       } else {
         // наклонный пол: клин, спускающийся к выбранной стороне; верх высокой
         // кромки ограничен высотой контейнера
@@ -655,12 +775,11 @@ export function buildContainer(c, conn, opts = {}) {
           ? (o, y, x) => [x, y, -D / 2 + off + o]
           : (o, y, x) => [x, y, D / 2 - off - o];
         // в углах корпуса торец подрезается под скругление W/E-стенки
-        const fW = outerInsetFn(`o:w:${jRow}`, wallOut, !conn.W);
-        const fE = outerInsetFn(`o:e:${jRow}`, wallOut, !conn.E);
+        const rL = side === "n" ? cutNW_ns : cutSW_ns, rR = side === "n" ? cutNE_ns : cutSE_ns;
         for (const [a, b] of splitRange(bx0, bx1, zones))
           pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
-            a: a <= -W / 2 + 0.01 ? fW : null,
-            b: b >= W / 2 - 0.01 ? fE : null,
+            a: a <= -W / 2 + 0.01 ? rL : 0,
+            b: b >= W / 2 - 0.01 ? rR : 0,
           });
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         // пандус не должен войти в полость прижатого к стенке бокса
@@ -682,14 +801,11 @@ export function buildContainer(c, conn, opts = {}) {
         const mapFn = side === "w"
           ? (o, y, z) => [-W / 2 + off + o, y, z]
           : (o, y, z) => [W / 2 - off - o, y, z];
-        // подрезка торцов под скругление N/S-стенок в углах корпуса
-        const nKey = side === "w" ? "o:n:0" : `o:n:${L.nColsAt(0) - 1}`;
-        const sKey = side === "w" ? "o:s:0" : `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
-        const fN = outerInsetFn(nKey, wallOut, !conn.N), fS = outerInsetFn(sKey, wallOut, !conn.S);
+        const rT = side === "w" ? cutNW_we : cutNE_we, rB = side === "w" ? cutSW_we : cutSE_we;
         for (const [a, b] of splitRange(bz0, bz1, zones))
           pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
-            a: a <= -D / 2 + 0.01 ? fN : null,
-            b: b >= D / 2 - 0.01 ? fS : null,
+            a: a <= -D / 2 + 0.01 ? rT : 0,
+            b: b >= D / 2 - 0.01 ? rB : 0,
           });
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
@@ -697,6 +813,12 @@ export function buildContainer(c, conn, opts = {}) {
       }
     }
   }
+  // тела наружных вертикальных углов
+  addCorner(-W / 2 + rNW, -D / 2 + rNW, -1, -1, getWall(c, kN0).h, rNW, kN0);
+  addCorner(W / 2 - rNE, -D / 2 + rNE, 1, -1, getWall(c, kNL).h, rNE, kNL);
+  addCorner(-W / 2 + rSW, D / 2 - rSW, -1, 1, getWall(c, kS0).h, rSW, kS0);
+  addCorner(W / 2 - rSE, D / 2 - rSE, 1, 1, getWall(c, kSL).h, rSE, kSL);
+
   // галтели во внутренних углах самого корпуса (4 угла контейнера)
   {
     const cx = W / 2 - wallOut, cz = D / 2 - wallOut;
@@ -704,7 +826,6 @@ export function buildContainer(c, conn, opts = {}) {
     const sL = "o:s:0", sR = `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
     const wT = "o:w:0", wB = `o:w:${L.nRows - 1}`, eT = "o:e:0", eB = `o:e:${L.nRows - 1}`;
     // высота галтели — до начала скругления кромок обеих стенок
-    const symN = !conn.N, symS = !conn.S, symW = !conn.W, symE = !conn.E;
     const hCorner = (kA, symA, kB, symB) =>
       Math.min(getWall(c, kA).h - rEff(kA, wallOut, symA), getWall(c, kB).h - rEff(kB, wallOut, symB));
     if (flatWall(nL) && flatWall(wT)) addFillet(-cx, -cz, 1, 1, hCorner(nL, symN, wT, symW), nL);

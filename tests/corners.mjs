@@ -44,6 +44,7 @@ const insetMid = (solids, y, axis) => {
 };
 
 let fail = 0;
+const ok = (n, cond, extra = "") => { console.log(`${cond ? "OK  " : "FAIL"} ${n}${extra}`); if (!cond) fail++; };
 const check = (label, c, conn) => {
   const solids = buildContainer(c, conn, { fillets: false });
   const y = c.H - 0.02;
@@ -71,6 +72,53 @@ check("узор линии", mk({ walls: { "o:n:0": { h: 30, face: "lines" }, "o
 check("скругление 1.4", mk({ walls: { "o:n:0": { h: 30, rnd: 1.4 }, "o:w:0": { h: 30, rnd: 1.4 } } }), noConn);
 check("без скругления", mk({ walls: { "o:n:0": { h: 30, rnd: 0 }, "o:w:0": { h: 30, rnd: 0 } } }), noConn);
 check("толстые стенки", mk({ wall: 4, wallOut: 6, floor: 4 }), noConn);
+
+// ── Щелей в углу быть не должно ──
+// Раньше торцы стенок подрезались каждый по-своему, и между ломтиками
+// валика оставались открытые прорези. Проверяем объём тела в квадратике
+// угла: он должен совпасть с расчётным (четверть-цилиндра, переходящая
+// сверху в сферический сектор). Любая щель или горб сдвинут объём.
+{
+  const c = mk();
+  const solids = buildContainer(c, noConn, { fillets: false });
+  const r = 0.8;                       // скругление по умолчанию
+  const px = -50 + r, pz = -50 + r;    // центр скругления угла
+  const N = 26, M = 90;                // сетка по плану и по высоте
+  let vol = 0;
+  const dx = r / N, dz = r / N, dy = c.H / M;
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < N; j++)
+      for (let k = 0; k < M; k++) {
+        const x = -50 + (i + 0.5) * dx, z = -50 + (j + 0.5) * dz, y = (k + 0.5) * dy;
+        if (inSolids(solids, [x, y, z])) vol += dx * dz * dy;
+      }
+  // расчётный объём: ниже hb — четверть круга радиуса r, выше — сектор ρ=r·cos t
+  const hb = c.H - r;
+  let want = (Math.PI / 4) * r * r * hb;
+  const S = 400;
+  for (let k = 0; k < S; k++) {
+    const t = ((k + 0.5) / S) * (Math.PI / 2);
+    const rho = r * Math.cos(t);
+    want += (Math.PI / 4) * rho * rho * r * Math.cos(t) * (Math.PI / 2 / S);
+  }
+  const err = Math.abs(vol - want) / want;
+  ok(`объём тела угла совпадает с расчётным (${vol.toFixed(3)} ≈ ${want.toFixed(3)} мм³)`, err < 0.05, ` откл. ${(err * 100).toFixed(1)}%`);
+}
+
+// ── Скругление угла отключается вместе со скруглением кромок ──
+{
+  const c = mk({ walls: Object.fromEntries(["o:n:0", "o:s:0", "o:w:0", "o:e:0"].map((k) => [k, { h: 30, rnd: 0 }])) });
+  const s = buildContainer(c, noConn, { fillets: false });
+  ok("rnd=0 — угол остаётся острым", inSolids(s, [-49.9, 15, -49.9]));
+}
+// ── Сторона с замком: плоскость ровная до самого угла ──
+{
+  const c = mk();
+  const s = buildContainer(c, { ...noConn, N: lock() }, { fillets: false });
+  let flat = true;
+  for (let x = -49.5; x < -46; x += 0.25) if (!inSolids(s, [x, 29.9, -49.99])) flat = false;
+  ok("замок: наружная плоскость доходит до угла на всей высоте", flat);
+}
 
 console.log(fail === 0 ? "\nCORNER TESTS PASSED" : `\n${fail} FAILURES`);
 process.exit(fail ? 1 : 0);
