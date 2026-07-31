@@ -22,7 +22,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +36,7 @@ const MODULES = [
   "src/geometry/stl.js",
   "src/geometry/manifold.js",
   "src/model/connectors.js",
+  "src/model/inserts.js",
   "src/model/layout.js",
   "src/model/build.js",
   "src/state/storage.js",
@@ -46,6 +47,26 @@ const MODULES = [
   "src/App.jsx",
   "src/main.jsx",
 ];
+
+// 0. Проверка полноты списка: модули склеиваются в один скрипт, поэтому
+//    забытый в MODULES файл не даёт ошибки сборки — страница просто падает
+//    в браузере с ReferenceError. Ловим это здесь.
+{
+  const known = new Set(MODULES.map((m) => resolve(ROOT, m)));
+  const missing = [];
+  for (const m of MODULES) {
+    const src = readFileSync(join(ROOT, m), "utf8");
+    for (const [, spec] of src.matchAll(/^\s*import\s[^"']*["'](\.[^"']+)["']/gm)) {
+      const target = resolve(dirname(join(ROOT, m)), spec);
+      if (!known.has(target)) missing.push(`${m} → ${spec}`);
+    }
+  }
+  if (missing.length) {
+    console.error("Модули не попали в MODULES (страница упала бы в браузере):");
+    for (const x of missing) console.error("  " + x);
+    process.exit(1);
+  }
+}
 
 // 1. Транспиляция JSX → React.createElement (без даунлевела: es2020,
 //    как и раньше при Babel в браузере)

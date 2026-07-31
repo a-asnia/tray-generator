@@ -53,7 +53,8 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok(`после выбора стороны пол наклонён (верх ${tilted} мм)`, tilted > 5);
   ok("угол записан в модель (5°)", st.containers[0].cells["0:0"].tiltA === 5);
   // выключение возвращает ровный пол
-  await page.locator("button", { hasText: /^Нет$/ }).first().click();
+  // «Нет» именно в блоке наклона пола: в панели есть и другие кнопки «Нет»
+  await page.locator('div:has(> div:text-is("Наклон пола (спуск к стороне)")) button:text-is("Нет")').first().click();
   await page.waitForTimeout(400);
   ok(`«Нет» возвращает ровный пол (${await floorTop()} мм)`, near(await floorTop(), 1.6));
 

@@ -3,6 +3,7 @@
 // ══════════════════════════════════════════════════════════════
 
 import { CONN } from "../model/connectors.js";
+import { DEF_INSERTS } from "../model/inserts.js";
 import { layout } from "../model/layout.js";
 
 let nextId = 2;
@@ -24,6 +25,9 @@ export const makeContainer = (src, gx, gy) => ({
   // фиксированные ячейки: «контейнер внутри контейнера» с якорем к углу
   // или стенке ({w, d, anchor, lvl}); сетка обтекает их
   fixedCells: [],
+  // вставные стенки: направляющие на внутренних гранях, сами перегородки
+  // печатаются отдельно и вдвигаются сверху
+  inserts: { ...DEF_INSERTS },
 });
 
 // ── Приведение чисел к разумным пределам ──
@@ -87,6 +91,16 @@ const sanitizeContainer = (c0) => {
       anchor: ANCHORS.includes(f?.anchor) ? f.anchor : "nw",
       lvl: num(f?.lvl, 0, 0, 500),
     }));
+  const ci = obj(c.inserts);
+  c.inserts = {
+    dir: ["x", "z"].includes(ci.dir) ? ci.dir : "none",
+    step: num(ci.step, 20, 6, 200),
+    thk: num(ci.thk, 1.6, 0.6, 10),
+    clr: num(ci.clr, 0.2, 0, 1),
+    proj: num(ci.proj, 1.2, 0.4, 6),
+    rail: num(ci.rail, 1.6, 0.6, 6),
+    show: !!ci.show,
+  };
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);
   // явные размеры по рядам: только конечные положительные числа

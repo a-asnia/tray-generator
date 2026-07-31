@@ -7,6 +7,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
+import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -43,7 +44,7 @@ export default function TrayGenerator() {
   // размеры соединителя зависят от зазора печати (настройка «Принтер»)
   const CG = connGeom(limits.connClr);
   const [tab, setTab] = useState("model");
-  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -464,6 +465,13 @@ export default function TrayGenerator() {
 
   const L = layout(cur);
   const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
+
+  const INS = insertsOf(cur);
+  const updIns = (patch) => updCur({ inserts: { ...INS, ...patch } });
+  const exportInsert = () => {
+    const sz = insertSize(cur, INS.dir);
+    exportSTL(insertPlateSolids(cur, INS.dir), `divider_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
+  };
 
   const exportOne = (idx) => {
     const { solids, c } = built.items[idx];
@@ -1145,6 +1153,14 @@ export default function TrayGenerator() {
         >
           {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
         </button>
+        {INS.dir !== "none" && insertSlots(cur, INS.dir).length > 0 && (
+          <button
+            onClick={exportInsert}
+            style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+          >
+            Скачать вставную перегородку — {insertSize(cur, INS.dir).len} × {insertSize(cur, INS.dir).hgt} мм
+          </button>
+        )}
         {containers.length > 1 && (
           <button
             onClick={exportAll}
@@ -1207,6 +1223,66 @@ export default function TrayGenerator() {
         <Collapse title="Деление на ячейки" open={openSecs.grid} onToggle={() => toggleSec("grid")}>
         <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
         <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
+        </Collapse>
+
+        <Collapse title="Вставные перегородки" open={openSecs.inserts} onToggle={() => toggleSec("inserts")}>
+        <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 }}>
+          На внутренних гранях печатаются направляющие, а сами перегородки печатаются отдельной деталью и вдвигаются сверху — их можно переставлять и убирать. Зазор по умолчанию 0,2 мм на сторону.
+        </p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          {[["none", "Нет"], ["x", "Поперёк"], ["z", "Вдоль"]].map(([v, t]) => (
+            <button
+              key={v}
+              onClick={() => updIns({ dir: v })}
+              style={{
+                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: INS.dir === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: INS.dir === v ? "#FFF3EB" : "#fff", color: INS.dir === v ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {INS.dir !== "none" && (() => {
+          const slots = insertSlots(cur, INS.dir);
+          const sz = insertSize(cur, INS.dir);
+          const crossing = INS.dir === "x" ? L.nRows > 1 : L.nColsAt(0) > 1;
+          return (
+            <>
+              <Param label="Шаг мест" unit="мм" value={INS.step} min={6} max={80} step={1} onChange={(v) => updIns({ step: v })} />
+              <Param label="Толщина вставки" unit="мм" value={INS.thk} min={0.8} max={6} step={0.1} onChange={(v) => updIns({ thk: v })} />
+              <Param label="Зазор" unit="мм" value={INS.clr} min={0} max={0.6} step={0.05} onChange={(v) => updIns({ clr: v })} />
+              <Param label="Выступ направляющей" unit="мм" value={INS.proj} min={0.4} max={4} step={0.1} onChange={(v) => updIns({ proj: v })} />
+              <Param label="Ширина направляющей" unit="мм" value={INS.rail} min={0.8} max={5} step={0.1} onChange={(v) => updIns({ rail: v })} />
+              <button
+                onClick={() => updIns({ show: !INS.show })}
+                style={{
+                  width: "100%", padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  border: INS.show ? `2px solid ${SEL}` : "1px solid #D6DDE6", marginBottom: 8,
+                  background: INS.show ? "#DBEAFE" : "#fff", color: INS.show ? SEL : "#3D4A5C",
+                }}
+              >
+                {INS.show ? "👁 Вставки показаны в превью" : "👁 Показать вставки в превью"}
+              </button>
+              <p style={{ fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.45 }}>
+                Мест под вставку: <b>{slots.length}</b>. Деталь: <b>{sz.len} × {sz.hgt} × {sz.thk} мм</b>, печатается плашмя.
+                Скачать её — на вкладке «Принтер».
+              </p>
+              {crossing && (
+                <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
+                  ⚠ Печатные перегородки идут поперёк вставок — вставка не пройдёт от стенки до стенки.
+                  Поставьте {INS.dir === "x" ? "«Ряды»" : "«Колонки»"} = 1 в «Делении на ячейки».
+                </p>
+              )}
+              {slots.length === 0 && (
+                <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
+                  ⚠ Ни одного места не помещается: уменьшите шаг или увеличьте контейнер.
+                </p>
+              )}
+            </>
+          );
+        })()}
         </Collapse>
 
         <Collapse title="Редактор сегментов" open={openSecs.walls} onToggle={() => toggleSec("walls")}>

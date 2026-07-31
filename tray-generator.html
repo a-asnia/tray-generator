@@ -405,6 +405,74 @@ function addConnUnits(solids, c, side, vs, rnd = 0) {
         }
     }
 }
+// ── src/model/inserts.js ──
+// ══════════════════════════════════════════════════════════════
+// Вставные стенки: контейнер печатается с направляющими на внутренних
+// гранях, сами перегородки печатаются отдельно и вдвигаются сверху.
+//
+// Направляющая — пара вертикальных рёбер НА грани стенки, а не выборка
+// в ней: внутри толщины внешней стенки живёт паз соединителя («ласточкин
+// хвост»), и канавка бы его срезала. Рёбра ничего не ослабляют и работают
+// при любой толщине стенки.
+// ══════════════════════════════════════════════════════════════
+// dir: "none" — выключено; "x" — вставки делят ширину (пазы на передней и
+// задней стенках); "z" — делят глубину (пазы на боковых стенках).
+const DEF_INSERTS = {
+    dir: "none",
+    step: 20, // шаг мест под вставку, мм
+    thk: 1.6, // толщина вставной стенки
+    clr: 0.2, // зазор на сторону между вставкой и направляющей
+    proj: 1.2, // насколько ребро выступает от грани внутрь ячейки
+    rail: 1.6, // ширина каждого ребра
+    show: false, // показывать вставки в превью
+};
+const insertsOf = (c) => ({ ...DEF_INSERTS, ...(c && c.inserts) });
+// Полуширина канала: от оси вставки до внешнего края ребра
+const railHalf = (ins) => ins.thk / 2 + ins.clr + ins.rail;
+// Места под вставку — от центра наружу с шагом step. Центр всегда есть:
+// одна перегородка посередине нужна чаще всего. Крайние места отбрасываются,
+// если вставка встанет слишком близко к стенке.
+function insertSlots(c, axis) {
+    const ins = insertsOf(c);
+    if (ins.dir !== axis)
+        return [];
+    const inner = (axis === "x" ? c.W : c.D) - 2 * c.wallOut;
+    const edge = railHalf(ins) + 2; // минимальный отступ оси от грани стенки
+    const step = Math.max(6, ins.step);
+    const n = Math.floor((inner / 2 - edge) / step);
+    if (n < 0)
+        return [];
+    const out = [];
+    for (let k = -n; k <= n; k++)
+        out.push(k * step);
+    return out;
+}
+// Габариты вставной стенки для оси axis: длина — по внутреннему пролёту
+// поперёк неё, высота — от дна до кромки (чуть ниже, чтобы не торчала).
+function insertSize(c, axis) {
+    const ins = insertsOf(c);
+    const span = (axis === "x" ? c.D : c.W) - 2 * c.wallOut;
+    return {
+        len: Math.round((span - 2 * ins.clr) * 10) / 10,
+        hgt: Math.round(Math.max(4, c.H - c.floor - 0.3) * 10) / 10,
+        thk: ins.thk,
+    };
+}
+// Вставная стенка как отдельная деталь, лежащая плашмя: длина по X,
+// высота по Z, толщина вертикально — печатается с стола без поддержек.
+function insertPlateSolids(c, axis) {
+    const s = insertSize(c, axis);
+    return [boxSolid(0, s.thk / 2, 0, s.len, s.thk, s.hgt, "insert")];
+}
+// Вставная стенка на своём месте внутри контейнера (только для превью).
+// u — координата вдоль оси деления, yBot — верх дна.
+function insertInPlace(c, axis, u, yBot) {
+    const s = insertSize(c, axis);
+    const y = yBot + s.hgt / 2;
+    return axis === "x"
+        ? boxSolid(u, y, 0, s.thk, s.hgt, s.len, "insert")
+        : boxSolid(0, y, u, s.len, s.hgt, s.thk, "insert");
+}
 // ── src/model/layout.js ──
 // ══════════════════════════════════════════════════════════════
 // Раскладка ячеек внутри контейнера и адресация стенок по ключам
@@ -1643,6 +1711,79 @@ function buildContainer(c, conn, opts = {}) {
     if (conn.W?.male)
         for (const [a, b] of zW)
             zoneWall("w", a, b);
+    // ── Вставные стенки: направляющие на внутренних гранях ──
+    // Пара вертикальных рёбер образует канал, в который перегородка
+    // вдвигается сверху уже после печати. Рёбра ставятся НА грань: внутри
+    // толщины внешней стенки живёт паз соединителя, выборка бы его срезала.
+    // Сверху рёбра сходят на нет — это заходная воронка при вставке.
+    {
+        const ins = insertsOf(c);
+        const half = ins.thk / 2 + ins.clr;
+        const LEAD = 2; // высота заходного скоса
+        for (const axis of ["x", "z"]) {
+            const slots = insertSlots(c, axis);
+            if (!slots.length)
+                continue;
+            // ребро: коробка от грани внутрь ячейки, сверху со скосом
+            const rib = (u0, u1, faceP, dirP, yBot, yTop, tag) => {
+                if (yTop - yBot < 1)
+                    return;
+                const yMid = Math.max(yBot, yTop - LEAD);
+                const q = (p0, p1, y) => (axis === "x"
+                    ? [[u0, y, p0], [u1, y, p0], [u1, y, p1], [u0, y, p1]]
+                    : [[p0, y, u0], [p0, y, u1], [p1, y, u1], [p1, y, u0]]);
+                const pIn = faceP + dirP * ins.proj;
+                if (yMid > yBot + 0.05)
+                    solids.push(prismSolid(q(faceP, pIn, yBot), q(faceP, pIn, yMid), tag));
+                // скос: выступ сходит к нулю у самого верха
+                solids.push(prismSolid(q(faceP, pIn, yMid), q(faceP, faceP, yTop), tag));
+            };
+            for (const u of slots) {
+                // место пропускается, если на нём уже стоит печатная перегородка
+                // (иначе ребро наросло бы прямо на неё) или тут стоит бокс
+                const blockedByBox = L.fixed.some((f) => axis === "x" ? u > f.fx0 - half && u < f.fx1 + half : u > f.fz0 - half && u < f.fz1 + half);
+                if (blockedByBox)
+                    continue;
+                let blocked = false;
+                if (axis === "x")
+                    for (let j = 0; j < L.nRows && !blocked; j++)
+                        for (let i = 0; i < L.nColsAt(j) - 1; i++)
+                            if (Math.abs(L.cx0(i, j) + L.cw(i, j) + wall / 2 - u) < half + wall) {
+                                blocked = true;
+                                break;
+                            }
+                            else
+                                for (let j = 0; j < L.nRows - 1; j++)
+                                    if (Math.abs(L.cz0(j) + L.cd(j) + wall / 2 - u) < half + wall) {
+                                        blocked = true;
+                                        break;
+                                    }
+                if (blocked)
+                    continue;
+                // две противоположные стенки, поперёк которых идёт вставка
+                const sides = axis === "x"
+                    ? [["n", 0, -D / 2 + wallOut, 1], ["s", L.nRows - 1, D / 2 - wallOut, -1]]
+                    : [["w", 0, -W / 2 + wallOut, 1], ["e", 0, W / 2 - wallOut, -1]];
+                for (const [side, rowHint, faceP, dirP] of sides) {
+                    const i = axis === "x" ? L.cellIndexAt(rowHint, u) : side === "w" ? 0 : L.nColsAt(rowHint) - 1;
+                    const j = axis === "x" ? rowHint : 0;
+                    const key = axis === "x" ? `o:${side}:${i}` : `o:${side}:${j}`;
+                    const wc = getWall(c, key);
+                    if (wc.h <= 1 || !flatWall(key))
+                        continue; // на пандусе направляющая не нужна
+                    const yBot = floor + cellLvl(axis === "x" ? i : 0, axis === "x" ? j : 0);
+                    const yTop = Math.min(wc.h, H) - 1;
+                    rib(u - half - ins.rail, u - half, faceP, dirP, yBot, yTop, key);
+                    rib(u + half, u + half + ins.rail, faceP, dirP, yBot, yTop, key);
+                }
+                // вставка «на месте» — только для превью, в экспорт контейнера не идёт
+                if (ins.show && opts.inserts !== false) {
+                    const i0 = axis === "x" ? L.cellIndexAt(0, u) : 0;
+                    solids.push(insertInPlace(c, axis, u, floor + cellLvl(i0, 0)));
+                }
+            }
+        }
+    }
     // вертикальные перегородки — свои в каждом ряду («кирпичная» раскладка,
     // перегородки соседних рядов не обязаны совпадать)
     const hasDividerAt = (j2, x) => {
@@ -1906,6 +2047,9 @@ const makeContainer = (src, gx, gy) => ({
     // фиксированные ячейки: «контейнер внутри контейнера» с якорем к углу
     // или стенке ({w, d, anchor, lvl}); сетка обтекает их
     fixedCells: [],
+    // вставные стенки: направляющие на внутренних гранях, сами перегородки
+    // печатаются отдельно и вдвигаются сверху
+    inserts: { ...DEF_INSERTS },
 });
 // ── Приведение чисел к разумным пределам ──
 // Файл проекта можно открыть чужой, битый или отредактированный руками.
@@ -1977,6 +2121,16 @@ const sanitizeContainer = (c0) => {
         anchor: ANCHORS.includes(f?.anchor) ? f.anchor : "nw",
         lvl: num(f?.lvl, 0, 0, 500),
     }));
+    const ci = obj(c.inserts);
+    c.inserts = {
+        dir: ["x", "z"].includes(ci.dir) ? ci.dir : "none",
+        step: num(ci.step, 20, 6, 200),
+        thk: num(ci.thk, 1.6, 0.6, 10),
+        clr: num(ci.clr, 0.2, 0, 1),
+        proj: num(ci.proj, 1.2, 0.4, 6),
+        rail: num(ci.rail, 1.6, 0.6, 6),
+        show: !!ci.show,
+    };
     c.lockedCellW = obj(c.lockedCellW);
     c.lockedRows = obj(c.lockedRows);
     // явные размеры по рядам: только конечные положительные числа
@@ -2543,7 +2697,7 @@ function TrayGenerator() {
     // размеры соединителя зависят от зазора печати (настройка «Принтер»)
     const CG = connGeom(limits.connClr);
     const [tab, setTab] = useState("model");
-    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
     const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
     // автосохранение при каждом изменении
     useEffect(() => {
@@ -2975,6 +3129,12 @@ function TrayGenerator() {
     const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection });
     const L = layout(cur);
     const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
+    const INS = insertsOf(cur);
+    const updIns = (patch) => updCur({ inserts: { ...INS, ...patch } });
+    const exportInsert = () => {
+        const sz = insertSize(cur, INS.dir);
+        exportSTL(insertPlateSolids(cur, INS.dir), `divider_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
+    };
     const exportOne = (idx) => {
         const { solids, c } = built.items[idx];
         exportSTL(solids, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
@@ -3448,6 +3608,12 @@ function TrayGenerator() {
                             border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700,
                             cursor: solidBusy ? "wait" : "pointer", opacity: solidBusy ? 0.7 : 1,
                         } }, solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`),
+                    INS.dir !== "none" && insertSlots(cur, INS.dir).length > 0 && (React.createElement("button", { onClick: exportInsert, style: { width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" } },
+                        "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0432\u0441\u0442\u0430\u0432\u043D\u0443\u044E \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0443 \u2014 ",
+                        insertSize(cur, INS.dir).len,
+                        " \u00D7 ",
+                        insertSize(cur, INS.dir).hgt,
+                        " \u043C\u043C")),
                     containers.length > 1 && (React.createElement("button", { onClick: exportAll, style: { width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: ACCENT, border: `1.5px solid ${ACCENT}`, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" } },
                         "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0432\u0441\u0435 (",
                         containers.length,
@@ -3478,6 +3644,46 @@ function TrayGenerator() {
                 React.createElement(Collapse, { title: "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.grid, onToggle: () => toggleSec("grid") },
                     React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: cur.cols, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
                     React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })),
+                React.createElement(Collapse, { title: "\u0412\u0441\u0442\u0430\u0432\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", open: openSecs.inserts, onToggle: () => toggleSec("inserts") },
+                    React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 } }, "\u041D\u0430 \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0438\u0445 \u0433\u0440\u0430\u043D\u044F\u0445 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435, \u0430 \u0441\u0430\u043C\u0438 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u0434\u0435\u0442\u0430\u043B\u044C\u044E \u0438 \u0432\u0434\u0432\u0438\u0433\u0430\u044E\u0442\u0441\u044F \u0441\u0432\u0435\u0440\u0445\u0443 \u2014 \u0438\u0445 \u043C\u043E\u0436\u043D\u043E \u043F\u0435\u0440\u0435\u0441\u0442\u0430\u0432\u043B\u044F\u0442\u044C \u0438 \u0443\u0431\u0438\u0440\u0430\u0442\u044C. \u0417\u0430\u0437\u043E\u0440 \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 0,2 \u043C\u043C \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443."),
+                    React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, [["none", "Нет"], ["x", "Поперёк"], ["z", "Вдоль"]].map(([v, t]) => (React.createElement("button", { key: v, onClick: () => updIns({ dir: v }), style: {
+                            flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                            border: INS.dir === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                            background: INS.dir === v ? "#FFF3EB" : "#fff", color: INS.dir === v ? ACCENT : "#3D4A5C",
+                        } }, t)))),
+                    INS.dir !== "none" && (() => {
+                        const slots = insertSlots(cur, INS.dir);
+                        const sz = insertSize(cur, INS.dir);
+                        const crossing = INS.dir === "x" ? L.nRows > 1 : L.nColsAt(0) > 1;
+                        return (React.createElement(React.Fragment, null,
+                            React.createElement(Param, { label: "\u0428\u0430\u0433 \u043C\u0435\u0441\u0442", unit: "\u043C\u043C", value: INS.step, min: 6, max: 80, step: 1, onChange: (v) => updIns({ step: v }) }),
+                            React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0432\u0441\u0442\u0430\u0432\u043A\u0438", unit: "\u043C\u043C", value: INS.thk, min: 0.8, max: 6, step: 0.1, onChange: (v) => updIns({ thk: v }) }),
+                            React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: INS.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updIns({ clr: v }) }),
+                            React.createElement(Param, { label: "\u0412\u044B\u0441\u0442\u0443\u043F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.proj, min: 0.4, max: 4, step: 0.1, onChange: (v) => updIns({ proj: v }) }),
+                            React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.rail, min: 0.8, max: 5, step: 0.1, onChange: (v) => updIns({ rail: v }) }),
+                            React.createElement("button", { onClick: () => updIns({ show: !INS.show }), style: {
+                                    width: "100%", padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                    border: INS.show ? `2px solid ${SEL}` : "1px solid #D6DDE6", marginBottom: 8,
+                                    background: INS.show ? "#DBEAFE" : "#fff", color: INS.show ? SEL : "#3D4A5C",
+                                } }, INS.show ? "👁 Вставки показаны в превью" : "👁 Показать вставки в превью"),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.45 } },
+                                "\u041C\u0435\u0441\u0442 \u043F\u043E\u0434 \u0432\u0441\u0442\u0430\u0432\u043A\u0443: ",
+                                React.createElement("b", null, slots.length),
+                                ". \u0414\u0435\u0442\u0430\u043B\u044C: ",
+                                React.createElement("b", null,
+                                    sz.len,
+                                    " \u00D7 ",
+                                    sz.hgt,
+                                    " \u00D7 ",
+                                    sz.thk,
+                                    " \u043C\u043C"),
+                                ", \u043F\u0435\u0447\u0430\u0442\u0430\u0435\u0442\u0441\u044F \u043F\u043B\u0430\u0448\u043C\u044F. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0435\u0451 \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB."),
+                            crossing && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } },
+                                "\u26A0 \u041F\u0435\u0447\u0430\u0442\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438\u0434\u0443\u0442 \u043F\u043E\u043F\u0435\u0440\u0451\u043A \u0432\u0441\u0442\u0430\u0432\u043E\u043A \u2014 \u0432\u0441\u0442\u0430\u0432\u043A\u0430 \u043D\u0435 \u043F\u0440\u043E\u0439\u0434\u0451\u0442 \u043E\u0442 \u0441\u0442\u0435\u043D\u043A\u0438 \u0434\u043E \u0441\u0442\u0435\u043D\u043A\u0438. \u041F\u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 ",
+                                INS.dir === "x" ? "«Ряды»" : "«Колонки»",
+                                " = 1 \u0432 \u00AB\u0414\u0435\u043B\u0435\u043D\u0438\u0438 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438\u00BB.")),
+                            slots.length === 0 && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } }, "\u26A0 \u041D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u043C\u0435\u0441\u0442\u0430 \u043D\u0435 \u043F\u043E\u043C\u0435\u0449\u0430\u0435\u0442\u0441\u044F: \u0443\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u0448\u0430\u0433 \u0438\u043B\u0438 \u0443\u0432\u0435\u043B\u0438\u0447\u044C\u0442\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440."))));
+                    })()),
                 React.createElement(Collapse, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u043E\u0432", open: openSecs.walls, onToggle: () => toggleSec("walls") },
                     React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
                         "\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 ",

@@ -9,6 +9,7 @@ import { prismSolid, boxSolid, rampSolid, wallProfile, ARC_SEGS } from "../geome
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl } from "./layout.js";
+import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
 
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
@@ -850,6 +851,70 @@ export function buildContainer(c, conn, opts = {}) {
   if (conn.N?.male) for (const [a, b] of zN) zoneWall("n", a, b);
   if (conn.E?.male) for (const [a, b] of zE) zoneWall("e", a, b);
   if (conn.W?.male) for (const [a, b] of zW) zoneWall("w", a, b);
+
+  // ── Вставные стенки: направляющие на внутренних гранях ──
+  // Пара вертикальных рёбер образует канал, в который перегородка
+  // вдвигается сверху уже после печати. Рёбра ставятся НА грань: внутри
+  // толщины внешней стенки живёт паз соединителя, выборка бы его срезала.
+  // Сверху рёбра сходят на нет — это заходная воронка при вставке.
+  {
+    const ins = insertsOf(c);
+    const half = ins.thk / 2 + ins.clr;
+    const LEAD = 2; // высота заходного скоса
+    for (const axis of ["x", "z"]) {
+      const slots = insertSlots(c, axis);
+      if (!slots.length) continue;
+      // ребро: коробка от грани внутрь ячейки, сверху со скосом
+      const rib = (u0, u1, faceP, dirP, yBot, yTop, tag) => {
+        if (yTop - yBot < 1) return;
+        const yMid = Math.max(yBot, yTop - LEAD);
+        const q = (p0, p1, y) => (axis === "x"
+          ? [[u0, y, p0], [u1, y, p0], [u1, y, p1], [u0, y, p1]]
+          : [[p0, y, u0], [p0, y, u1], [p1, y, u1], [p1, y, u0]]);
+        const pIn = faceP + dirP * ins.proj;
+        if (yMid > yBot + 0.05) solids.push(prismSolid(q(faceP, pIn, yBot), q(faceP, pIn, yMid), tag));
+        // скос: выступ сходит к нулю у самого верха
+        solids.push(prismSolid(q(faceP, pIn, yMid), q(faceP, faceP, yTop), tag));
+      };
+      for (const u of slots) {
+        // место пропускается, если на нём уже стоит печатная перегородка
+        // (иначе ребро наросло бы прямо на неё) или тут стоит бокс
+        const blockedByBox = L.fixed.some((f) =>
+          axis === "x" ? u > f.fx0 - half && u < f.fx1 + half : u > f.fz0 - half && u < f.fz1 + half);
+        if (blockedByBox) continue;
+        let blocked = false;
+        if (axis === "x")
+          for (let j = 0; j < L.nRows && !blocked; j++)
+            for (let i = 0; i < L.nColsAt(j) - 1; i++)
+              if (Math.abs(L.cx0(i, j) + L.cw(i, j) + wall / 2 - u) < half + wall) { blocked = true; break; }
+        else
+          for (let j = 0; j < L.nRows - 1; j++)
+            if (Math.abs(L.cz0(j) + L.cd(j) + wall / 2 - u) < half + wall) { blocked = true; break; }
+        if (blocked) continue;
+
+        // две противоположные стенки, поперёк которых идёт вставка
+        const sides = axis === "x"
+          ? [["n", 0, -D / 2 + wallOut, 1], ["s", L.nRows - 1, D / 2 - wallOut, -1]]
+          : [["w", 0, -W / 2 + wallOut, 1], ["e", 0, W / 2 - wallOut, -1]];
+        for (const [side, rowHint, faceP, dirP] of sides) {
+          const i = axis === "x" ? L.cellIndexAt(rowHint, u) : side === "w" ? 0 : L.nColsAt(rowHint) - 1;
+          const j = axis === "x" ? rowHint : 0;
+          const key = axis === "x" ? `o:${side}:${i}` : `o:${side}:${j}`;
+          const wc = getWall(c, key);
+          if (wc.h <= 1 || !flatWall(key)) continue; // на пандусе направляющая не нужна
+          const yBot = floor + cellLvl(axis === "x" ? i : 0, axis === "x" ? j : 0);
+          const yTop = Math.min(wc.h, H) - 1;
+          rib(u - half - ins.rail, u - half, faceP, dirP, yBot, yTop, key);
+          rib(u + half, u + half + ins.rail, faceP, dirP, yBot, yTop, key);
+        }
+        // вставка «на месте» — только для превью, в экспорт контейнера не идёт
+        if (ins.show && opts.inserts !== false) {
+          const i0 = axis === "x" ? L.cellIndexAt(0, u) : 0;
+          solids.push(insertInPlace(c, axis, u, floor + cellLvl(i0, 0)));
+        }
+      }
+    }
+  }
 
   // вертикальные перегородки — свои в каждом ряду («кирпичная» раскладка,
   // перегородки соседних рядов не обязаны совпадать)
