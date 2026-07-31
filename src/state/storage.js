@@ -21,7 +21,7 @@ export const makeContainer = (src, gx, gy) => ({
   lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
   // «кирпичная» раскладка: явные ширины ячеек по рядам (rowColWs[j]),
   // замки ширины отдельных ячеек ("i:j") и замки глубины рядов
-  rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {},
+  rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {}, cellShares: {},
   // фиксированные ячейки: «контейнер внутри контейнера» с якорем к углу
   // или стенке ({w, d, anchor, lvl}); сетка обтекает их
   fixedCells: [],
@@ -103,6 +103,10 @@ const sanitizeContainer = (c0) => {
     show: !!ci.show,
   };
   delete c.wparts; // фича вставных стенок контейнера убрана
+  // доли при делении остатка (решатель): ключ "i:j", разумный диапазон
+  c.cellShares = Object.fromEntries(
+    Object.entries(obj(c.cellShares)).map(([k, v]) => [k, num(v, 1, 0.1, 10)]).filter(([, v]) => Math.abs(v - 1) > 0.001)
+  );
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);
   // явные размеры по рядам: только конечные положительные числа

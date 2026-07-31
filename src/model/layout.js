@@ -3,6 +3,8 @@
 // (o:сторона:индекс — внешние, v:i:j / h:j:i — перегородки)
 // ══════════════════════════════════════════════════════════════
 
+import { solveSizes } from "./solver.js";
+
 // заполнение оси ячейками целевого размера: последняя забирает остаток
 // (от одного до двух целевых размеров), как в логике раскладки
 export function fillAxis(inner, wall, target) {
@@ -17,27 +19,23 @@ export function fillAxis(inner, wall, target) {
   return cells;
 }
 
-// Подгонка явных размеров колонок/рядов под внутренний габарит:
-// зафиксированные замком не меняются, свободные масштабируются
-// (минимум 5 мм); если зафиксированы все — масштабируются все,
-// чтобы геометрия оставалась согласованной (UI до этого не доводит)
-const MIN_FREE = 5;
-export function fitSizes(sizes, locked, total) {
-  const out = sizes.slice();
-  const freeIdx = out.map((_, k) => k).filter((k) => !locked[k]);
-  if (!freeIdx.length) {
-    const sum = out.reduce((s, v) => s + v, 0) || 1;
-    return Math.abs(sum - total) > 0.01 ? out.map((v) => (v * total) / sum) : out;
-  }
-  const lockedSum = out.reduce((s, v, k) => (locked[k] ? s + v : s), 0);
-  const freeTarget = total - lockedSum;
-  for (let pass = 0; pass < 2; pass++) {
-    const freeSum = freeIdx.reduce((s, k) => s + out[k], 0) || 1;
-    if (Math.abs(freeSum - freeTarget) < 0.01) break;
-    const scale = freeTarget / freeSum;
-    for (const k of freeIdx) out[k] = Math.max(MIN_FREE, out[k] * scale);
-  }
-  return out;
+// Подгонка размеров колонок/рядов под внутренний габарит — через решатель
+// (src/model/solver.js). Замкнутая ячейка задаёт ограничение «всегда такая»,
+// свободные делят остаток по долям; shares[k] — явная доля, если задана.
+export function fitSizes(sizes, locked, total, shares) {
+  return solveResult(sizes, locked, total, shares).sizes;
+}
+// то же, но с отчётом решателя (сходится ли и сколько не хватает)
+export function solveResult(sizes, locked, total, shares) {
+  // если в ряду есть хотя бы одна явная доля, веса сравниваются в долях
+  // (без доли = 1) — иначе доля 2 конкурировала бы с «весом-размером» 30 мм
+  const anyShare = shares && Object.values(shares).some((v) => v != null && v > 0);
+  const items = sizes.map((v, k) => (locked && locked[k]
+    ? { fix: v }
+    : anyShare
+      ? { share: (shares && shares[k]) || 1 }
+      : { size: v }));
+  return solveSizes(items, total);
 }
 
 // замки ширины отдельных ячеек: ключ "i:j" (i — номер ячейки в ряду j)
@@ -100,11 +98,16 @@ export function layout(c) {
   for (let j = 0; j < nRows; j++) {
     const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length ? c.rowColWs[j] : colWs;
     const lockedJ = {};
+    const sharesJ = {};
     for (const k of Object.keys(c.lockedCellW || {})) {
       const [ii, jj] = k.split(":");
       if (+jj === j) lockedJ[+ii] = true;
     }
-    rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall));
+    for (const k of Object.keys(c.cellShares || {})) {
+      const [ii, jj] = k.split(":");
+      if (+jj === j) sharesJ[+ii] = c.cellShares[k];
+    }
+    rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall, sharesJ));
   }
   // Фиксированные ячейки — «контейнер внутри контейнера»: жёсткий размер
   // (полость w×d) и якорь к углу или стенке, без точных координат; бокс
@@ -266,3 +269,39 @@ export const wallTitle = (key) => {
   if (t === "fw") return "Стенка фиксированной ячейки";
   return t === "v" ? "Перегородка (между колонками)" : "Перегородка (между рядами)";
 };
+
+// ── Отчёт решателя по контейнеру ──
+// Проверяет каждую ось: хватает ли пролёта на все ограничения
+// («эта ячейка всегда такая» + минимумы). Возвращает список конфликтов —
+// пустой список означает, что все ограничения выполнены точно.
+export function layoutIssues(c) {
+  const issues = [];
+  const innerW = c.W - 2 * c.wallOut;
+  const innerD = c.D - 2 * c.wallOut;
+  if (c.rowDs && c.rowDs.length) {
+    const r = solveResult(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
+    if (!r.ok)
+      issues.push({ axis: "d", j: -1, shortfall: r.shortfall,
+        text: `По глубине не хватает ${r.shortfall} мм: зафиксированные ряды и минимумы не помещаются. Увеличьте глубину контейнера или снимите замок.` });
+  }
+  const L = layout(c);
+  for (let j = 0; j < L.nRows; j++) {
+    const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length
+      ? c.rowColWs[j]
+      : new Array(L.nColsAt(j)).fill(innerW / L.nColsAt(j));
+    const lockedJ = {}, sharesJ = {};
+    for (const k of Object.keys(c.lockedCellW || {})) {
+      const [ii, jj] = k.split(":");
+      if (+jj === j) lockedJ[+ii] = true;
+    }
+    for (const k of Object.keys(c.cellShares || {})) {
+      const [ii, jj] = k.split(":");
+      if (+jj === j) sharesJ[+ii] = c.cellShares[k];
+    }
+    const r = solveResult(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall, sharesJ);
+    if (!r.ok)
+      issues.push({ axis: "w", j, shortfall: r.shortfall,
+        text: `В ряду ${j + 1} не хватает ${r.shortfall} мм: зафиксированные ячейки и минимумы не помещаются. Увеличьте ширину контейнера или снимите замок.` });
+  }
+  return issues;
+}

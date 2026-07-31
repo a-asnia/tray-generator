@@ -424,6 +424,121 @@ function addConnUnits(solids, c, side, vs, rnd = 0) {
         }
     }
 }
+// ── src/model/solver.js ──
+// ══════════════════════════════════════════════════════════════
+// Решатель размеров: раздаёт пролёт между ячейками ряда (или рядами по
+// глубине) так, чтобы выполнялись объявленные ограничения.
+//
+// Ограничение на одну ячейку — одно из:
+//   fix   — «эта ячейка всегда такая»: размер задан жёстко и не меняется;
+//   share — доля при делении остатка (у двух ячеек с равной долей размеры
+//           равны, доля 2 против 1 даёт вдвое больший размер);
+//   без ограничений — доля берётся из текущего размера, то есть ячейка
+//           просто сохраняет свою пропорцию.
+// Плюс общий минимум: ни одна ячейка не может стать меньше него.
+//
+// Алгоритм — «наполнение с закреплением»: остаток делится по долям, и если
+// какая-то ячейка при этом уходит ниже минимума, она закрепляется на
+// минимуме, а остальные делят оставшееся заново. Так за конечное число
+// шагов получается либо точное решение, либо честный ответ «не сходится»
+// с числом, которого не хватает.
+// ══════════════════════════════════════════════════════════════
+const MIN_CELL = 5; // минимальный размер ячейки, мм
+// items: [{ fix?: число, share?: число, min?: число }]
+// Возврат: { sizes, ok, need, fixedSum, freeCount, shortfall }
+//   ok        — все ограничения выполнены точно
+//   need      — минимальный пролёт, при котором решение существует
+//   shortfall — сколько миллиметров не хватает (0, если сходится)
+function solveSizes(items, total, minCell = MIN_CELL) {
+    const n = items.length;
+    const sizes = new Array(n).fill(0);
+    if (!n)
+        return { sizes, ok: true, need: 0, fixedSum: 0, freeCount: 0, shortfall: 0 };
+    const minOf = (k) => Math.max(0, items[k].min ?? minCell);
+    const pinned = new Array(n).fill(false);
+    let fixedSum = 0;
+    for (let k = 0; k < n; k++) {
+        if (items[k].fix != null) {
+            pinned[k] = true;
+            sizes[k] = Math.max(minOf(k), items[k].fix);
+            fixedSum += sizes[k];
+        }
+    }
+    const freeCount = n - pinned.filter(Boolean).length;
+    // минимальный пролёт: закреплённые как есть, свободные — по минимуму
+    let need = fixedSum;
+    for (let k = 0; k < n; k++)
+        if (!pinned[k])
+            need += minOf(k);
+    // Пролёта не хватает даже на минимумы: решения нет. Отдаём согласованную
+    // геометрию (всё ужато пропорционально) и честно сообщаем, сколько не
+    // хватает — молча ужимать нельзя, иначе замок «эта ячейка всегда такая»
+    // тихо перестаёт выполняться.
+    if (total < need - 1e-6) {
+        const base = items.map((it, k) => (it.fix != null ? Math.max(minOf(k), it.fix) : minOf(k)));
+        const sum = base.reduce((s, v) => s + v, 0) || 1;
+        return {
+            sizes: base.map((v) => (v * total) / sum),
+            ok: false,
+            need,
+            fixedSum,
+            freeCount,
+            shortfall: Math.round((need - total) * 100) / 100,
+        };
+    }
+    if (!freeCount) {
+        // свободных нет — если сумма закреплённых не сходится с пролётом,
+        // масштабируем все (до этого доводит только правка размеров вручную)
+        const sum = fixedSum || 1;
+        return {
+            sizes: Math.abs(sum - total) > 0.01 ? sizes.map((v) => (v * total) / sum) : sizes,
+            ok: Math.abs(sum - total) <= 0.01,
+            need,
+            fixedSum,
+            freeCount,
+            shortfall: Math.max(0, Math.round((sum - total) * 100) / 100),
+        };
+    }
+    // доля: явная, иначе пропорционально текущему размеру (ячейка сохраняет
+    // свою долю), иначе поровну
+    const shareOf = (k) => {
+        const it = items[k];
+        if (it.share != null && it.share > 0)
+            return it.share;
+        if (it.size != null && it.size > 0)
+            return it.size;
+        return 1;
+    };
+    for (let pass = 0; pass <= n; pass++) {
+        const free = [];
+        let taken = 0;
+        for (let k = 0; k < n; k++)
+            (pinned[k] ? (taken += sizes[k]) : free.push(k));
+        if (!free.length)
+            break;
+        const rest = total - taken;
+        const wsum = free.reduce((s, k) => s + shareOf(k), 0) || 1;
+        // ячейка, которая сильнее всех уходит под минимум, закрепляется на нём
+        let worst = -1, worstGap = 0;
+        for (const k of free) {
+            const v = (rest * shareOf(k)) / wsum;
+            const gap = minOf(k) - v;
+            if (gap > worstGap + 1e-9) {
+                worstGap = gap;
+                worst = k;
+            }
+        }
+        if (worst >= 0) {
+            pinned[worst] = true;
+            sizes[worst] = minOf(worst);
+            continue;
+        }
+        for (const k of free)
+            sizes[k] = (rest * shareOf(k)) / wsum;
+        break;
+    }
+    return { sizes, ok: true, need, fixedSum, freeCount, shortfall: 0 };
+}
 // ── src/model/inserts.js ──
 // ══════════════════════════════════════════════════════════════
 // Вставные стенки: контейнер печатается с направляющими на внутренних
@@ -510,29 +625,23 @@ function fillAxis(inner, wall, target) {
     cells.push(Math.max(10, remain));
     return cells;
 }
-// Подгонка явных размеров колонок/рядов под внутренний габарит:
-// зафиксированные замком не меняются, свободные масштабируются
-// (минимум 5 мм); если зафиксированы все — масштабируются все,
-// чтобы геометрия оставалась согласованной (UI до этого не доводит)
-const MIN_FREE = 5;
-function fitSizes(sizes, locked, total) {
-    const out = sizes.slice();
-    const freeIdx = out.map((_, k) => k).filter((k) => !locked[k]);
-    if (!freeIdx.length) {
-        const sum = out.reduce((s, v) => s + v, 0) || 1;
-        return Math.abs(sum - total) > 0.01 ? out.map((v) => (v * total) / sum) : out;
-    }
-    const lockedSum = out.reduce((s, v, k) => (locked[k] ? s + v : s), 0);
-    const freeTarget = total - lockedSum;
-    for (let pass = 0; pass < 2; pass++) {
-        const freeSum = freeIdx.reduce((s, k) => s + out[k], 0) || 1;
-        if (Math.abs(freeSum - freeTarget) < 0.01)
-            break;
-        const scale = freeTarget / freeSum;
-        for (const k of freeIdx)
-            out[k] = Math.max(MIN_FREE, out[k] * scale);
-    }
-    return out;
+// Подгонка размеров колонок/рядов под внутренний габарит — через решатель
+// (src/model/solver.js). Замкнутая ячейка задаёт ограничение «всегда такая»,
+// свободные делят остаток по долям; shares[k] — явная доля, если задана.
+function fitSizes(sizes, locked, total, shares) {
+    return solveResult(sizes, locked, total, shares).sizes;
+}
+// то же, но с отчётом решателя (сходится ли и сколько не хватает)
+function solveResult(sizes, locked, total, shares) {
+    // если в ряду есть хотя бы одна явная доля, веса сравниваются в долях
+    // (без доли = 1) — иначе доля 2 конкурировала бы с «весом-размером» 30 мм
+    const anyShare = shares && Object.values(shares).some((v) => v != null && v > 0);
+    const items = sizes.map((v, k) => (locked && locked[k]
+        ? { fix: v }
+        : anyShare
+            ? { share: (shares && shares[k]) || 1 }
+            : { size: v }));
+    return solveSizes(items, total);
 }
 // замки ширины отдельных ячеек: ключ "i:j" (i — номер ячейки в ряду j)
 const lockedWIn = (c, j) => {
@@ -595,12 +704,18 @@ function layout(c) {
     for (let j = 0; j < nRows; j++) {
         const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length ? c.rowColWs[j] : colWs;
         const lockedJ = {};
+        const sharesJ = {};
         for (const k of Object.keys(c.lockedCellW || {})) {
             const [ii, jj] = k.split(":");
             if (+jj === j)
                 lockedJ[+ii] = true;
         }
-        rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall));
+        for (const k of Object.keys(c.cellShares || {})) {
+            const [ii, jj] = k.split(":");
+            if (+jj === j)
+                sharesJ[+ii] = c.cellShares[k];
+        }
+        rowCols.push(fitSizes(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall, sharesJ));
     }
     // Фиксированные ячейки — «контейнер внутри контейнера»: жёсткий размер
     // (полость w×d) и якорь к углу или стенке, без точных координат; бокс
@@ -786,6 +901,43 @@ const wallTitle = (key) => {
         return "Стенка фиксированной ячейки";
     return t === "v" ? "Перегородка (между колонками)" : "Перегородка (между рядами)";
 };
+// ── Отчёт решателя по контейнеру ──
+// Проверяет каждую ось: хватает ли пролёта на все ограничения
+// («эта ячейка всегда такая» + минимумы). Возвращает список конфликтов —
+// пустой список означает, что все ограничения выполнены точно.
+function layoutIssues(c) {
+    const issues = [];
+    const innerW = c.W - 2 * c.wallOut;
+    const innerD = c.D - 2 * c.wallOut;
+    if (c.rowDs && c.rowDs.length) {
+        const r = solveResult(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
+        if (!r.ok)
+            issues.push({ axis: "d", j: -1, shortfall: r.shortfall,
+                text: `По глубине не хватает ${r.shortfall} мм: зафиксированные ряды и минимумы не помещаются. Увеличьте глубину контейнера или снимите замок.` });
+    }
+    const L = layout(c);
+    for (let j = 0; j < L.nRows; j++) {
+        const explicit = c.rowColWs && c.rowColWs[j] && c.rowColWs[j].length
+            ? c.rowColWs[j]
+            : new Array(L.nColsAt(j)).fill(innerW / L.nColsAt(j));
+        const lockedJ = {}, sharesJ = {};
+        for (const k of Object.keys(c.lockedCellW || {})) {
+            const [ii, jj] = k.split(":");
+            if (+jj === j)
+                lockedJ[+ii] = true;
+        }
+        for (const k of Object.keys(c.cellShares || {})) {
+            const [ii, jj] = k.split(":");
+            if (+jj === j)
+                sharesJ[+ii] = c.cellShares[k];
+        }
+        const r = solveResult(explicit, lockedJ, innerW - (explicit.length - 1) * c.wall, sharesJ);
+        if (!r.ok)
+            issues.push({ axis: "w", j, shortfall: r.shortfall,
+                text: `В ряду ${j + 1} не хватает ${r.shortfall} мм: зафиксированные ячейки и минимумы не помещаются. Увеличьте ширину контейнера или снимите замок.` });
+    }
+    return issues;
+}
 // ── src/model/build.js ──
 // ══════════════════════════════════════════════════════════════
 // Полная сборка контейнера в набор выпуклых тел (solids).
@@ -2125,7 +2277,7 @@ const makeContainer = (src, gx, gy) => ({
     lockOuter: false, lockCell: false, cellW0: 0, cellD0: 0,
     // «кирпичная» раскладка: явные ширины ячеек по рядам (rowColWs[j]),
     // замки ширины отдельных ячеек ("i:j") и замки глубины рядов
-    rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {},
+    rowColWs: null, rowDs: null, lockedCellW: {}, lockedRows: {}, cellShares: {},
     // фиксированные ячейки: «контейнер внутри контейнера» с якорем к углу
     // или стенке ({w, d, anchor, lvl}); сетка обтекает их
     fixedCells: [],
@@ -2216,6 +2368,8 @@ const sanitizeContainer = (c0) => {
         show: !!ci.show,
     };
     delete c.wparts; // фича вставных стенок контейнера убрана
+    // доли при делении остатка (решатель): ключ "i:j", разумный диапазон
+    c.cellShares = Object.fromEntries(Object.entries(obj(c.cellShares)).map(([k, v]) => [k, num(v, 1, 0.1, 10)]).filter(([, v]) => Math.abs(v - 1) > 0.001));
     c.lockedCellW = obj(c.lockedCellW);
     c.lockedRows = obj(c.lockedRows);
     // явные размеры по рядам: только конечные положительные числа
@@ -2858,9 +3012,9 @@ function TrayGenerator() {
         // они привязаны к конкретной сетке (при смене рядов индексы ячеек
         // сдвигаются, поэтому сбрасываются и ширины ячеек)
         if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
-            patch = { rowColWs: null, lockedCellW: {}, ...patch };
+            patch = { rowColWs: null, lockedCellW: {}, cellShares: {}, ...patch };
         if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
-            patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, ...patch };
+            patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, cellShares: {}, ...patch };
         setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
         if (patch.cols !== undefined || patch.rows !== undefined ||
             patch.gridMode !== undefined || patch.cellWt !== undefined || patch.cellDt !== undefined ||
@@ -3598,7 +3752,16 @@ function TrayGenerator() {
             React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 6, flexWrap: "wrap" } },
                 lockBtn(colLocked, "ширина (эта ячейка)", () => toggleCellWLock(selection.i, selection.j)),
                 lockBtn(rowLocked, "глубина (весь ряд)", () => toggleRowLock(selection.j))),
-            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 } }, "\u00AB\u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u044D\u0442\u0443 \u044F\u0447\u0435\u0439\u043A\u0443\u00BB \u043F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0435\u0451 \u0432 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043D\u0443\u0442\u0440\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430: \u0436\u0451\u0441\u0442\u043A\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440 \u0438 \u044F\u043A\u043E\u0440\u044C \u043A \u0431\u043B\u0438\u0436\u0430\u0439\u0448\u0435\u043C\u0443 \u0443\u0433\u043B\u0443 \u0438\u043B\u0438 \u0441\u0442\u0435\u043D\u043A\u0435 (\u0431\u0435\u0437 \u043A\u043E\u043E\u0440\u0434\u0438\u043D\u0430\u0442 \u2014 \u043F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F\u0445 \u0431\u043E\u043A\u0441 \u0441\u043A\u043E\u043B\u044C\u0437\u0438\u0442 \u0432\u043C\u0435\u0441\u0442\u0435 \u0441\u043E \u0441\u0442\u0435\u043D\u043A\u043E\u0439, \u0441\u0435\u0442\u043A\u0430 \u043E\u0431\u0442\u0435\u043A\u0430\u0435\u0442 \u0435\u0433\u043E; \u0440\u044F\u0434 \u0438 \u043A\u043E\u043B\u043E\u043D\u043A\u0430 \u043D\u0435 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u044E\u0442\u0441\u044F). \u041C\u0435\u043B\u043A\u0438\u0435 \u0437\u0430\u043C\u043A\u0438 \u043D\u0438\u0436\u0435 \u2014 \u0434\u043B\u044F \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0441\u0435\u0442\u043A\u0438: \u0437\u0430\u043C\u043E\u043A \u0448\u0438\u0440\u0438\u043D\u044B \u0434\u0435\u0440\u0436\u0438\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u044D\u0442\u0443 \u044F\u0447\u0435\u0439\u043A\u0443 \u0432 \u0435\u0451 \u0440\u044F\u0434\u0443, \u0437\u0430\u043C\u043E\u043A \u0433\u043B\u0443\u0431\u0438\u043D\u044B \u2014 \u0432\u0435\u0441\u044C \u0440\u044F\u0434 (\u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u0443 \u0440\u044F\u0434\u0430 \u043E\u0431\u0449\u0430\u044F, \u044D\u0442\u043E \u043F\u043E\u043B\u043E\u0441\u0430)."),
+            !colLocked && (React.createElement(Param, { label: "\u0414\u043E\u043B\u044F \u043F\u0440\u0438 \u0434\u0435\u043B\u0435\u043D\u0438\u0438 \u043E\u0441\u0442\u0430\u0442\u043A\u0430", unit: "\u00D7", value: (cur.cellShares || {})[selection.i + ":" + selection.j] ?? 1, min: 0.5, max: 5, step: 0.5, onChange: (v) => {
+                    const key = selection.i + ":" + selection.j;
+                    const next = { ...(cur.cellShares || {}) };
+                    if (Math.abs(v - 1) < 0.001)
+                        delete next[key];
+                    else
+                        next[key] = v;
+                    updCur({ cellShares: next });
+                } })),
+            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 } }, "\u00AB\u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u044D\u0442\u0443 \u044F\u0447\u0435\u0439\u043A\u0443\u00BB \u043F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0435\u0451 \u0432 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043D\u0443\u0442\u0440\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430: \u0436\u0451\u0441\u0442\u043A\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440 \u0438 \u044F\u043A\u043E\u0440\u044C \u043A \u0431\u043B\u0438\u0436\u0430\u0439\u0448\u0435\u043C\u0443 \u0443\u0433\u043B\u0443 \u0438\u043B\u0438 \u0441\u0442\u0435\u043D\u043A\u0435 (\u0431\u0435\u0437 \u043A\u043E\u043E\u0440\u0434\u0438\u043D\u0430\u0442 \u2014 \u043F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F\u0445 \u0431\u043E\u043A\u0441 \u0441\u043A\u043E\u043B\u044C\u0437\u0438\u0442 \u0432\u043C\u0435\u0441\u0442\u0435 \u0441\u043E \u0441\u0442\u0435\u043D\u043A\u043E\u0439, \u0441\u0435\u0442\u043A\u0430 \u043E\u0431\u0442\u0435\u043A\u0430\u0435\u0442 \u0435\u0433\u043E; \u0440\u044F\u0434 \u0438 \u043A\u043E\u043B\u043E\u043D\u043A\u0430 \u043D\u0435 \u0431\u043B\u043E\u043A\u0438\u0440\u0443\u044E\u0442\u0441\u044F). \u041C\u0435\u043B\u043A\u0438\u0435 \u0437\u0430\u043C\u043A\u0438 \u043D\u0438\u0436\u0435 \u2014 \u0434\u043B\u044F \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0441\u0435\u0442\u043A\u0438: \u0437\u0430\u043C\u043E\u043A \u0448\u0438\u0440\u0438\u043D\u044B \u0434\u0435\u0440\u0436\u0438\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u044D\u0442\u0443 \u044F\u0447\u0435\u0439\u043A\u0443 \u0432 \u0435\u0451 \u0440\u044F\u0434\u0443, \u0437\u0430\u043C\u043E\u043A \u0433\u043B\u0443\u0431\u0438\u043D\u044B \u2014 \u0432\u0435\u0441\u044C \u0440\u044F\u0434 (\u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u0443 \u0440\u044F\u0434\u0430 \u043E\u0431\u0449\u0430\u044F, \u044D\u0442\u043E \u043F\u043E\u043B\u043E\u0441\u0430). \u00AB\u0414\u043E\u043B\u044F\u00BB \u2014 \u0432\u0435\u0441 \u043F\u0440\u0438 \u0434\u0435\u043B\u0435\u043D\u0438\u0438 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0433\u043E \u043C\u0435\u0441\u0442\u0430: \u044F\u0447\u0435\u0439\u043A\u0430 \u0441 \u0434\u043E\u043B\u0435\u0439 2 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442 \u0432\u0434\u0432\u043E\u0435 \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043E\u0441\u0435\u0434\u043A\u0438 \u0441 \u0434\u043E\u043B\u0435\u0439 1."),
             React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u044F\u0447\u0435\u0439\u043A\u0438", unit: "\u043C\u043C", value: firstH, min: 0, max: limits.maxH, step: 0.5, onChange: (v) => updWalls(keys.map((k) => k.key), { h: v }) }),
             React.createElement(Param, { label: "\u0423\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 (\u043B\u0435\u0441\u0435\u043D\u043A\u0430)", unit: "\u043C\u043C", value: getCellLvl(cur, selection.i, selection.j), min: 0, max: Math.max(0, cur.H - 4), step: 0.5, onChange: (v) => updCell(selection.i, selection.j, { lvl: v }) }),
             (() => {
@@ -3778,6 +3941,9 @@ function TrayGenerator() {
                         background: sub === t ? "#EFF6FF" : "#fff", color: sub === t ? SEL : "#3D4A5C",
                     } }, n)))),
                 React.createElement(Schematic, { c: cur, selection: selection, onSelect: handleSelect }),
+                layoutIssues(cur).map((iss, k) => (React.createElement("p", { key: k, style: { fontSize: 11.5, color: "#B45309", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "6px 9px", margin: "6px 0 0", lineHeight: 1.45 } },
+                    "\u26A0 ",
+                    iss.text))),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 12px", lineHeight: 1.45 } },
                     "\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 ",
                     React.createElement("b", null, "\u044F\u0447\u0435\u0439\u043A\u0443"),

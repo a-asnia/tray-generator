@@ -8,7 +8,7 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, DEFAULT_CORNER_R } from "./model/layout.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -84,9 +84,9 @@ export default function TrayGenerator() {
     // они привязаны к конкретной сетке (при смене рядов индексы ячеек
     // сдвигаются, поэтому сбрасываются и ширины ячеек)
     if (patch.cols !== undefined || patch.cellWt !== undefined || patch.gridMode !== undefined)
-      patch = { rowColWs: null, lockedCellW: {}, ...patch };
+      patch = { rowColWs: null, lockedCellW: {}, cellShares: {}, ...patch };
     if (patch.rows !== undefined || patch.cellDt !== undefined || patch.gridMode !== undefined)
-      patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, ...patch };
+      patch = { rowDs: null, lockedRows: {}, rowColWs: null, lockedCellW: {}, cellShares: {}, ...patch };
     setContainers((cs) => cs.map((c, idx) => (idx === sel ? { ...c, ...patch } : c)));
     if (
       patch.cols !== undefined || patch.rows !== undefined ||
@@ -890,8 +890,21 @@ export default function TrayGenerator() {
           {lockBtn(colLocked, "ширина (эта ячейка)", () => toggleCellWLock(selection.i, selection.j))}
           {lockBtn(rowLocked, "глубина (весь ряд)", () => toggleRowLock(selection.j))}
         </div>
+        {!colLocked && (
+          <Param
+            label="Доля при делении остатка" unit="×"
+            value={(cur.cellShares || {})[selection.i + ":" + selection.j] ?? 1}
+            min={0.5} max={5} step={0.5}
+            onChange={(v) => {
+              const key = selection.i + ":" + selection.j;
+              const next = { ...(cur.cellShares || {}) };
+              if (Math.abs(v - 1) < 0.001) delete next[key]; else next[key] = v;
+              updCur({ cellShares: next });
+            }}
+          />
+        )}
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
-          «Зафиксировать эту ячейку» превращает её в контейнер внутри контейнера: жёсткий размер и якорь к ближайшему углу или стенке (без координат — при изменениях бокс скользит вместе со стенкой, сетка обтекает его; ряд и колонка не блокируются). Мелкие замки ниже — для настройки сетки: замок ширины держит только эту ячейку в её ряду, замок глубины — весь ряд (глубина у ряда общая, это полоса).
+          «Зафиксировать эту ячейку» превращает её в контейнер внутри контейнера: жёсткий размер и якорь к ближайшему углу или стенке (без координат — при изменениях бокс скользит вместе со стенкой, сетка обтекает его; ряд и колонка не блокируются). Мелкие замки ниже — для настройки сетки: замок ширины держит только эту ячейку в её ряду, замок глубины — весь ряд (глубина у ряда общая, это полоса). «Доля» — вес при делении свободного места: ячейка с долей 2 получает вдвое больше соседки с долей 1.
         </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
@@ -1225,6 +1238,11 @@ export default function TrayGenerator() {
         </div>
 
         <Schematic c={cur} selection={selection} onSelect={handleSelect} />
+        {layoutIssues(cur).map((iss, k) => (
+          <p key={k} style={{ fontSize: 11.5, color: "#B45309", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "6px 9px", margin: "6px 0 0", lineHeight: 1.45 }}>
+            ⚠ {iss.text}
+          </p>
+        ))}
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 12px", lineHeight: 1.45 }}>
           Нажми на <b>ячейку</b> или <b>стенку</b> — на схеме или прямо на 3D-модели: нужная подвкладка откроется сама.
         </p>
