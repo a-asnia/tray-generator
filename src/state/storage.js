@@ -4,6 +4,7 @@
 
 import { CONN } from "../model/connectors.js";
 import { DEF_INSERTS } from "../model/inserts.js";
+import { DEF_WPARTS } from "../model/wallparts.js";
 import { layout } from "../model/layout.js";
 
 let nextId = 2;
@@ -28,6 +29,9 @@ export const makeContainer = (src, gx, gy) => ({
   // вставные стенки: направляющие на внутренних гранях, сами перегородки
   // печатаются отдельно и вдвигаются сверху
   inserts: { ...DEF_INSERTS },
+  // вставные стенки контейнера: база (дно + угловые стойки) и четыре
+  // плоские стенки, которые вдвигаются в стойки сверху
+  wparts: { ...DEF_WPARTS },
 });
 
 // ── Приведение чисел к разумным пределам ──
@@ -100,6 +104,13 @@ const sanitizeContainer = (c0) => {
     proj: num(ci.proj, 1.2, 0.4, 6),
     rail: num(ci.rail, 1.6, 0.6, 6),
     show: !!ci.show,
+  };
+  const cw2 = obj(c.wparts);
+  c.wparts = {
+    on: !!cw2.on,
+    tng: num(cw2.tng, 1.4, 0.6, 8),
+    clr: num(cw2.clr, 0.2, 0, 1),
+    post: num(cw2.post, 12, 4, 60),
   };
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);

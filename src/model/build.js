@@ -10,13 +10,30 @@ import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
+import { wpartsOf, wpGeom, wpSpans, wpOk } from "./wallparts.js";
 
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
 export function buildContainer(c, conn, opts = {}) {
   const { W, D, H, wall, wallOut, floor } = c;
   const L = layout(c);
-  const solids = [];
+  let solids = [];
+  // Собрать часть тел в отдельную ДЕТАЛЬ (вставная стенка контейнера):
+  // они помечаются part, чтобы экспорт мог разложить контейнер на детали,
+  // а превью по-прежнему показывало его собранным.
+  const asPart = (part, fn) => {
+    const acc = solids;
+    solids = [];
+    fn();
+    const got = solids;
+    solids = acc;
+    for (const b of got) b.part = part;
+    solids.push(...got);
+  };
+  // вставные стенки контейнера: детали отделяются, если соединение влезает
+  const WP = wpartsOf(c);
+  const wpOn = WP.on && wpOk(c);
+  const WPG = wpGeom(c);
   const tan = (deg) => Math.tan((deg * Math.PI) / 180);
 
   // Галтель: небольшое скругление внутреннего угла в месте примыкания
@@ -607,6 +624,65 @@ export function buildContainer(c, conn, opts = {}) {
     else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim);
   };
 
+  // ── Вставные стенки контейнера: шипы и угловые стойки ──
+  // Шип на конце стенки: тоньше самой стенки и утоплен от наружной
+  // плоскости, поэтому в стойке над ним и под ним остаётся материал —
+  // стенка держится от смещения внутрь и наружу.
+  const addTongues = (key, wc, sym, mapFn, wa, wb, sp, atA, atB) => {
+    const g = sp.g;
+    const off = sym ? wallOut / 2 : 0;             // mapFn ждёт смещение от оси профиля
+    const o0 = g.tOut - off, o1 = g.tOut + g.tng - off;
+    const hT = Math.max(1, Math.min(wc.h, H) - 1); // шип ниже кромки: не мешает валику
+    const quad = (u) => [mapFn(o0, 0, u), mapFn(o1, 0, u), mapFn(o1, hT, u), mapFn(o0, hT, u)];
+    if (atA && wa > -sp.tip + 0.01) solids.push(prismSolid(quad(-sp.tip), quad(wa), key));
+    if (atB && wb < sp.tip - 0.01) solids.push(prismSolid(quad(wb), quad(sp.tip), key));
+  };
+
+  // Угловая стойка: два слоя по толщине стенки со сквозным пазом между
+  // ними. Слои сходятся в самом углу — там стойка сплошная, поэтому
+  // наружный и внутренний слои держатся друг за друга.
+  const addPosts = () => {
+    const g = WPG;
+    const io = g.tOut - g.clr;              // наружный слой стойки
+    const ii = g.tOut + g.cw - g.clr;       // где начинается внутренний слой
+    for (const [side, dim, key, trimA, trimB] of [
+      ["n", W, "o:n:0", () => cutNW_ns, () => cutNE_ns],
+      ["s", W, `o:s:0`, () => cutSW_ns, () => cutSE_ns],
+      ["w", D, "o:w:0", () => cutNW_we, () => cutSW_we],
+      ["e", D, "o:e:0", () => cutNE_we, () => cutSE_we],
+    ]) {
+      const wc = getWall(c, key);
+      if (wc.h <= 0.3) continue;
+      const hP = Math.min(wc.h, H);
+      const along = side === "n" || side === "s";
+      const sym = !conn[side.toUpperCase()];
+      // смещение o отсчитывается от наружной плоскости внутрь
+      const at = (o) => (along
+        ? (oo, y, u) => [u, y, side === "n" ? -D / 2 + o + oo : D / 2 - o - oo]
+        : (oo, y, u) => [side === "w" ? -W / 2 + o + oo : W / 2 - o - oo, y, u]);
+      // слой стойки профилем — верхняя кромка скругляется как у стенки,
+      // а грань у паза получает заходную фаску
+      const slab = (o, thk, u0, u1, slabSym, tA, tB) => {
+        if (u1 - u0 < 0.05 || thk < 0.05) return;
+        const off = slabSym ? thk / 2 : 0;
+        pushProfiled(wallProfile(thk, hP, wc.rnd, slabSym), at(o + off), u0, u1, key, { a: tA, b: tB });
+      };
+      for (const [sgn, tr] of [[-1, trimA()], [1, trimB()]]) {
+        const uCorner = (sgn * dim) / 2;
+        const uInner = sgn * (dim / 2 - g.post);
+        const uSolid = sgn * (dim / 2 - wallOut);
+        const lo = Math.min(uInner, uSolid), hi = Math.max(uInner, uSolid);
+        const cLo = Math.min(uCorner, uSolid), cHi = Math.max(uCorner, uSolid);
+        // сплошной кусок у самого угла — обычным профилем стенки
+        slab(0, wallOut, cLo, cHi, sym, sgn < 0 ? tr : 0, sgn > 0 ? tr : 0);
+        // наружный слой: у стороны с замком плоскость обязана быть ровной
+        slab(0, io, lo, hi, sym, 0, 0);
+        // внутренний слой: скругление с обеих сторон (кромка и фаска у паза)
+        slab(ii, wallOut - ii, lo, hi, true, 0, 0);
+      }
+    }
+  };
+
   // ── Радиусы наружных вертикальных углов ──
   // Считаются до построения стенок и пола: стенки укорачивают торцы на эту
   // величину, пол вырезает у себя квадратик угла, а само тело угла ставится
@@ -777,11 +853,18 @@ export function buildContainer(c, conn, opts = {}) {
           : (o, y, x) => [x, y, D / 2 - off - o];
         // в углах корпуса торец подрезается под скругление W/E-стенки
         const rL = side === "n" ? cutNW_ns : cutSW_ns, rR = side === "n" ? cutNE_ns : cutSE_ns;
-        for (const [a, b] of splitRange(bx0, bx1, zones))
-          pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
-            a: a <= -W / 2 + 0.01 ? rL : 0,
-            b: b >= W / 2 - 0.01 ? rR : 0,
-          });
+        // вставная стенка: тело идёт только между стойками, углы держит база
+        const sp = wpOn ? wpSpans(c, W) : null;
+        const wa = sp ? Math.max(bx0, -sp.body) : bx0, wb = sp ? Math.min(bx1, sp.body) : bx1;
+        const body = () => {
+          for (const [a, b] of splitRange(wa, wb, zones))
+            pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
+              a: !sp && a <= -W / 2 + 0.01 ? rL : 0,
+              b: !sp && b >= W / 2 - 0.01 ? rR : 0,
+            });
+          if (sp) addTongues(key, wc, sym, mapFn, wa, wb, sp, i === 0, i === L.nColsAt(jRow) - 1);
+        };
+        if (wpOn) asPart(`wall:${side}`, body); else body();
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         // пандус не должен войти в полость прижатого к стенке бокса
         for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
@@ -803,17 +886,25 @@ export function buildContainer(c, conn, opts = {}) {
           ? (o, y, z) => [-W / 2 + off + o, y, z]
           : (o, y, z) => [W / 2 - off - o, y, z];
         const rT = side === "w" ? cutNW_we : cutNE_we, rB = side === "w" ? cutSW_we : cutSE_we;
-        for (const [a, b] of splitRange(bz0, bz1, zones))
-          pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
-            a: a <= -D / 2 + 0.01 ? rT : 0,
-            b: b >= D / 2 - 0.01 ? rB : 0,
-          });
+        const sp = wpOn ? wpSpans(c, D) : null;
+        const wa = sp ? Math.max(bz0, -sp.body) : bz0, wb = sp ? Math.min(bz1, sp.body) : bz1;
+        const body = () => {
+          for (const [a, b] of splitRange(wa, wb, zones))
+            pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
+              a: !sp && a <= -D / 2 + 0.01 ? rT : 0,
+              b: !sp && b >= D / 2 - 0.01 ? rB : 0,
+            });
+          if (sp) addTongues(key, wc, sym, mapFn, wa, wb, sp, j === 0, j === L.nRows - 1);
+        };
+        if (wpOn) asPart(`wall:${side}`, body); else body();
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
           addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);
       }
     }
   }
+  if (wpOn) addPosts();
+
   // тела наружных вертикальных углов
   addCorner(-W / 2 + rNW, -D / 2 + rNW, -1, -1, getWall(c, kN0).h, rNW, kN0);
   addCorner(W / 2 - rNE, -D / 2 + rNE, 1, -1, getWall(c, kNL).h, rNE, kNL);
