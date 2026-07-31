@@ -1538,7 +1538,7 @@ export default function TrayGenerator() {
             <span style={{ fontFamily: MONO }}>{volume.toFixed(1)} см³</span>
           </div>
           <div style={{ color: "#B4BECB", marginLeft: "auto" }}>
-            Вращение — перетаскиванием, зум — колесом
+            Вращение — левой кнопкой, сдвиг — правой, зум — колесом
           </div>
         </div>
       </div>
