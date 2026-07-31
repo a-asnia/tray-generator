@@ -77,6 +77,7 @@ const sanitizeContainer = (c0) => {
   c.wall = num(c.wall, 1.6, 0.2, 40);
   c.wallOut = num(c.wallOut, CONN.minWall, 0.2, 40);
   c.floor = num(c.floor, 1.6, 0.2, 40);
+  if (c.cornerR !== undefined) c.cornerR = num(c.cornerR, 2, 0, 20);
   c.gridMode = c.gridMode === "size" ? "size" : "count";
   c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
   c.cells = Object.fromEntries(

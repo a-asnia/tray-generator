@@ -45,7 +45,20 @@ const withoutF = buildContainer(base, noConn, { fillets: false });
 ok(`галтели добавились (+${(withF.length - withoutF.length)} тел)`, withF.length > withoutF.length);
 ok("объём с галтелями больше", solidsVolume(withF) > solidsVolume(withoutF) + 0.01);
 // 2 перегородки × 2 конца × 2 угла + 4 угла корпуса = 16 галтелей × 4 сегмента веера
-ok(`число галтельных тел с учётом углов корпуса и Т-стыков (${withF.length - withoutF.length})`, (withF.length - withoutF.length) === 64);
+// 16 мест × 4 клина × 8 слоёв (тело + 7 граней дуги, по которым галтель
+// отступает вместе с кромкой)
+ok(`число галтельных тел с учётом углов корпуса и Т-стыков (${withF.length - withoutF.length})`, (withF.length - withoutF.length) === 512);
+
+// ── галтель доходит до кромки, а не обрывается площадкой ниже ──
+{
+  const gap = (solids, h) => {
+    let top = -1e9;
+    for (const b of solids) for (const t of b.tris) for (const p of t) top = Math.max(top, p[1]);
+    return h - top;
+  };
+  const only = withF.filter((b) => !withoutF.some((x) => x === b));
+  ok(`верх галтели приходит к кромке (недобор ${gap(only, base.H).toFixed(2)} мм)`, gap(only, base.H) < 0.05);
+}
 // все точки галтелей внутри контейнера и не выше высоты стенок
 let inBounds = true;
 const fSolids = withF.slice(withoutF.length);

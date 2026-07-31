@@ -8,8 +8,8 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
-import { wpartsOf, wpGeom, wpSize, wpFlatten, wpOn, wpActive, SIDES, SIDE_NAME } from "./model/wallparts.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
+import { wpartsOf, wpGeom, wpSize, wpFlatten, wpOn, SIDES, SIDE_NAME } from "./model/wallparts.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -1260,6 +1260,14 @@ export default function TrayGenerator() {
         )}
         <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
         <Param label="Толщина дна" unit="мм" value={cur.floor} min={0.8} max={5} step={0.1} onChange={(v) => updCur({ floor: v })} />
+        <Param
+          label="Скругление углов" unit="мм" value={cur.cornerR ?? DEFAULT_CORNER_R}
+          min={0} max={Math.min(6, cur.wallOut)} step={0.1}
+          onChange={(v) => updCur({ cornerR: v })}
+        />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
+          Наружные вертикальные углы. Должно быть заметно больше скругления кромки, иначе у самого верха радиус угла обнуляется и угол вырождается в остриё.
+        </p>
 
         </Collapse>
 

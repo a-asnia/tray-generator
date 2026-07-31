@@ -8,7 +8,7 @@
 import { prismSolid, boxSolid, rampSolid, wallProfile, ARC_SEGS } from "../geometry/solids.js";
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
-import { layout, getWall, getCellLvl } from "./layout.js";
+import { layout, getWall, getCellLvl, DEFAULT_CORNER_R } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
 import { wpGeom, wpOn, wpActive, wpSpan, wpSlotSpan } from "./wallparts.js";
 
@@ -48,21 +48,49 @@ export function buildContainer(c, conn0, opts = {}) {
   // ownBox — индекс бокса, чья это собственная галтель (его полость
   // проверкой не отсекается); для остальных галтель не должна попасть
   // внутрь полости бокса (например, когда бокс занимает угол корпуса)
-  const addFillet = (cx, cz, dx, dz, h, tag, ownBox = -1) => {
+  // h — высота стыка, rTr — скругление верхних кромок смыкающихся стенок.
+  // В зоне скругления грани отступают от полости, и галтель отступает
+  // вместе с ними ровно теми же гранями дуги — тогда её верх приходит
+  // заподлицо с кромкой. Если этого не делать, галтель обрывается плоской
+  // площадкой ниже кромки, и во внутренних углах торчат острые уголки.
+  const addFillet = (cx, cz, dx, dz, h, tag, ownBox = -1, rTr = 0) => {
     if (opts.fillets === false || h < 1.5) return;
     const r = FILLET_R;
     const qx0 = Math.min(cx, cx + dx * r), qx1 = Math.max(cx, cx + dx * r);
     const qz0 = Math.min(cz, cz + dz * r), qz1 = Math.max(cz, cz + dz * r);
     for (const f of L.fixed)
       if (f.k !== ownBox && qx1 > f.x0 + 0.01 && qx0 < f.x1 - 0.01 && qz1 > f.z0 + 0.01 && qz0 < f.z1 - 0.01) return;
-    const pts = [];
-    for (let s = 0; s <= FILLET_SEGS; s++) {
-      const t = (s / FILLET_SEGS) * (Math.PI / 2);
-      pts.push([cx + dx * r * (1 - Math.sin(t)), cz + dz * r * (1 - Math.cos(t))]);
-    }
-    for (let s = 0; s + 1 < pts.length; s++) {
-      const q = [[cx, cz], pts[s], pts[s + 1], pts[s + 1]];
-      solids.push(prismSolid(q.map(([x, z]) => [x, 0, z]), q.map(([x, z]) => [x, h, z]), tag));
+    // веер галтели, сдвинутый наружу полости на o
+    const fan = (o) => {
+      const c0 = [cx - dx * o, cz - dz * o];
+      const pts = [];
+      for (let s = 0; s <= FILLET_SEGS; s++) {
+        const t = (s / FILLET_SEGS) * (Math.PI / 2);
+        pts.push([c0[0] + dx * r * (1 - Math.sin(t)), c0[1] + dz * r * (1 - Math.cos(t))]);
+      }
+      return { c0, pts };
+    };
+    const layer = (lo, hi, y0, y1) => {
+      if (y1 - y0 < 0.005) return;
+      for (let s = 0; s + 1 < lo.pts.length; s++) {
+        const qa = [lo.c0, lo.pts[s], lo.pts[s + 1], lo.pts[s + 1]].map(([x, z]) => [x, y0, z]);
+        const qb = [hi.c0, hi.pts[s], hi.pts[s + 1], hi.pts[s + 1]].map(([x, z]) => [x, y1, z]);
+        solids.push(prismSolid(qa, qb, tag));
+      }
+    };
+    const rr = Math.max(0, Math.min(rTr, h - 1));
+    const f0 = fan(0);
+    if (rr < 0.05) { layer(f0, f0, 0, h); return; }
+    const hb = h - rr;
+    layer(f0, f0, 0, hb);
+    // те же грани дуги, что и у профиля стенки (wallProfile)
+    let prev = f0, prevY = hb;
+    for (let k = 1; k <= ARC_SEGS; k++) {
+      const t = (k / ARC_SEGS) * (Math.PI / 2);
+      const f = fan(rr * (1 - Math.cos(t)));
+      const y = hb + rr * Math.sin(t);
+      layer(prev, f, prevY, y);
+      prev = f; prevY = y;
     }
   };
   // Скругление ставится только между ВЕРТИКАЛЬНЫМИ стенками: если стенка
@@ -112,9 +140,15 @@ export function buildContainer(c, conn0, opts = {}) {
   // кромки (ρ = r·cos t при подъёме r·sin t). На каждой высоте крайняя
   // точка сектора лежит ровно в плоскости соответствующей стенки, отступив
   // внутрь на o = r − ρ, — поэтому стык со стенками получается заподлицо.
-  const addCorner = (px, pz, sx, sz, h, r, tag) => {
-    if (r < 0.05) return;
-    const SEG = 6; // клиньев в секторе (угол 90°)
+  // Тело наружного угла. Rc — радиус скругления угла по плану, rEdge —
+  // радиус скругления верхней кромки. В зоне кромки радиус угла убывает
+  // на тот же отступ, что уходит внутрь наружная плоскость: ρ = Rc − o.
+  // Поэтому у самой кромки угол остаётся скруглённым радиусом Rc − rEdge.
+  // Если брать Rc = rEdge, наверху радиус схлопывается в ноль и угол
+  // вырождается в остриё — именно это и выглядело странно.
+  const addCorner = (px, pz, sx, sz, h, rEdge, Rc, tag) => {
+    if (Rc < 0.05) return;
+    const SEG = 8; // клиньев в секторе (угол 90°)
     const ring = (rho) => {
       const pts = [[px, pz]];
       for (let k = 0; k <= SEG; k++) {
@@ -123,7 +157,6 @@ export function buildContainer(c, conn0, opts = {}) {
       }
       return pts;
     };
-    // слой между двумя высотами: сектор радиуса rA снизу и rB сверху
     const layer = (rA, rB, y0, y1) => {
       if (y1 - y0 < 0.005) return;
       const a = ring(rA), b = ring(rB);
@@ -133,13 +166,14 @@ export function buildContainer(c, conn0, opts = {}) {
         solids.push(prismSolid(qa, qb, tag));
       }
     };
-    const hb = h - r;
-    layer(r, r, 0, hb); // вертикальная часть
-    let prevR = r, prevY = hb;
+    const hb = h - rEdge;
+    layer(Rc, Rc, 0, hb); // вертикальная часть — радиус постоянный
+    let prevR = Rc, prevY = hb;
     for (let k = 1; k <= ARC_SEGS; k++) {
       const t = (k / ARC_SEGS) * (Math.PI / 2);
-      const rho = Math.max(0.02, r * Math.cos(t));
-      const y = hb + r * Math.sin(t);
+      const o = rEdge * (1 - Math.cos(t));      // отступ наружной плоскости
+      const rho = Math.max(0.02, Rc - o);
+      const y = hb + rEdge * Math.sin(t);
       layer(prevR, rho, prevY, y);
       prevR = rho; prevY = y;
     }
@@ -175,13 +209,16 @@ export function buildContainer(c, conn0, opts = {}) {
       return ins;
     };
   };
+  // Радиус скругления угла по плану: настройка контейнера, но не меньше
+  // радиуса кромки (иначе угол вырождается) и не больше толщины стенки
+  // (иначе дуга съела бы внутреннюю грань).
   const cornerR = (kA, symA, kB, symB, sA, sB) => {
     if (wpIns(sA) || wpIns(sB)) return 0;
     const rA = rOuter(kA, wallOut, symA), rB = rOuter(kB, wallOut, symB);
     if (rA < 0.05 || Math.abs(rA - rB) > 0.01) return 0;
     const wA = getWall(c, kA), wB = getWall(c, kB);
     if (Math.abs(wA.h - wB.h) > 0.01 || wA.h <= rA + 0.3) return 0;
-    return rA;
+    return Math.min(Math.max(c.cornerR ?? DEFAULT_CORNER_R, rA), wallOut, Math.min(W, D) / 4);
   };
   // экструзия профиля стенки вдоль отрезка s0..s1; mapFn(смещение, y, s) → точка
   // trim = {a, b} — насколько укоротить торцы: в углу корпуса на радиус
@@ -907,10 +944,12 @@ export function buildContainer(c, conn0, opts = {}) {
   }
 
   // тела наружных вертикальных углов
-  addCorner(-W / 2 + rNW, -D / 2 + rNW, -1, -1, getWall(c, kN0).h, rNW, kN0);
-  addCorner(W / 2 - rNE, -D / 2 + rNE, 1, -1, getWall(c, kNL).h, rNE, kNL);
-  addCorner(-W / 2 + rSW, D / 2 - rSW, -1, 1, getWall(c, kS0).h, rSW, kS0);
-  addCorner(W / 2 - rSE, D / 2 - rSE, 1, 1, getWall(c, kSL).h, rSE, kSL);
+  const eN = rOuter(kN0, wallOut, symN), eS = rOuter(kS0, wallOut, symS);
+  const eW = rOuter(kW0, wallOut, symW), eE = rOuter(kE0, wallOut, symE);
+  addCorner(-W / 2 + rNW, -D / 2 + rNW, -1, -1, getWall(c, kN0).h, Math.min(eN, eW), rNW, kN0);
+  addCorner(W / 2 - rNE, -D / 2 + rNE, 1, -1, getWall(c, kNL).h, Math.min(eN, eE), rNE, kNL);
+  addCorner(-W / 2 + rSW, D / 2 - rSW, -1, 1, getWall(c, kS0).h, Math.min(eS, eW), rSW, kS0);
+  addCorner(W / 2 - rSE, D / 2 - rSE, 1, 1, getWall(c, kSL).h, Math.min(eS, eE), rSE, kSL);
 
   // галтели во внутренних углах самого корпуса (4 угла контейнера)
   {
@@ -919,12 +958,12 @@ export function buildContainer(c, conn0, opts = {}) {
     const sL = "o:s:0", sR = `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
     const wT = "o:w:0", wB = `o:w:${L.nRows - 1}`, eT = "o:e:0", eB = `o:e:${L.nRows - 1}`;
     // высота галтели — до начала скругления кромок обеих стенок
-    const hCorner = (kA, symA, kB, symB) =>
-      Math.min(getWall(c, kA).h - rEff(kA, wallOut, symA), getWall(c, kB).h - rEff(kB, wallOut, symB));
-    if (flatWall(nL) && flatWall(wT)) addFillet(-cx, -cz, 1, 1, hCorner(nL, symN, wT, symW), nL);
-    if (flatWall(nR) && flatWall(eT)) addFillet(cx, -cz, -1, 1, hCorner(nR, symN, eT, symE), nR);
-    if (flatWall(sL) && flatWall(wB)) addFillet(-cx, cz, 1, -1, hCorner(sL, symS, wB, symW), sL);
-    if (flatWall(sR) && flatWall(eB)) addFillet(cx, cz, -1, -1, hCorner(sR, symS, eB, symE), sR);
+    const hCorner = (kA, kB) => Math.min(getWall(c, kA).h, getWall(c, kB).h);
+    const rCorner = (kA, symA, kB, symB) => Math.min(rEff(kA, wallOut, symA), rEff(kB, wallOut, symB));
+    if (flatWall(nL) && flatWall(wT)) addFillet(-cx, -cz, 1, 1, hCorner(nL, wT), nL, -1, rCorner(nL, symN, wT, symW));
+    if (flatWall(nR) && flatWall(eT)) addFillet(cx, -cz, -1, 1, hCorner(nR, eT), nR, -1, rCorner(nR, symN, eT, symE));
+    if (flatWall(sL) && flatWall(wB)) addFillet(-cx, cz, 1, -1, hCorner(sL, wB), sL, -1, rCorner(sL, symS, wB, symW));
+    if (flatWall(sR) && flatWall(eB)) addFillet(cx, cz, -1, -1, hCorner(sR, eB), sR, -1, rCorner(sR, symS, eB, symE));
   }
 
   // В male-зонах стенка ставится обратно на полную высоту (несёт рельс) —
@@ -1048,9 +1087,10 @@ export function buildContainer(c, conn0, opts = {}) {
           if (meFlat && flatWall(other)) {
             const zA = j === 0 ? -D / 2 + wallOut : z0;
             const rOther = j === 0 ? rEff(other, wallOut, !conn.N) : rEff(other, wall, true);
-            const hF = Math.min(hAtEnd(wc, true) - rMe, getWall(c, other).h - rOther);
-            addFillet(xd - wall / 2, zA, -1, 1, hF, key);
-            addFillet(xd + wall / 2, zA, 1, 1, hF, key);
+            const hF = Math.min(hAtEnd(wc, true), getWall(c, other).h);
+            const rF = Math.min(rMe, rOther);
+            addFillet(xd - wall / 2, zA, -1, 1, hF, key, -1, rF);
+            addFillet(xd + wall / 2, zA, 1, 1, hF, key, -1, rF);
           }
         }
         if (segs.length && segs[segs.length - 1][1] >= bz1 - 0.01) {
@@ -1058,21 +1098,22 @@ export function buildContainer(c, conn0, opts = {}) {
           if (meFlat && flatWall(other)) {
             const zB = j === L.nRows - 1 ? D / 2 - wallOut : z1;
             const rOther = j === L.nRows - 1 ? rEff(other, wallOut, !conn.S) : rEff(other, wall, true);
-            const hF = Math.min(hAtEnd(wc, false) - rMe, getWall(c, other).h - rOther);
-            addFillet(xd - wall / 2, zB, -1, -1, hF, key);
-            addFillet(xd + wall / 2, zB, 1, -1, hF, key);
+            const hF = Math.min(hAtEnd(wc, false), getWall(c, other).h);
+            const rF = Math.min(rMe, rOther);
+            addFillet(xd - wall / 2, zB, -1, -1, hF, key, -1, rF);
+            addFillet(xd + wall / 2, zB, 1, -1, hF, key, -1, rF);
           }
         }
         // концы, упирающиеся в стенку фиксированного бокса
         if (meFlat) for (const [a, b] of segs) {
-          const hB = wc.h - rMe;
+          const hB = wc.h;
           if (a > bz0 + 0.01) {
-            addFillet(xd - wall / 2, a, -1, 1, hB, key);
-            addFillet(xd + wall / 2, a, 1, 1, hB, key);
+            addFillet(xd - wall / 2, a, -1, 1, hB, key, -1, rMe);
+            addFillet(xd + wall / 2, a, 1, 1, hB, key, -1, rMe);
           }
           if (b < bz1 - 0.01) {
-            addFillet(xd - wall / 2, b, -1, -1, hB, key);
-            addFillet(xd + wall / 2, b, 1, -1, hB, key);
+            addFillet(xd - wall / 2, b, -1, -1, hB, key, -1, rMe);
+            addFillet(xd + wall / 2, b, 1, -1, hB, key, -1, rMe);
           }
         }
       }
@@ -1104,25 +1145,27 @@ export function buildContainer(c, conn0, opts = {}) {
         const rW = Math.max(rEff(`o:w:${j}`, wallOut, !conn.W), rEff(`o:w:${j + 1}`, wallOut, !conn.W));
         const rE = Math.max(rEff(`o:e:${j}`, wallOut, !conn.E), rEff(`o:e:${j + 1}`, wallOut, !conn.E));
         if (i === 0 && segs.length && segs[0][0] <= bx0 + 0.01 && meFlatH && flatWall(`o:w:${j}`) && flatWall(`o:w:${j + 1}`)) {
-          const hF = Math.min(hAtEnd(wc, true) - rMeH, getWall(c, `o:w:${j}`).h - rW, getWall(c, `o:w:${j + 1}`).h - rW);
-          addFillet(-W / 2 + wallOut, zd - wall / 2, 1, -1, hF, key);
-          addFillet(-W / 2 + wallOut, zd + wall / 2, 1, 1, hF, key);
+          const hF = Math.min(hAtEnd(wc, true), getWall(c, `o:w:${j}`).h, getWall(c, `o:w:${j + 1}`).h);
+          const rF = Math.min(rMeH, rW);
+          addFillet(-W / 2 + wallOut, zd - wall / 2, 1, -1, hF, key, -1, rF);
+          addFillet(-W / 2 + wallOut, zd + wall / 2, 1, 1, hF, key, -1, rF);
         }
         if (i === L.nColsAt(j) - 1 && segs.length && segs[segs.length - 1][1] >= bx1 - 0.01 && meFlatH && flatWall(`o:e:${j}`) && flatWall(`o:e:${j + 1}`)) {
-          const hF = Math.min(hAtEnd(wc, false) - rMeH, getWall(c, `o:e:${j}`).h - rE, getWall(c, `o:e:${j + 1}`).h - rE);
-          addFillet(W / 2 - wallOut, zd - wall / 2, -1, -1, hF, key);
-          addFillet(W / 2 - wallOut, zd + wall / 2, -1, 1, hF, key);
+          const hF = Math.min(hAtEnd(wc, false), getWall(c, `o:e:${j}`).h, getWall(c, `o:e:${j + 1}`).h);
+          const rF = Math.min(rMeH, rE);
+          addFillet(W / 2 - wallOut, zd - wall / 2, -1, -1, hF, key, -1, rF);
+          addFillet(W / 2 - wallOut, zd + wall / 2, -1, 1, hF, key, -1, rF);
         }
         // концы, упирающиеся в стенку фиксированного бокса
         if (meFlatH) for (const [a, b] of segs) {
-          const hB = wc.h - rMeH;
+          const hB = wc.h;
           if (a > bx0 + 0.01) {
-            addFillet(a, zd - wall / 2, 1, -1, hB, key);
-            addFillet(a, zd + wall / 2, 1, 1, hB, key);
+            addFillet(a, zd - wall / 2, 1, -1, hB, key, -1, rMeH);
+            addFillet(a, zd + wall / 2, 1, 1, hB, key, -1, rMeH);
           }
           if (b < bx1 - 0.01) {
-            addFillet(b, zd - wall / 2, -1, -1, hB, key);
-            addFillet(b, zd + wall / 2, -1, 1, hB, key);
+            addFillet(b, zd - wall / 2, -1, -1, hB, key, -1, rMeH);
+            addFillet(b, zd + wall / 2, -1, 1, hB, key, -1, rMeH);
           }
         }
       }
@@ -1154,28 +1197,28 @@ export function buildContainer(c, conn0, opts = {}) {
       const cellSize = orient === "z" ? f.z1 - f.z0 : f.x1 - f.x0;
       addRamp(orient, facePos, dir, span[0], span[1], hRamp, wc.t1, cellSize, wall / 2, wall, wc, floor + lvl, key);
       // галтели там, где стенка бокса упирается в корпус (без пандусов);
-      // высота — до начала скругления кромки, иначе галтель торчит
-      const hBoxF = wc.h - rEff(key, wall, true);
+      // галтель идёт до кромки, отступая вместе с ней (rTr)
+      const hBoxF = wc.h, rBoxF = rEff(key, wall, true);
       if (!flatWall(key)) { /* наклонная стенка бокса — галтели не нужны */ }
       else if (orient === "x") {
         const faceLo = side === "w" ? f.x0 - wall : f.x1, faceHi = side === "w" ? f.x0 : f.x1 + wall;
         if (!f.own.n) {
-          addFillet(faceLo, -D / 2 + wallOut, -1, 1, hBoxF, key);
-          addFillet(faceHi, -D / 2 + wallOut, 1, 1, hBoxF, key);
+          addFillet(faceLo, -D / 2 + wallOut, -1, 1, hBoxF, key, -1, rBoxF);
+          addFillet(faceHi, -D / 2 + wallOut, 1, 1, hBoxF, key, -1, rBoxF);
         }
         if (!f.own.s) {
-          addFillet(faceLo, D / 2 - wallOut, -1, -1, hBoxF, key);
-          addFillet(faceHi, D / 2 - wallOut, 1, -1, hBoxF, key);
+          addFillet(faceLo, D / 2 - wallOut, -1, -1, hBoxF, key, -1, rBoxF);
+          addFillet(faceHi, D / 2 - wallOut, 1, -1, hBoxF, key, -1, rBoxF);
         }
       } else {
         const faceLo = side === "n" ? f.z0 - wall : f.z1, faceHi = side === "n" ? f.z0 : f.z1 + wall;
         if (!f.own.w) {
-          addFillet(-W / 2 + wallOut, faceLo, 1, -1, hBoxF, key);
-          addFillet(-W / 2 + wallOut, faceHi, 1, 1, hBoxF, key);
+          addFillet(-W / 2 + wallOut, faceLo, 1, -1, hBoxF, key, -1, rBoxF);
+          addFillet(-W / 2 + wallOut, faceHi, 1, 1, hBoxF, key, -1, rBoxF);
         }
         if (!f.own.e) {
-          addFillet(W / 2 - wallOut, faceLo, -1, -1, hBoxF, key);
-          addFillet(W / 2 - wallOut, faceHi, -1, 1, hBoxF, key);
+          addFillet(W / 2 - wallOut, faceLo, -1, -1, hBoxF, key, -1, rBoxF);
+          addFillet(W / 2 - wallOut, faceHi, -1, 1, hBoxF, key, -1, rBoxF);
         }
       }
     }
@@ -1193,15 +1236,17 @@ export function buildContainer(c, conn0, opts = {}) {
         if (s === "s") return `o:s:${Math.min(L.cellIndexAt(L.nRows - 1, (f.x0 + f.x1) / 2), L.nColsAt(L.nRows - 1) - 1)}`;
         return `o:${s}:0`;
       };
-      // высота — до начала скругления кромки соответствующей стенки
-      const hSide = (s) => f.own[s]
-        ? getWall(c, sideKey(s)).h - rEff(sideKey(s), wall, true)
-        : outerH(s) - rEff(sideKey(s), wallOut, !conn[s.toUpperCase()]);
+      const hSide = (s) => (f.own[s] ? getWall(c, sideKey(s)).h : outerH(s));
+      // скругление кромки этой стороны — за ним галтель и отступает
+      const rSide = (s) => (f.own[s]
+        ? rEff(sideKey(s), wall, true)
+        : rEff(sideKey(s), wallOut, !conn[s.toUpperCase()]));
       const pair = (a, b) => flatWall(sideKey(a)) && flatWall(sideKey(b));
-      if (pair("n", "w")) addFillet(f.x0, f.z0, 1, 1, Math.min(hSide("n"), hSide("w")), `fx:${f.k}`, f.k);
-      if (pair("n", "e")) addFillet(f.x1, f.z0, -1, 1, Math.min(hSide("n"), hSide("e")), `fx:${f.k}`, f.k);
-      if (pair("s", "w")) addFillet(f.x0, f.z1, 1, -1, Math.min(hSide("s"), hSide("w")), `fx:${f.k}`, f.k);
-      if (pair("s", "e")) addFillet(f.x1, f.z1, -1, -1, Math.min(hSide("s"), hSide("e")), `fx:${f.k}`, f.k);
+      const hr = (a, b) => [Math.min(hSide(a), hSide(b)), Math.min(rSide(a), rSide(b))];
+      if (pair("n", "w")) { const [hh, rr] = hr("n", "w"); addFillet(f.x0, f.z0, 1, 1, hh, `fx:${f.k}`, f.k, rr); }
+      if (pair("n", "e")) { const [hh, rr] = hr("n", "e"); addFillet(f.x1, f.z0, -1, 1, hh, `fx:${f.k}`, f.k, rr); }
+      if (pair("s", "w")) { const [hh, rr] = hr("s", "w"); addFillet(f.x0, f.z1, 1, -1, hh, `fx:${f.k}`, f.k, rr); }
+      if (pair("s", "e")) { const [hh, rr] = hr("s", "e"); addFillet(f.x1, f.z1, -1, -1, hh, `fx:${f.k}`, f.k, rr); }
     }
     // пол бокса: полость + заход под собственные стенки; у прижатых
     // сторон — под внешнюю стенку

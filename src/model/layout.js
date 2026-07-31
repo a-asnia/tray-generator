@@ -176,6 +176,10 @@ export function layout(c) {
 // у стенок с замком скругляется только внутренняя сторона — наружная
 // плоскость остаётся ровной для стыковки и пазов
 export const DEFAULT_RND = 0.8;
+// Скругление наружных вертикальных углов по плану. Должно быть заметно
+// больше скругления кромки: иначе у самой кромки радиус угла обнуляется
+// и угол вырождается в остриё.
+export const DEFAULT_CORNER_R = 2;
 export const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
 export function getWall(c, key) {
   const w = c.walls[key];

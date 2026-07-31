@@ -81,11 +81,12 @@ check("толстые стенки", mk({ wall: 4, wallOut: 6, floor: 4 }), noCo
 {
   const c = mk();
   const solids = buildContainer(c, noConn, { fillets: false });
-  const r = 0.8;                       // скругление по умолчанию
-  const px = -50 + r, pz = -50 + r;    // центр скругления угла
-  const N = 26, M = 90;                // сетка по плану и по высоте
+  const r = 0.8;                       // скругление кромки
+  const Rc = 2;                        // скругление угла по плану
+  const px = -50 + Rc, pz = -50 + Rc;  // центр скругления угла
+  const N = 30, M = 90;                // сетка по плану и по высоте
   let vol = 0;
-  const dx = r / N, dz = r / N, dy = c.H / M;
+  const dx = Rc / N, dz = Rc / N, dy = c.H / M;
   for (let i = 0; i < N; i++)
     for (let j = 0; j < N; j++)
       for (let k = 0; k < M; k++) {
@@ -94,11 +95,11 @@ check("толстые стенки", mk({ wall: 4, wallOut: 6, floor: 4 }), noCo
       }
   // расчётный объём: ниже hb — четверть круга радиуса r, выше — сектор ρ=r·cos t
   const hb = c.H - r;
-  let want = (Math.PI / 4) * r * r * hb;
+  let want = (Math.PI / 4) * Rc * Rc * hb;
   const S = 400;
   for (let k = 0; k < S; k++) {
     const t = ((k + 0.5) / S) * (Math.PI / 2);
-    const rho = r * Math.cos(t);
+    const rho = Rc - r * (1 - Math.cos(t));   // радиус угла убывает на отступ кромки
     want += (Math.PI / 4) * rho * rho * r * Math.cos(t) * (Math.PI / 2 / S);
   }
   const err = Math.abs(vol - want) / want;
