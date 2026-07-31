@@ -24,6 +24,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const setNum = async (label, v) => {
@@ -35,20 +45,22 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   const resetBtnCount = () => page.locator("button", { hasText: /Сбросить проект/ }).count();
 
   // «Сбросить проект» нет на Модели и Принтере, есть на Раскладке
-  ok("нет сброса на вкладке Модель", (await resetBtnCount()) === 0);
+  ok("нет сброса на вкладке Контейнеры", (await resetBtnCount()) === 0);
   await page.locator("button", { hasText: /^Принтер$/ }).click();
   ok("нет сброса на вкладке Принтер", (await resetBtnCount()) === 0);
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   ok("сброс есть на вкладке Раскладка", (await resetBtnCount()) === 1);
 
   // настройки ячеек уехали в «Редактор стенок»
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   ok("группа переименована в толщины", await page.getByText("Толщина стенок и дна").count());
   ok("старой группы «Ячейки и перегородки» нет", (await page.getByText("Ячейки и перегородки").count()) === 0);
   ok("группа «Деление на ячейки» есть", await page.locator('button:has-text("Деление на ячейки")').count());
-  ok("группа «Редактор сегментов» есть", await page.locator('button:has-text("Редактор сегментов")').count());
+  await goSub("Стенки");
+  ok("группа настроек стенки есть", await page.locator('button:has-text("Настройки стенки")').count());
   ok("кнопки «Зафиксировать ячейку» нет", (await page.locator("button", { hasText: /Зафиксировать ячейку/ }).count()) === 0);
   // и по-прежнему работают: две колонки через степпер
+  await goCont();
   await page.locator('div:has(> label:text-is("Колонки")) button', { hasText: "+" }).click();
   await page.waitForTimeout(300);
   ok("степпер колонок работает на новом месте", (await state()).containers[0].cols === 2);

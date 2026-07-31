@@ -25,6 +25,16 @@ await page.waitForTimeout(700);
 
 let fail = 0;
 const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
+const goSub = async (n) => {
+  await page.locator(`button:text-is("${n}")`).first().click();
+  await page.waitForTimeout(250);
+};
+const goCont = async () => {
+  await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+  await page.waitForTimeout(200);
+  await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+  await page.waitForTimeout(250);
+};
 const setNum = async (label, v) => {
   const el = page.locator(String.raw`div:has(> div > label:has-text("${label}")) input[type="number"]`).first();
   await el.fill(String(v)); await el.press("Enter"); await page.waitForTimeout(200);
@@ -36,6 +46,7 @@ const tris = () => page.evaluate(() => {
 });
 
 // группа есть, режим по умолчанию выключен
+await goSub("Стенки");
 ok("группа «Вставные перегородки» на месте", await page.locator("button", { hasText: "Вставные перегородки" }).count() === 1);
 ok("по умолчанию выключено", await page.locator("text=Шаг мест").count() === 0);
 
@@ -53,7 +64,9 @@ ok("больший шаг — меньше мест", +n2 < +n1, ` → ${n2} п�
 // размеры детали пересчитываются от контейнера
 const sizeText = async () => (await page.locator("text=/Деталь:/").first().textContent()) || "";
 const before = await sizeText();
+await goCont();
 await setNum("Глубина", 120);
+await goSub("Стенки");
 await page.waitForTimeout(300);
 const after = await sizeText();
 ok("размер детали пересчитался от глубины", before !== after, ` → ${after.trim().slice(0, 60)}`);
@@ -87,8 +100,8 @@ ok("STL детали валиден", buf.length === 84 + triCount * 50 && triCo
 await page.reload({ waitUntil: "load" });
 await page.waitForSelector("canvas");
 await page.waitForTimeout(700);
-await page.locator("button", { hasText: /^Модель$/ }).click();
-await page.waitForTimeout(300);
+await goCont();
+await goSub("Стенки");
 ok("настройка сохранилась", await page.locator("text=Шаг мест").count() === 1);
 
 ok("ошибок в консоли нет", errs.length === 0, errs.length ? ` → ${errs[0]}` : "");

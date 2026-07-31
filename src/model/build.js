@@ -32,7 +32,6 @@ export function buildContainer(c, conn0, opts = {}) {
     solids.push(...got);
   };
   // вставные стенки контейнера: включаются по каждой стороне отдельно
-  const WPG = wpGeom(c);
   const wpIns = (side) => wpOn(c, side);
   // на вставной стороне контейнеры не смыкаются вплотную — замка там нет
   if (wpActive(c)) {
@@ -672,7 +671,7 @@ export function buildContainer(c, conn0, opts = {}) {
   // внутренняя губка. Сама стенка — отдельная плоская деталь, вставляется
   // в паз сверху и стоит на дне.
   const wpBase = (side) => {
-    const g = WPG;
+    const g = wpGeom(c, side);
     const key = `o:${side}:0`;
     const wc = getWall(c, key);
     if (wc.h <= 0.3) return;
@@ -703,7 +702,7 @@ export function buildContainer(c, conn0, opts = {}) {
   // Плоская деталь-стенка на своём месте (превью). В экспорт уходит той
   // же геометрией, разложенной плашмя (wpFlatten).
   const wpPlate = (side) => {
-    const g = WPG;
+    const g = wpGeom(c, side);
     const key = `o:${side}:0`;
     const wc = getWall(c, key);
     if (wc.h <= 0.3) return;

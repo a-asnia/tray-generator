@@ -25,6 +25,16 @@ await page.waitForTimeout(1200);
 
 const checks = [];
 const ok = (name, cond) => { checks.push([name, !!cond]); };
+const goSub = async (n) => {
+  await page.locator(`button:text-is("${n}")`).first().click();
+  await page.waitForTimeout(250);
+};
+const goCont = async () => {
+  await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+  await page.waitForTimeout(200);
+  await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+  await page.waitForTimeout(250);
+};
 
 ok("канвас three.js на странице", await page.$("canvas"));
 ok("заголовок панели", await page.getByText("Система контейнеров").count());
@@ -57,7 +67,7 @@ ok(`STL валиден (${nTri} треугольников)`, buf.length === 84 
 const saved = await page.evaluate(() => window.localStorage.getItem("trayGenState"));
 ok("автосохранение в localStorage", saved && JSON.parse(saved).containers.length === 1);
 
-await page.getByRole("button", { name: "Модель" }).click();
+await goCont();
 await page.waitForTimeout(200);
 // выбор стенки на схеме открывает редактор
 await page.locator("svg g").first().click();

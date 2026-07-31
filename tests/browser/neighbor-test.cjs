@@ -24,6 +24,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const colWsOf = (idx) => page.evaluate((i) => {
@@ -46,7 +56,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("два контейнера", st.containers.length === 2);
 
   // у нового (выбранного) контейнера: W=180, две колонки, замок первой
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await setNum("Ширина", 180);
   await page.locator('div:has(> label:text-is("Колонки")) button', { hasText: "+" }).click();
   await page.waitForTimeout(300);
@@ -65,7 +75,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   // выбрать первый контейнер и ужать его
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await page.locator("button", { hasText: `№${myIdx + 1}` }).click();
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   const myW0 = (await state()).containers[myIdx].W;
   await setNum("Ширина", 150);
 

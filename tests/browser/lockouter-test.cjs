@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const rowsOf = (idx = 0) => page.evaluate((i) => {
@@ -64,6 +74,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok(`глубина контейнера не изменилась (${st.containers[0].D} = ${D0})`, near(st.containers[0].D, D0));
 
   // добавление колонок/рядов не меняет габарит
+  await goCont();
   await page.locator('div:has(> label:text-is("Колонки")) button', { hasText: "+" }).click();
   await page.waitForTimeout(300);
   await page.locator('div:has(> label:text-is("Ряды")) button', { hasText: "+" }).click();
@@ -90,7 +101,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   const lockedIdx = st.containers.findIndex((c) => c.lockOuter);
   const otherIdx = 1 - lockedIdx;
   await page.getByRole("button", { name: `№${otherIdx + 1}`, exact: true }).click();
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await setNum("Ширина", 100);
   st = await state();
   ok(`сосед ужат до 100, зафиксированный не тронут (${st.containers[lockedIdx].W} = ${W0})`,
@@ -99,7 +110,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   // снять замок — размер снова меняется
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await page.getByRole("button", { name: `№${lockedIdx + 1}`, exact: true }).click();
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await page.locator("button", { hasText: /Зафиксировать внешний размер/ }).click();
   await page.waitForTimeout(300);
   await setNum("Ширина", 120);

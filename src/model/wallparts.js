@@ -26,6 +26,7 @@ export const DEF_WPARTS = {
   clr: 0.2,   // зазор на сторону между стенкой и пазом
   lip: 1.0,   // наружная губка канавки
   seat: 6,    // высота губок над дном — насколько глубоко сидит стенка
+  thks: {},   // толщина по отдельным сторонам (если задана — важнее общей)
 };
 export const wpartsOf = (c) => ({ ...DEF_WPARTS, ...(c && c.wparts) });
 export const wpAny = (c) => SIDES.some((s) => wpartsOf(c)[s]);
@@ -33,15 +34,18 @@ export const wpAny = (c) => SIDES.some((s) => wpartsOf(c)[s]);
 // Минимальная внешняя стенка: наружная губка + паз + внутренняя губка
 export const wpMinWall = (w) => Math.round((w.lip + w.thk + 2 * w.clr + 1) * 100) / 100;
 
-export function wpGeom(c) {
+// side задан — берётся толщина именно этой стенки (её можно настроить
+// отдельно в редакторе стенки); без side — общая толщина
+export function wpGeom(c, side) {
   const w = wpartsOf(c);
-  const cw = w.thk + 2 * w.clr;        // ширина паза
-  return { ...w, cw, minWall: wpMinWall(w) };
+  const thk = (side && w.thks && w.thks[side]) || w.thk;
+  const g = { ...w, thk };
+  return { ...g, cw: thk + 2 * w.clr, minWall: wpMinWall(g) };
 }
 
 // Сторона включена и соединение помещается в толщину стенки
 export function wpOn(c, side) {
-  const g = wpGeom(c);
+  const g = wpGeom(c, side);
   return !!g[side] && c.wallOut >= g.minWall - 0.001 && c.H > g.seat + 2;
 }
 export const wpActive = (c) => SIDES.some((s) => wpOn(c, s));
@@ -49,12 +53,13 @@ export const wpActive = (c) => SIDES.some((s) => wpOn(c, s));
 // Пролёт детали вдоль своей стенки. Стенки N/S идут до углов, W/E
 // встают между ними — так угол закрыт при любом наборе включённых стенок.
 export function wpSpan(c, side) {
-  const g = wpGeom(c);
+  const g = wpGeom(c, side);
   const along = side === "n" || side === "s";
   const dim = along ? c.W : c.D;
   const endFor = (perp) => {
-    if (!wpOn(c, perp)) return c.wallOut + g.clr;         // печатная стенка занимает угол
-    return along ? g.lip + g.clr : g.lip + g.cw + g.clr;  // за губкой (и за стенкой N/S)
+    if (!wpOn(c, perp)) return c.wallOut + g.clr;  // печатная стенка занимает угол
+    // за губкой, а у W/E — ещё и за стенкой N/S с её собственной толщиной
+    return along ? g.lip + g.clr : g.lip + wpGeom(c, perp).cw + g.clr;
   };
   const a = endFor(along ? "w" : "n"), b = endFor(along ? "e" : "s");
   return [-dim / 2 + a, dim / 2 - b];
@@ -63,13 +68,13 @@ export function wpSpan(c, side) {
 // Пролёт канавки в основании — на зазор шире детали с каждой стороны
 export function wpSlotSpan(c, side) {
   const [a, b] = wpSpan(c, side);
-  const g = wpGeom(c);
+  const g = wpGeom(c, side);
   return [a - g.clr, b + g.clr];
 }
 
 export function wpSize(c, side) {
   const [a, b] = wpSpan(c, side);
-  const g = wpGeom(c);
+  const g = wpGeom(c, side);
   const key = `o:${side}:0`;
   const h = (c.walls && c.walls[key] && c.walls[key].h) || c.H;
   return {
@@ -82,7 +87,7 @@ export function wpSize(c, side) {
 // Деталь плашмя для печати: толщина вертикально, высота стенки ложится
 // в плоскость стола — печатается со стола без поддержек.
 export function wpFlatten(solids, side, c) {
-  const g = wpGeom(c);
+  const g = wpGeom(c, side);
   const along = side === "n" || side === "s";
   const outer = side === "n" ? -c.D / 2 : side === "s" ? c.D / 2 : side === "w" ? -c.W / 2 : c.W / 2;
   const sgn = side === "n" || side === "w" ? 1 : -1;

@@ -500,32 +500,37 @@ const DEF_WPARTS = {
     clr: 0.2, // зазор на сторону между стенкой и пазом
     lip: 1.0, // наружная губка канавки
     seat: 6, // высота губок над дном — насколько глубоко сидит стенка
+    thks: {}, // толщина по отдельным сторонам (если задана — важнее общей)
 };
 const wpartsOf = (c) => ({ ...DEF_WPARTS, ...(c && c.wparts) });
 const wpAny = (c) => SIDES.some((s) => wpartsOf(c)[s]);
 // Минимальная внешняя стенка: наружная губка + паз + внутренняя губка
 const wpMinWall = (w) => Math.round((w.lip + w.thk + 2 * w.clr + 1) * 100) / 100;
-function wpGeom(c) {
+// side задан — берётся толщина именно этой стенки (её можно настроить
+// отдельно в редакторе стенки); без side — общая толщина
+function wpGeom(c, side) {
     const w = wpartsOf(c);
-    const cw = w.thk + 2 * w.clr; // ширина паза
-    return { ...w, cw, minWall: wpMinWall(w) };
+    const thk = (side && w.thks && w.thks[side]) || w.thk;
+    const g = { ...w, thk };
+    return { ...g, cw: thk + 2 * w.clr, minWall: wpMinWall(g) };
 }
 // Сторона включена и соединение помещается в толщину стенки
 function wpOn(c, side) {
-    const g = wpGeom(c);
+    const g = wpGeom(c, side);
     return !!g[side] && c.wallOut >= g.minWall - 0.001 && c.H > g.seat + 2;
 }
 const wpActive = (c) => SIDES.some((s) => wpOn(c, s));
 // Пролёт детали вдоль своей стенки. Стенки N/S идут до углов, W/E
 // встают между ними — так угол закрыт при любом наборе включённых стенок.
 function wpSpan(c, side) {
-    const g = wpGeom(c);
+    const g = wpGeom(c, side);
     const along = side === "n" || side === "s";
     const dim = along ? c.W : c.D;
     const endFor = (perp) => {
         if (!wpOn(c, perp))
             return c.wallOut + g.clr; // печатная стенка занимает угол
-        return along ? g.lip + g.clr : g.lip + g.cw + g.clr; // за губкой (и за стенкой N/S)
+        // за губкой, а у W/E — ещё и за стенкой N/S с её собственной толщиной
+        return along ? g.lip + g.clr : g.lip + wpGeom(c, perp).cw + g.clr;
     };
     const a = endFor(along ? "w" : "n"), b = endFor(along ? "e" : "s");
     return [-dim / 2 + a, dim / 2 - b];
@@ -533,12 +538,12 @@ function wpSpan(c, side) {
 // Пролёт канавки в основании — на зазор шире детали с каждой стороны
 function wpSlotSpan(c, side) {
     const [a, b] = wpSpan(c, side);
-    const g = wpGeom(c);
+    const g = wpGeom(c, side);
     return [a - g.clr, b + g.clr];
 }
 function wpSize(c, side) {
     const [a, b] = wpSpan(c, side);
-    const g = wpGeom(c);
+    const g = wpGeom(c, side);
     const key = `o:${side}:0`;
     const h = (c.walls && c.walls[key] && c.walls[key].h) || c.H;
     return {
@@ -550,7 +555,7 @@ function wpSize(c, side) {
 // Деталь плашмя для печати: толщина вертикально, высота стенки ложится
 // в плоскость стола — печатается со стола без поддержек.
 function wpFlatten(solids, side, c) {
-    const g = wpGeom(c);
+    const g = wpGeom(c, side);
     const along = side === "n" || side === "s";
     const outer = side === "n" ? -c.D / 2 : side === "s" ? c.D / 2 : side === "w" ? -c.W / 2 : c.W / 2;
     const sgn = side === "n" || side === "w" ? 1 : -1;
@@ -884,7 +889,6 @@ function buildContainer(c, conn0, opts = {}) {
         solids.push(...got);
     };
     // вставные стенки контейнера: включаются по каждой стороне отдельно
-    const WPG = wpGeom(c);
     const wpIns = (side) => wpOn(c, side);
     // на вставной стороне контейнеры не смыкаются вплотную — замка там нет
     if (wpActive(c)) {
@@ -1605,7 +1609,7 @@ function buildContainer(c, conn0, opts = {}) {
     // внутренняя губка. Сама стенка — отдельная плоская деталь, вставляется
     // в паз сверху и стоит на дне.
     const wpBase = (side) => {
-        const g = WPG;
+        const g = wpGeom(c, side);
         const key = `o:${side}:0`;
         const wc = getWall(c, key);
         if (wc.h <= 0.3)
@@ -1639,7 +1643,7 @@ function buildContainer(c, conn0, opts = {}) {
     // Плоская деталь-стенка на своём месте (превью). В экспорт уходит той
     // же геометрией, разложенной плашмя (wpFlatten).
     const wpPlate = (side) => {
-        const g = WPG;
+        const g = wpGeom(c, side);
         const key = `o:${side}:0`;
         const wc = getWall(c, key);
         if (wc.h <= 0.3)
@@ -2394,6 +2398,9 @@ const sanitizeContainer = (c0) => {
         clr: num(cw2.clr, 0.2, 0, 1),
         lip: num(cw2.lip, 1, 0.4, 6),
         seat: num(cw2.seat, 6, 1, 200),
+        thks: Object.fromEntries(Object.entries(obj(cw2.thks))
+            .filter(([k]) => ["n", "s", "w", "e"].includes(k))
+            .map(([k, v]) => [k, num(v, 1.6, 0.6, 10)])),
     };
     c.lockedCellW = obj(c.lockedCellW);
     c.lockedRows = obj(c.lockedRows);
@@ -2668,15 +2675,18 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
     // или подсветка изменилась
     const meshRef = useRef(new Map());
     const frameRef = useRef(null);
-    const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, lastX: 0, lastY: 0 });
+    // panX/panY/panZ — сдвиг сцены правой кнопкой: камера и точка,
+    // на которую она смотрит, переносятся вместе
+    const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, panning: false, panX: 0, panY: 0, panZ: 0, lastX: 0, lastY: 0 });
     const applyCamera = useCallback(() => {
         const cam = cameraRef.current, o = orbitRef.current;
         if (!cam)
             return;
         const y = o.radius * Math.cos(o.phi);
         const r = o.radius * Math.sin(o.phi);
-        cam.position.set(r * Math.sin(o.theta), y + 15, r * Math.cos(o.theta));
-        cam.lookAt(0, 12, 0);
+        cam.position.set(r * Math.sin(o.theta) + o.panX, y + 15 + o.panY, r * Math.cos(o.theta) + o.panZ);
+        cam.lookAt(o.panX, 12 + o.panY, o.panZ);
+        cam.updateMatrixWorld();
     }, []);
     useEffect(() => {
         const mount = mountRef.current;
@@ -2715,19 +2725,54 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         let raf;
         const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
         loop();
-        const onDown = (e) => { const o = orbitRef.current; o.dragging = true; o.moved = 0; o.lastX = e.clientX; o.lastY = e.clientY; };
+        const onDown = (e) => {
+            const o = orbitRef.current;
+            // левая кнопка вращает, правая (и средняя) двигает сцену
+            o.panning = e.button === 2 || e.button === 1;
+            o.dragging = true;
+            o.moved = 0;
+            o.lastX = e.clientX;
+            o.lastY = e.clientY;
+        };
         const onMove = (e) => {
             const o = orbitRef.current;
             if (!o.dragging)
                 return;
-            o.moved = (o.moved || 0) + Math.abs(e.clientX - o.lastX) + Math.abs(e.clientY - o.lastY);
-            o.theta -= (e.clientX - o.lastX) * 0.008;
-            o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - (e.clientY - o.lastY) * 0.008));
+            const dx = e.clientX - o.lastX, dy = e.clientY - o.lastY;
+            o.moved = (o.moved || 0) + Math.abs(dx) + Math.abs(dy);
             o.lastX = e.clientX;
             o.lastY = e.clientY;
+            if (o.panning) {
+                // сдвиг в плоскости экрана: по осям камеры, шаг пропорционален
+                // удалению — на любом масштабе тянется одинаково
+                const cam = cameraRef.current;
+                if (!cam)
+                    return;
+                const k = o.radius * 0.0018;
+                const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+                const up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+                o.panX += -dx * k * right.x + dy * k * up.x;
+                o.panY += -dx * k * right.y + dy * k * up.y;
+                o.panZ += -dx * k * right.z + dy * k * up.z;
+                applyCamera();
+                return;
+            }
+            o.theta -= dx * 0.008;
+            o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - dy * 0.008));
             applyCamera();
         };
-        const onUp = () => { orbitRef.current.dragging = false; };
+        const onUp = () => { const o = orbitRef.current; o.dragging = false; o.panning = false; };
+        // правый клик без протяжки возвращает сцену в центр
+        const onCtx = (e) => {
+            e.preventDefault();
+            const o = orbitRef.current;
+            if ((o.moved || 0) > 5)
+                return;
+            o.panX = 0;
+            o.panY = 0;
+            o.panZ = 0;
+            applyCamera();
+        };
         const onWheel = (e) => {
             e.preventDefault();
             const o = orbitRef.current;
@@ -2802,6 +2847,7 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
         el.addEventListener("wheel", onWheel, { passive: false });
+        el.addEventListener("contextmenu", onCtx);
         const onResize = () => {
             camera.aspect = mount.clientWidth / mount.clientHeight;
             camera.updateProjectionMatrix();
@@ -2815,6 +2861,7 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             el.removeEventListener("wheel", onWheel);
+            el.removeEventListener("contextmenu", onCtx);
             window.removeEventListener("resize", onResize);
             for (const e of meshRef.current.values())
                 for (const m of e.meshes)
@@ -2960,8 +3007,10 @@ function TrayGenerator() {
     const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
     // размеры соединителя зависят от зазора печати (настройка «Принтер»)
     const CG = connGeom(limits.connClr);
-    const [tab, setTab] = useState("model");
-    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, inserts: true, wparts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+    const [tab, setTab] = useState("cont");
+    // подвкладки внутри «Контейнеры»
+    const [sub, setSub] = useState("cont");
+    const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, wparts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
     const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
     // автосохранение при каждом изменении
     useEffect(() => {
@@ -3318,12 +3367,23 @@ function TrayGenerator() {
             return { ...cc, cells: { ...(cc.cells || {}), [k]: { ...((cc.cells || {})[k] || {}), ...patch } } };
         }));
     };
+    // Выбор чего-либо сам открывает нужную подвкладку: кликнул по ячейке —
+    // видишь настройки ячейки, кликнул по стенке — настройки стенки.
+    const showFor = (s) => {
+        if (!s)
+            return;
+        setTab("cont");
+        setSub(s.type === "cell" || s.type === "fixed" ? "cell" : "walls");
+    };
+    const selectAndShow = (s) => { setSelection(s); showFor(s); };
     const handleSelect = (s) => {
         if (s?.type === "wall" && selMode === "line") {
-            setSelection({ type: "line", src: s.key, ...lineOf(cur, s.key) });
+            const ln = { type: "line", src: s.key, ...lineOf(cur, s.key) };
+            setSelection(ln);
+            showFor(ln);
         }
         else
-            setSelection(s);
+            selectAndShow(s);
     };
     const posMap = useMemo(() => {
         const m = new Map();
@@ -3390,34 +3450,9 @@ function TrayGenerator() {
         return { items, totalW, totalD };
     }, [containers, connect, posMap, limits.connClr]);
     // ── three.js: сцена, камера, пикинг ──
-    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection });
+    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
     const L = layout(cur);
     const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
-    const WP = wpartsOf(cur);
-    const WPG = wpGeom(cur);
-    const wpSides = SIDES.filter((x) => wpOn(cur, x));
-    const wpAnyOn = SIDES.some((x) => WP[x]);
-    const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
-    const toggleSide = (side) => {
-        // соединению нужна стенка потолще — подгоняем, как для замков
-        const need = WPG.minWall;
-        const on = !WP[side];
-        if (on && cur.wallOut < need)
-            updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
-        else
-            updWp({ [side]: on });
-    };
-    const exportBase = () => {
-        const { solids, c } = built.items[sel];
-        exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
-    };
-    const exportWalls = () => {
-        const { solids, c } = built.items[sel];
-        wpSides.forEach((side, k) => setTimeout(() => {
-            const sz = wpSize(c, side);
-            exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
-        }, k * 400));
-    };
     const INS = insertsOf(cur);
     const updIns = (patch) => updCur({ inserts: { ...INS, ...patch } });
     const exportInsert = () => {
@@ -3650,14 +3685,58 @@ function TrayGenerator() {
                     }, style: { width: 38, height: 34, borderRadius: 8, fontSize: 15, cursor: "pointer", border: "1px dashed #A9B4C2", background: "transparent", color: "#8A97A8" } }, "+")) : (React.createElement("div", { key: `${gx},${gy}`, style: { width: 38, height: 34 } })));
             }
         }
-    // ── редактор стенки/линии/ячейки ──
-    let editor = null;
+    const WP = wpartsOf(cur);
+    const WPG = wpGeom(cur);
+    const wpSides = SIDES.filter((x) => wpOn(cur, x));
+    const wpAnyOn = SIDES.some((x) => WP[x]);
+    const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
+    const toggleSide = (side) => {
+        // соединению нужна стенка потолще — подгоняем, как для замков
+        const need = WPG.minWall;
+        const on = !WP[side];
+        if (on && cur.wallOut < need)
+            updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
+        else
+            updWp({ [side]: on });
+    };
+    const exportBase = () => {
+        const { solids, c } = built.items[sel];
+        exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
+    };
+    const exportWalls = () => {
+        const { solids, c } = built.items[sel];
+        wpSides.forEach((side, k) => setTimeout(() => {
+            const sz = wpSize(c, side);
+            exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
+        }, k * 400));
+    };
+    // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
+    let editorWall = null, editorCell = null;
     if (selection?.type === "wall") {
         const key = selection.key;
         const w = getWall(cur, key);
         const isOuter = key.startsWith("o");
-        editor = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
+        editorWall = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
             React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 } }, wallTitle(key)),
+            isOuter && (() => {
+                const sd = key.split(":")[1];
+                const on = !!WP[sd];
+                const thkS = (WP.thks && WP.thks[sd]) || WP.thk;
+                return (React.createElement("div", { style: { background: "#fff", border: "1px solid #E4E9EF", borderRadius: 8, padding: "8px 9px", marginBottom: 10 } },
+                    React.createElement("button", { onClick: () => toggleSide(sd), style: {
+                            width: "100%", padding: "6px 0", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                            border: on ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                            background: on ? "#FFF3EB" : "#fff", color: on ? ACCENT : "#3D4A5C",
+                        } }, on ? "✓ Вставная стенка" : "Сделать вставной"),
+                    on && (React.createElement("div", { style: { marginTop: 8 } },
+                        React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u044D\u0442\u043E\u0439 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: thkS, min: 0.8, max: 6, step: 0.1, onChange: (v) => updWp({ thks: { ...(WP.thks || {}), [sd]: v } }) }),
+                        React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: WP.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updWp({ clr: v }) }),
+                        React.createElement(Param, { label: "\u041D\u0430\u0440\u0443\u0436\u043D\u0430\u044F \u0433\u0443\u0431\u043A\u0430", unit: "\u043C\u043C", value: WP.lip, min: 0.6, max: 4, step: 0.1, onChange: (v) => updWp({ lip: v }) }),
+                        React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u043A\u0438", unit: "\u043C\u043C", value: WP.seat, min: 2, max: Math.max(4, cur.H - 2), step: 0.5, onChange: (v) => updWp({ seat: v }) }),
+                        React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.4 } }, wpOn(cur, sd)
+                            ? `Деталь ${wpSize(cur, sd).len} × ${wpSize(cur, sd).hgt} × ${wpSize(cur, sd).thk} мм. Высота и скругление кромки — из настроек этой стенки выше.`
+                            : `Не помещается: нужна внешняя стенка от ${wpGeom(cur, sd).minWall} мм.`)))));
+            })(),
             React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: w.h, min: 0, max: limits.maxH, step: 0.5, onChange: (v) => updWall(key, { h: v }) }),
             React.createElement(Param, { label: isOuter ? "Наклон внутрь" : "Наклон в одну сторону", unit: "\u00B0", value: w.t1, min: 0, max: 50, step: 1, onChange: (v) => updWall(key, { t1: v }) }),
             !isOuter && (React.createElement(Param, { label: "\u041D\u0430\u043A\u043B\u043E\u043D \u0432 \u0434\u0440\u0443\u0433\u0443\u044E \u0441\u0442\u043E\u0440\u043E\u043D\u0443", unit: "\u00B0", value: w.t2, min: 0, max: 50, step: 1, onChange: (v) => updWall(key, { t2: v }) })),
@@ -3685,7 +3764,7 @@ function TrayGenerator() {
     }
     else if (selection?.type === "line") {
         const first = getWall(cur, selection.keys[0]);
-        editor = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
+        editorWall = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
             React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 } }, selection.label),
             React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430 \u0432\u0441\u0435\u0445 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u043E\u0432", unit: "\u043C\u043C", value: first.h, min: 0, max: limits.maxH, step: 0.5, onChange: (v) => updWalls(selection.keys, { h: v }) }),
             React.createElement(Param, { label: selection.outer ? "Наклон внутрь" : "Наклон в одну сторону", unit: "\u00B0", value: first.t1, min: 0, max: 50, step: 1, onChange: (v) => updWalls(selection.keys, { t1: v }) }),
@@ -3726,7 +3805,7 @@ function TrayGenerator() {
             on ? "🔒" : "🔓",
             " ",
             text));
-        editor = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
+        editorCell = (React.createElement("div", { style: { background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
             React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 } },
                 "\u042F\u0447\u0435\u0439\u043A\u0430 ",
                 selection.i + 1,
@@ -3772,7 +3851,7 @@ function TrayGenerator() {
             ["w", "← стенка"], ["e", "→ стенка"],
             ["sw", "↙ угол"], ["s", "↓ стенка"], ["se", "↘ угол"],
         ];
-        editor = (React.createElement("div", { style: { background: "#FFF3EB", border: "1px solid #F2620F55", borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
+        editorCell = (React.createElement("div", { style: { background: "#FFF3EB", border: "1px solid #F2620F55", borderRadius: 10, padding: "10px 12px", marginTop: 10 } },
             React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: ACCENT, marginBottom: 8 } },
                 "\uD83D\uDD12 \u0424\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u0430\u044F \u044F\u0447\u0435\u0439\u043A\u0430 ",
                 k + 1),
@@ -3803,7 +3882,7 @@ function TrayGenerator() {
         React.createElement("div", { style: { width: 310, minWidth: 270, flex: "0 1 310px", padding: "18px 18px 30px", background: "#FDFDFE", borderRight: "1px solid #E4E9EF", overflowY: "auto", maxHeight: "100vh" } },
             React.createElement("div", { style: { fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: ACCENT, fontWeight: 700 } }, "\u0413\u0435\u043D\u0435\u0440\u0430\u0442\u043E\u0440 \u043B\u043E\u0442\u043A\u043E\u0432"),
             React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "3px 0 0" } }, "\u0421\u0438\u0441\u0442\u0435\u043C\u0430 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432"),
-            React.createElement("div", { style: { display: "flex", gap: 6, margin: "12px 0 16px" } }, [["model", "Модель"], ["printer", "Принтер"], ["layout", "Раскладка"]].map(([t, n]) => (React.createElement("button", { key: t, onClick: () => setTab(t), style: {
+            React.createElement("div", { style: { display: "flex", gap: 6, margin: "12px 0 16px" } }, [["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (React.createElement("button", { key: t, onClick: () => setTab(t), style: {
                     flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
                     border: tab === t ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
                     background: tab === t ? "#FFF3EB" : "#fff", color: tab === t ? ACCENT : "#3D4A5C",
@@ -3914,123 +3993,142 @@ function TrayGenerator() {
                         containers.length,
                         " \u0444\u0430\u0439\u043B\u0430)")),
                     React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 } }, "\u041C\u0438\u043B\u043B\u0438\u043C\u0435\u0442\u0440\u044B, \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C \u2014 Z. \u041F\u0430\u0437\u044B \u0441\u043F\u0440\u044F\u0442\u0430\u043D\u044B \u0432\u043D\u0443\u0442\u0440\u0438 \u0442\u043E\u043B\u0449\u0438\u043D\u044B \u0441\u0442\u0435\u043D\u043A\u0438: \u044F\u0447\u0435\u0439\u043A\u0438 \u043D\u0435 \u0438\u0441\u043A\u0430\u0436\u0430\u044E\u0442\u0441\u044F, \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0441\u043C\u044B\u043A\u0430\u044E\u0442\u0441\u044F \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E. \u0421\u0431\u043E\u0440\u043A\u0430 \u2014 \u0432\u0434\u0432\u0438\u0433\u0430\u043D\u0438\u0435\u043C \u0441\u0432\u0435\u0440\u0445\u0443.")))),
-            tab === "model" && (React.createElement("div", null,
-                React.createElement(Collapse, { title: `Внешний размер — контейнер №${sel + 1}`, open: openSecs.outer, onToggle: () => toggleSec("outer") },
-                    React.createElement("button", { onClick: toggleLockOuter, style: {
-                            width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                            border: cur.lockOuter ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
-                            background: cur.lockOuter ? "#DBEAFE" : "#fff", color: cur.lockOuter ? SEL : "#3D4A5C",
-                        } },
-                        cur.lockOuter ? "🔒" : "🔓",
-                        " \u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440"),
-                    cur.lockOuter && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u0413\u0430\u0431\u0430\u0440\u0438\u0442 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D \u043D\u0430\u043C\u0435\u0440\u0442\u0432\u043E: \u043E\u043D \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043D\u0438 \u043E\u0442 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u044F\u0447\u0435\u0435\u043A (\u043E\u043D\u0438 \u043F\u0435\u0440\u0435\u0440\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u044F\u044E\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438), \u043D\u0438 \u043C\u0430\u0433\u043D\u0438\u0442\u043E\u043C \u0441\u043E\u0441\u0435\u0434\u0435\u0439. \u042F\u0447\u0435\u0439\u043A\u0438, \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438 \u0441\u0435\u0442\u043A\u0443 \u0432\u043D\u0443\u0442\u0440\u0438 \u043C\u0435\u043D\u044F\u0442\u044C \u043C\u043E\u0436\u043D\u043E.")),
-                    React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.W, min: 30, max: limits.maxW, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ W: v }) }),
-                    React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.D, min: 30, max: limits.maxD, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ D: v }) }),
-                    React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: cur.H, min: 10, max: limits.maxH, step: 1, disabled: cur.lockOuter, onChange: (v) => updCur({ H: v }) }),
-                    cur.lockCell && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u042F\u0447\u0435\u0439\u043A\u0430 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u0430 \u043F\u043E \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0438\u043C \u0440\u0430\u0437\u043C\u0435\u0440\u0430\u043C: \u043F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0441\u0435\u0442\u043A\u0438 \u0438 \u0441\u0442\u0435\u043D\u043E\u043A \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0441\u0430\u043C. \u0415\u0441\u043B\u0438 \u043D\u043E\u0432\u044B\u0439 \u0440\u0430\u0437\u043C\u0435\u0440 \u043D\u0435 \u0432\u043B\u0435\u0437\u0430\u0435\u0442 \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u2014 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u0441\u044F."))),
-                React.createElement(Collapse, { title: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u0438 \u0434\u043D\u0430", open: openSecs.cells, onToggle: () => toggleSec("cells") },
-                    React.createElement(Param, { label: "\u0412\u043D\u0435\u0448\u043D\u0438\u0435 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: cur.wallOut, min: Math.max(connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0), max: 8, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0) }) }),
-                    connect && (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 } },
-                        "\u041C\u0438\u043D\u0438\u043C\u0443\u043C ",
-                        CG.minWall,
-                        " \u043C\u043C \u2014 \u043F\u0430\u0437 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u044F \u043F\u0440\u044F\u0447\u0435\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u0442\u0435\u043D\u043A\u0438.")),
-                    React.createElement(Param, { label: "\u041F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", unit: "\u043C\u043C", value: cur.wall, min: 0.8, max: 5, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wall: v }) }),
-                    React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0434\u043D\u0430", unit: "\u043C\u043C", value: cur.floor, min: 0.8, max: 5, step: 0.1, onChange: (v) => updCur({ floor: v }) }),
-                    React.createElement(Param, { label: "\u0421\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u0435 \u0443\u0433\u043B\u043E\u0432", unit: "\u043C\u043C", value: cur.cornerR ?? DEFAULT_CORNER_R, min: 0, max: Math.min(6, cur.wallOut), step: 0.1, onChange: (v) => updCur({ cornerR: v }) }),
-                    React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 } }, "\u041D\u0430\u0440\u0443\u0436\u043D\u044B\u0435 \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C\u043D\u044B\u0435 \u0443\u0433\u043B\u044B. \u0414\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u0437\u0430\u043C\u0435\u0442\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u044F \u043A\u0440\u043E\u043C\u043A\u0438, \u0438\u043D\u0430\u0447\u0435 \u0443 \u0441\u0430\u043C\u043E\u0433\u043E \u0432\u0435\u0440\u0445\u0430 \u0440\u0430\u0434\u0438\u0443\u0441 \u0443\u0433\u043B\u0430 \u043E\u0431\u043D\u0443\u043B\u044F\u0435\u0442\u0441\u044F \u0438 \u0443\u0433\u043E\u043B \u0432\u044B\u0440\u043E\u0436\u0434\u0430\u0435\u0442\u0441\u044F \u0432 \u043E\u0441\u0442\u0440\u0438\u0451.")),
-                React.createElement(Collapse, { title: "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.grid, onToggle: () => toggleSec("grid") },
-                    React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: cur.cols, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
-                    React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })),
-                React.createElement(Collapse, { title: "\u0412\u0441\u0442\u0430\u0432\u043D\u044B\u0435 \u0441\u0442\u0435\u043D\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430", open: openSecs.wparts, onToggle: () => toggleSec("wparts") },
-                    React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 } }, "\u0412 \u043E\u0441\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u043F\u043E \u043B\u0438\u043D\u0438\u0438 \u0441\u0442\u0435\u043D\u043A\u0438 \u0438\u0434\u0451\u0442 \u043A\u0430\u043D\u0430\u0432\u043A\u0430 \u0438\u0437 \u0434\u0432\u0443\u0445 \u0433\u0443\u0431\u043E\u043A, \u0430 \u0441\u0430\u043C\u0430 \u0441\u0442\u0435\u043D\u043A\u0430 \u043F\u0435\u0447\u0430\u0442\u0430\u0435\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u043F\u043B\u043E\u0441\u043A\u043E\u0439 \u0434\u0435\u0442\u0430\u043B\u044C\u044E \u0438 \u0432\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0432 \u043D\u0435\u0451 \u0441\u0432\u0435\u0440\u0445\u0443. \u0412\u043A\u043B\u044E\u0447\u0430\u0435\u0442\u0441\u044F \u043F\u043E \u043A\u0430\u0436\u0434\u043E\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E."),
-                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 } }, SIDES.map((sd) => (React.createElement("button", { key: sd, onClick: () => toggleSide(sd), style: {
-                            padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                            border: WP[sd] ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                            background: WP[sd] ? "#FFF3EB" : "#fff", color: WP[sd] ? ACCENT : "#3D4A5C",
-                        } },
-                        WP[sd] ? "✓ " : "",
-                        SIDE_NAME[sd])))),
-                    wpAnyOn && (React.createElement(React.Fragment, null,
-                        React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: WP.thk, min: 0.8, max: 6, step: 0.1, onChange: (v) => updWp({ thk: v }) }),
-                        React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: WP.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updWp({ clr: v }) }),
-                        React.createElement(Param, { label: "\u041D\u0430\u0440\u0443\u0436\u043D\u0430\u044F \u0433\u0443\u0431\u043A\u0430", unit: "\u043C\u043C", value: WP.lip, min: 0.6, max: 4, step: 0.1, onChange: (v) => updWp({ lip: v }) }),
-                        React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u043A\u0438", unit: "\u043C\u043C", value: WP.seat, min: 2, max: Math.max(4, cur.H - 2), step: 0.5, onChange: (v) => updWp({ seat: v }) }),
-                        wpSides.length > 0 ? (React.createElement(React.Fragment, null,
-                            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 } },
-                                "\u0414\u0435\u0442\u0430\u043B\u0438: \u0431\u0430\u0437\u0430 + ",
-                                wpSides.length,
-                                " \u0448\u0442.",
-                                " ",
-                                wpSides.map((sd) => `${SIDE_NAME[sd].toLowerCase()} ${wpSize(cur, sd).len}×${wpSize(cur, sd).hgt}`).join(", "),
-                                " \u043C\u043C, \u0442\u043E\u043B\u0449\u0438\u043D\u0430 ",
-                                WP.thk,
-                                " \u043C\u043C, \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043F\u043B\u0430\u0448\u043C\u044F. \u0417\u0430\u0437\u043E\u0440 ",
-                                WP.clr,
-                                " \u043C\u043C \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB."),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 } },
-                                "\u26A0 \u0412\u0441\u0442\u0430\u0432\u043D\u0430\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u0443\u0442\u043E\u043F\u043B\u0435\u043D\u0430 \u043D\u0430 ",
-                                WP.lip,
-                                " \u043C\u043C: \u043D\u0430 \u044D\u0442\u0438\u0445 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u0445 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043D\u0435 \u0441\u043E\u043C\u043A\u043D\u0443\u0442\u0441\u044F \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0437\u0430\u043C\u043E\u043A \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u044F \u0442\u0430\u043C \u043D\u0435 \u0441\u0442\u0430\u0432\u0438\u0442\u0441\u044F."))) : (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 } },
-                            "\u26A0 \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u043D\u0435 \u043F\u043E\u043C\u0435\u0449\u0430\u0435\u0442\u0441\u044F: \u043D\u0443\u0436\u043D\u0430 \u0432\u043D\u0435\u0448\u043D\u044F\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u043E\u0442 ",
-                            WPG.minWall,
-                            " \u043C\u043C \u0438 \u0432\u044B\u0441\u043E\u0442\u0430 \u0431\u043E\u043B\u044C\u0448\u0435 \u043F\u043E\u0441\u0430\u0434\u043A\u0438. \u041F\u043E\u043A\u0430 \u0441\u0442\u0435\u043D\u043A\u0438 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u0446\u0435\u043B\u0438\u043A\u043E\u043C."))))),
-                React.createElement(Collapse, { title: "\u0412\u0441\u0442\u0430\u0432\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", open: openSecs.inserts, onToggle: () => toggleSec("inserts") },
-                    React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 } }, "\u041D\u0430 \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0438\u0445 \u0433\u0440\u0430\u043D\u044F\u0445 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435, \u0430 \u0441\u0430\u043C\u0438 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u0434\u0435\u0442\u0430\u043B\u044C\u044E \u0438 \u0432\u0434\u0432\u0438\u0433\u0430\u044E\u0442\u0441\u044F \u0441\u0432\u0435\u0440\u0445\u0443 \u2014 \u0438\u0445 \u043C\u043E\u0436\u043D\u043E \u043F\u0435\u0440\u0435\u0441\u0442\u0430\u0432\u043B\u044F\u0442\u044C \u0438 \u0443\u0431\u0438\u0440\u0430\u0442\u044C. \u0417\u0430\u0437\u043E\u0440 \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 0,2 \u043C\u043C \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443."),
-                    React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, [["none", "Нет"], ["x", "Поперёк"], ["z", "Вдоль"]].map(([v, t]) => (React.createElement("button", { key: v, onClick: () => updIns({ dir: v }), style: {
-                            flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                            border: INS.dir === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                            background: INS.dir === v ? "#FFF3EB" : "#fff", color: INS.dir === v ? ACCENT : "#3D4A5C",
-                        } }, t)))),
-                    INS.dir !== "none" && (() => {
-                        const slots = insertSlots(cur, INS.dir);
-                        const sz = insertSize(cur, INS.dir);
-                        const crossing = INS.dir === "x" ? L.nRows > 1 : L.nColsAt(0) > 1;
-                        return (React.createElement(React.Fragment, null,
-                            React.createElement(Param, { label: "\u0428\u0430\u0433 \u043C\u0435\u0441\u0442", unit: "\u043C\u043C", value: INS.step, min: 6, max: 80, step: 1, onChange: (v) => updIns({ step: v }) }),
-                            React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0432\u0441\u0442\u0430\u0432\u043A\u0438", unit: "\u043C\u043C", value: INS.thk, min: 0.8, max: 6, step: 0.1, onChange: (v) => updIns({ thk: v }) }),
-                            React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: INS.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updIns({ clr: v }) }),
-                            React.createElement(Param, { label: "\u0412\u044B\u0441\u0442\u0443\u043F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.proj, min: 0.4, max: 4, step: 0.1, onChange: (v) => updIns({ proj: v }) }),
-                            React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.rail, min: 0.8, max: 5, step: 0.1, onChange: (v) => updIns({ rail: v }) }),
-                            React.createElement("button", { onClick: () => updIns({ show: !INS.show }), style: {
-                                    width: "100%", padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                    border: INS.show ? `2px solid ${SEL}` : "1px solid #D6DDE6", marginBottom: 8,
-                                    background: INS.show ? "#DBEAFE" : "#fff", color: INS.show ? SEL : "#3D4A5C",
-                                } }, INS.show ? "👁 Вставки показаны в превью" : "👁 Показать вставки в превью"),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.45 } },
-                                "\u041C\u0435\u0441\u0442 \u043F\u043E\u0434 \u0432\u0441\u0442\u0430\u0432\u043A\u0443: ",
-                                React.createElement("b", null, slots.length),
-                                ". \u0414\u0435\u0442\u0430\u043B\u044C: ",
-                                React.createElement("b", null,
-                                    sz.len,
-                                    " \u00D7 ",
-                                    sz.hgt,
-                                    " \u00D7 ",
-                                    sz.thk,
-                                    " \u043C\u043C"),
-                                ", \u043F\u0435\u0447\u0430\u0442\u0430\u0435\u0442\u0441\u044F \u043F\u043B\u0430\u0448\u043C\u044F. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0435\u0451 \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB."),
-                            crossing && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } },
-                                "\u26A0 \u041F\u0435\u0447\u0430\u0442\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438\u0434\u0443\u0442 \u043F\u043E\u043F\u0435\u0440\u0451\u043A \u0432\u0441\u0442\u0430\u0432\u043E\u043A \u2014 \u0432\u0441\u0442\u0430\u0432\u043A\u0430 \u043D\u0435 \u043F\u0440\u043E\u0439\u0434\u0451\u0442 \u043E\u0442 \u0441\u0442\u0435\u043D\u043A\u0438 \u0434\u043E \u0441\u0442\u0435\u043D\u043A\u0438. \u041F\u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 ",
-                                INS.dir === "x" ? "«Ряды»" : "«Колонки»",
-                                " = 1 \u0432 \u00AB\u0414\u0435\u043B\u0435\u043D\u0438\u0438 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438\u00BB.")),
-                            slots.length === 0 && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } }, "\u26A0 \u041D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u043C\u0435\u0441\u0442\u0430 \u043D\u0435 \u043F\u043E\u043C\u0435\u0449\u0430\u0435\u0442\u0441\u044F: \u0443\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u0448\u0430\u0433 \u0438\u043B\u0438 \u0443\u0432\u0435\u043B\u0438\u0447\u044C\u0442\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440."))));
-                    })()),
-                React.createElement(Collapse, { title: "\u0420\u0435\u0434\u0430\u043A\u0442\u043E\u0440 \u0441\u0435\u0433\u043C\u0435\u043D\u0442\u043E\u0432", open: openSecs.walls, onToggle: () => toggleSec("walls") },
-                    React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
-                        "\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 ",
-                        React.createElement("b", null, "\u0441\u0442\u0435\u043D\u043A\u0443"),
-                        " \u0438\u043B\u0438 ",
-                        React.createElement("b", null, "\u044F\u0447\u0435\u0439\u043A\u0443"),
-                        " \u2014 \u043D\u0430 \u0441\u0445\u0435\u043C\u0435 \u0438\u043B\u0438 \u043F\u0440\u044F\u043C\u043E \u043D\u0430 3D-\u043C\u043E\u0434\u0435\u043B\u0438. \u0420\u0435\u0436\u0438\u043C \u0432\u044B\u0431\u043E\u0440\u0430 \u0441\u0442\u0435\u043D\u043A\u0438:"),
-                    React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, [["seg", "Сегмент"], ["line", "Вся перегородка"]].map(([m, t]) => (React.createElement("button", { key: m, onClick: () => { setSelMode(m); setSelection(null); }, style: {
-                            padding: "5px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
-                            border: selMode === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
-                            background: selMode === m ? "#EFF6FF" : "#fff", color: selMode === m ? SEL : "#3D4A5C",
-                        } }, t)))),
-                    React.createElement(Schematic, { c: cur, selection: selection, onSelect: handleSelect }),
-                    editor,
-                    Object.keys(cur.walls).length > 0 && (React.createElement("button", { onClick: () => updCur({ walls: {} }), style: { marginTop: 10, padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#5A6B80" } },
-                        "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0432\u0441\u0435 \u0441\u0442\u0435\u043D\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u2116",
-                        sel + 1))))),
+            tab === "cont" && (React.createElement("div", null,
+                containers.length > 1 && (React.createElement("div", { style: { display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 } }, containers.map((_, i) => (React.createElement("button", { key: i, onClick: () => { setSel(i); setSelection(null); }, style: {
+                        padding: "5px 11px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                        border: i === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                        background: i === sel ? "#FFF3EB" : "#fff", color: i === sel ? ACCENT : "#3D4A5C",
+                    } },
+                    "\u2116",
+                    i + 1))))),
+                React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 12 } }, [["cont", `Контейнер №${sel + 1}`], ["cell", "Ячейка"], ["walls", "Стенки"]].map(([t, n]) => (React.createElement("button", { key: t, onClick: () => setSub(t), style: {
+                        flex: 1, padding: "7px 2px", borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                        border: sub === t ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                        background: sub === t ? "#EFF6FF" : "#fff", color: sub === t ? SEL : "#3D4A5C",
+                    } }, n)))),
+                React.createElement(Schematic, { c: cur, selection: selection, onSelect: handleSelect }),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 12px", lineHeight: 1.45 } },
+                    "\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 ",
+                    React.createElement("b", null, "\u044F\u0447\u0435\u0439\u043A\u0443"),
+                    " \u0438\u043B\u0438 ",
+                    React.createElement("b", null, "\u0441\u0442\u0435\u043D\u043A\u0443"),
+                    " \u2014 \u043D\u0430 \u0441\u0445\u0435\u043C\u0435 \u0438\u043B\u0438 \u043F\u0440\u044F\u043C\u043E \u043D\u0430 3D-\u043C\u043E\u0434\u0435\u043B\u0438: \u043D\u0443\u0436\u043D\u0430\u044F \u043F\u043E\u0434\u0432\u043A\u043B\u0430\u0434\u043A\u0430 \u043E\u0442\u043A\u0440\u043E\u0435\u0442\u0441\u044F \u0441\u0430\u043C\u0430."),
+                sub === "cont" && (React.createElement("div", null,
+                    React.createElement(Collapse, { title: `Внешний размер — контейнер №${sel + 1}`, open: openSecs.outer, onToggle: () => toggleSec("outer") },
+                        React.createElement("button", { onClick: toggleLockOuter, style: {
+                                width: "100%", padding: "6px 4px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                border: cur.lockOuter ? `2px solid ${SEL}` : "1px solid #D6DDE6", margin: "0 0 10px",
+                                background: cur.lockOuter ? "#DBEAFE" : "#fff", color: cur.lockOuter ? SEL : "#3D4A5C",
+                            } },
+                            cur.lockOuter ? "🔒" : "🔓",
+                            " \u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440"),
+                        cur.lockOuter && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u0413\u0430\u0431\u0430\u0440\u0438\u0442 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D \u043D\u0430\u043C\u0435\u0440\u0442\u0432\u043E: \u043E\u043D \u043D\u0435 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043D\u0438 \u043E\u0442 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u044F\u0447\u0435\u0435\u043A (\u043E\u043D\u0438 \u043F\u0435\u0440\u0435\u0440\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u044F\u044E\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438), \u043D\u0438 \u043C\u0430\u0433\u043D\u0438\u0442\u043E\u043C \u0441\u043E\u0441\u0435\u0434\u0435\u0439. \u042F\u0447\u0435\u0439\u043A\u0438, \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438 \u0441\u0435\u0442\u043A\u0443 \u0432\u043D\u0443\u0442\u0440\u0438 \u043C\u0435\u043D\u044F\u0442\u044C \u043C\u043E\u0436\u043D\u043E.")),
+                        React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.W, min: 30, max: limits.maxW, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ W: v }) }),
+                        React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.D, min: 30, max: limits.maxD, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ D: v }) }),
+                        React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: cur.H, min: 10, max: limits.maxH, step: 1, disabled: cur.lockOuter, onChange: (v) => updCur({ H: v }) }),
+                        cur.lockCell && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u042F\u0447\u0435\u0439\u043A\u0430 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u0430 \u043F\u043E \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0438\u043C \u0440\u0430\u0437\u043C\u0435\u0440\u0430\u043C: \u043F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0441\u0435\u0442\u043A\u0438 \u0438 \u0441\u0442\u0435\u043D\u043E\u043A \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0441\u0430\u043C. \u0415\u0441\u043B\u0438 \u043D\u043E\u0432\u044B\u0439 \u0440\u0430\u0437\u043C\u0435\u0440 \u043D\u0435 \u0432\u043B\u0435\u0437\u0430\u0435\u0442 \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u2014 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u0441\u044F."))),
+                    React.createElement(Collapse, { title: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u0438 \u0434\u043D\u0430", open: openSecs.cells, onToggle: () => toggleSec("cells") },
+                        React.createElement(Param, { label: "\u0412\u043D\u0435\u0448\u043D\u0438\u0435 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: cur.wallOut, min: Math.max(connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0), max: 8, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0) }) }),
+                        connect && (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 } },
+                            "\u041C\u0438\u043D\u0438\u043C\u0443\u043C ",
+                            CG.minWall,
+                            " \u043C\u043C \u2014 \u043F\u0430\u0437 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u044F \u043F\u0440\u044F\u0447\u0435\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u0442\u0435\u043D\u043A\u0438.")),
+                        React.createElement(Param, { label: "\u041F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", unit: "\u043C\u043C", value: cur.wall, min: 0.8, max: 5, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wall: v }) }),
+                        React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0434\u043D\u0430", unit: "\u043C\u043C", value: cur.floor, min: 0.8, max: 5, step: 0.1, onChange: (v) => updCur({ floor: v }) }),
+                        React.createElement(Param, { label: "\u0421\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u0435 \u0443\u0433\u043B\u043E\u0432", unit: "\u043C\u043C", value: cur.cornerR ?? DEFAULT_CORNER_R, min: 0, max: Math.min(6, cur.wallOut), step: 0.1, onChange: (v) => updCur({ cornerR: v }) }),
+                        React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 } }, "\u041D\u0430\u0440\u0443\u0436\u043D\u044B\u0435 \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C\u043D\u044B\u0435 \u0443\u0433\u043B\u044B. \u0414\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u0437\u0430\u043C\u0435\u0442\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u044F \u043A\u0440\u043E\u043C\u043A\u0438, \u0438\u043D\u0430\u0447\u0435 \u0443 \u0441\u0430\u043C\u043E\u0433\u043E \u0432\u0435\u0440\u0445\u0430 \u0440\u0430\u0434\u0438\u0443\u0441 \u0443\u0433\u043B\u0430 \u043E\u0431\u043D\u0443\u043B\u044F\u0435\u0442\u0441\u044F \u0438 \u0443\u0433\u043E\u043B \u0432\u044B\u0440\u043E\u0436\u0434\u0430\u0435\u0442\u0441\u044F \u0432 \u043E\u0441\u0442\u0440\u0438\u0451.")),
+                    React.createElement(Collapse, { title: "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.grid, onToggle: () => toggleSec("grid") },
+                        React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: cur.cols, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
+                        React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })))),
+                sub === "cell" && (React.createElement("div", null,
+                    React.createElement(Collapse, { title: "\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.cellPick, onToggle: () => toggleSec("cellPick") },
+                        editorCell,
+                        !editorCell && (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "10px 0 0", lineHeight: 1.45 } }, "\u042F\u0447\u0435\u0439\u043A\u0430 \u043D\u0435 \u0432\u044B\u0431\u0440\u0430\u043D\u0430. \u0417\u0434\u0435\u0441\u044C \u043D\u0430\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0440\u0430\u0437\u043C\u0435\u0440 \u044F\u0447\u0435\u0439\u043A\u0438 \u0438 \u0435\u0451 \u0444\u0438\u043A\u0441\u0430\u0446\u0438\u044F, \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 (\u043B\u0435\u0441\u0435\u043D\u043A\u0430) \u0438 \u043D\u0430\u043A\u043B\u043E\u043D \u043F\u043E\u043B\u0430."))))),
+                sub === "walls" && (React.createElement("div", null,
+                    React.createElement(Collapse, { title: "\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0441\u0442\u0435\u043D\u043A\u0438", open: openSecs.walls, onToggle: () => toggleSec("walls") },
+                        React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, "\u0420\u0435\u0436\u0438\u043C \u0432\u044B\u0431\u043E\u0440\u0430:"),
+                        React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, [["seg", "Сегмент"], ["line", "Вся перегородка"]].map(([m, t]) => (React.createElement("button", { key: m, onClick: () => { setSelMode(m); setSelection(null); }, style: {
+                                padding: "5px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                                border: selMode === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                                background: selMode === m ? "#EFF6FF" : "#fff", color: selMode === m ? SEL : "#3D4A5C",
+                            } }, t)))),
+                        editorWall,
+                        Object.keys(cur.walls).length > 0 && (React.createElement("button", { onClick: () => updCur({ walls: {} }), style: { marginTop: 10, padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#5A6B80" } },
+                            "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u0432\u0441\u0435 \u0441\u0442\u0435\u043D\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u2116",
+                            sel + 1))),
+                    React.createElement(Collapse, { title: "\u0412\u0441\u0442\u0430\u0432\u043D\u044B\u0435 \u0441\u0442\u0435\u043D\u043A\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430", open: openSecs.wparts, onToggle: () => toggleSec("wparts") },
+                        React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 } }, "\u0412 \u043E\u0441\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u043F\u043E \u043B\u0438\u043D\u0438\u0438 \u0441\u0442\u0435\u043D\u043A\u0438 \u0438\u0434\u0451\u0442 \u043A\u0430\u043D\u0430\u0432\u043A\u0430 \u0438\u0437 \u0434\u0432\u0443\u0445 \u0433\u0443\u0431\u043E\u043A, \u0430 \u0441\u0430\u043C\u0430 \u0441\u0442\u0435\u043D\u043A\u0430 \u043F\u0435\u0447\u0430\u0442\u0430\u0435\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u043F\u043B\u043E\u0441\u043A\u043E\u0439 \u0434\u0435\u0442\u0430\u043B\u044C\u044E \u0438 \u0432\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0432 \u043D\u0435\u0451 \u0441\u0432\u0435\u0440\u0445\u0443. \u0412\u043A\u043B\u044E\u0447\u0430\u0435\u0442\u0441\u044F \u043F\u043E \u043A\u0430\u0436\u0434\u043E\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E."),
+                        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 } }, SIDES.map((sd) => (React.createElement("button", { key: sd, onClick: () => toggleSide(sd), style: {
+                                padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                border: WP[sd] ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                                background: WP[sd] ? "#FFF3EB" : "#fff", color: WP[sd] ? ACCENT : "#3D4A5C",
+                            } },
+                            WP[sd] ? "✓ " : "",
+                            SIDE_NAME[sd])))),
+                        wpAnyOn && (React.createElement(React.Fragment, null,
+                            React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: WP.thk, min: 0.8, max: 6, step: 0.1, onChange: (v) => updWp({ thk: v }) }),
+                            React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: WP.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updWp({ clr: v }) }),
+                            React.createElement(Param, { label: "\u041D\u0430\u0440\u0443\u0436\u043D\u0430\u044F \u0433\u0443\u0431\u043A\u0430", unit: "\u043C\u043C", value: WP.lip, min: 0.6, max: 4, step: 0.1, onChange: (v) => updWp({ lip: v }) }),
+                            React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u043A\u0438", unit: "\u043C\u043C", value: WP.seat, min: 2, max: Math.max(4, cur.H - 2), step: 0.5, onChange: (v) => updWp({ seat: v }) }),
+                            wpSides.length > 0 ? (React.createElement(React.Fragment, null,
+                                React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 } },
+                                    "\u0414\u0435\u0442\u0430\u043B\u0438: \u0431\u0430\u0437\u0430 + ",
+                                    wpSides.length,
+                                    " \u0448\u0442.",
+                                    " ",
+                                    wpSides.map((sd) => `${SIDE_NAME[sd].toLowerCase()} ${wpSize(cur, sd).len}×${wpSize(cur, sd).hgt}`).join(", "),
+                                    " \u043C\u043C, \u0442\u043E\u043B\u0449\u0438\u043D\u0430 ",
+                                    WP.thk,
+                                    " \u043C\u043C, \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043F\u043B\u0430\u0448\u043C\u044F. \u0417\u0430\u0437\u043E\u0440 ",
+                                    WP.clr,
+                                    " \u043C\u043C \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB."),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 } },
+                                    "\u26A0 \u0412\u0441\u0442\u0430\u0432\u043D\u0430\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u0443\u0442\u043E\u043F\u043B\u0435\u043D\u0430 \u043D\u0430 ",
+                                    WP.lip,
+                                    " \u043C\u043C: \u043D\u0430 \u044D\u0442\u0438\u0445 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u0445 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043D\u0435 \u0441\u043E\u043C\u043A\u043D\u0443\u0442\u0441\u044F \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0437\u0430\u043C\u043E\u043A \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u044F \u0442\u0430\u043C \u043D\u0435 \u0441\u0442\u0430\u0432\u0438\u0442\u0441\u044F."))) : (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 } },
+                                "\u26A0 \u0421\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u043D\u0435 \u043F\u043E\u043C\u0435\u0449\u0430\u0435\u0442\u0441\u044F: \u043D\u0443\u0436\u043D\u0430 \u0432\u043D\u0435\u0448\u043D\u044F\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u043E\u0442 ",
+                                WPG.minWall,
+                                " \u043C\u043C \u0438 \u0432\u044B\u0441\u043E\u0442\u0430 \u0431\u043E\u043B\u044C\u0448\u0435 \u043F\u043E\u0441\u0430\u0434\u043A\u0438. \u041F\u043E\u043A\u0430 \u0441\u0442\u0435\u043D\u043A\u0438 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u0446\u0435\u043B\u0438\u043A\u043E\u043C."))))),
+                    React.createElement(Collapse, { title: "\u0412\u0441\u0442\u0430\u0432\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438", open: openSecs.inserts, onToggle: () => toggleSec("inserts") },
+                        React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 } }, "\u041D\u0430 \u0432\u043D\u0443\u0442\u0440\u0435\u043D\u043D\u0438\u0445 \u0433\u0440\u0430\u043D\u044F\u0445 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435, \u0430 \u0441\u0430\u043C\u0438 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u043F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u0434\u0435\u0442\u0430\u043B\u044C\u044E \u0438 \u0432\u0434\u0432\u0438\u0433\u0430\u044E\u0442\u0441\u044F \u0441\u0432\u0435\u0440\u0445\u0443 \u2014 \u0438\u0445 \u043C\u043E\u0436\u043D\u043E \u043F\u0435\u0440\u0435\u0441\u0442\u0430\u0432\u043B\u044F\u0442\u044C \u0438 \u0443\u0431\u0438\u0440\u0430\u0442\u044C. \u0417\u0430\u0437\u043E\u0440 \u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 0,2 \u043C\u043C \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443."),
+                        React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, [["none", "Нет"], ["x", "Поперёк"], ["z", "Вдоль"]].map(([v, t]) => (React.createElement("button", { key: v, onClick: () => updIns({ dir: v }), style: {
+                                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                border: INS.dir === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                                background: INS.dir === v ? "#FFF3EB" : "#fff", color: INS.dir === v ? ACCENT : "#3D4A5C",
+                            } }, t)))),
+                        INS.dir !== "none" && (() => {
+                            const slots = insertSlots(cur, INS.dir);
+                            const sz = insertSize(cur, INS.dir);
+                            const crossing = INS.dir === "x" ? L.nRows > 1 : L.nColsAt(0) > 1;
+                            return (React.createElement(React.Fragment, null,
+                                React.createElement(Param, { label: "\u0428\u0430\u0433 \u043C\u0435\u0441\u0442", unit: "\u043C\u043C", value: INS.step, min: 6, max: 80, step: 1, onChange: (v) => updIns({ step: v }) }),
+                                React.createElement(Param, { label: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0432\u0441\u0442\u0430\u0432\u043A\u0438", unit: "\u043C\u043C", value: INS.thk, min: 0.8, max: 6, step: 0.1, onChange: (v) => updIns({ thk: v }) }),
+                                React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440", unit: "\u043C\u043C", value: INS.clr, min: 0, max: 0.6, step: 0.05, onChange: (v) => updIns({ clr: v }) }),
+                                React.createElement(Param, { label: "\u0412\u044B\u0441\u0442\u0443\u043F \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.proj, min: 0.4, max: 4, step: 0.1, onChange: (v) => updIns({ proj: v }) }),
+                                React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430 \u043D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0435\u0439", unit: "\u043C\u043C", value: INS.rail, min: 0.8, max: 5, step: 0.1, onChange: (v) => updIns({ rail: v }) }),
+                                React.createElement("button", { onClick: () => updIns({ show: !INS.show }), style: {
+                                        width: "100%", padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                        border: INS.show ? `2px solid ${SEL}` : "1px solid #D6DDE6", marginBottom: 8,
+                                        background: INS.show ? "#DBEAFE" : "#fff", color: INS.show ? SEL : "#3D4A5C",
+                                    } }, INS.show ? "👁 Вставки показаны в превью" : "👁 Показать вставки в превью"),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.45 } },
+                                    "\u041C\u0435\u0441\u0442 \u043F\u043E\u0434 \u0432\u0441\u0442\u0430\u0432\u043A\u0443: ",
+                                    React.createElement("b", null, slots.length),
+                                    ". \u0414\u0435\u0442\u0430\u043B\u044C: ",
+                                    React.createElement("b", null,
+                                        sz.len,
+                                        " \u00D7 ",
+                                        sz.hgt,
+                                        " \u00D7 ",
+                                        sz.thk,
+                                        " \u043C\u043C"),
+                                    ", \u043F\u0435\u0447\u0430\u0442\u0430\u0435\u0442\u0441\u044F \u043F\u043B\u0430\u0448\u043C\u044F. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0435\u0451 \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB."),
+                                crossing && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } },
+                                    "\u26A0 \u041F\u0435\u0447\u0430\u0442\u043D\u044B\u0435 \u043F\u0435\u0440\u0435\u0433\u043E\u0440\u043E\u0434\u043A\u0438 \u0438\u0434\u0443\u0442 \u043F\u043E\u043F\u0435\u0440\u0451\u043A \u0432\u0441\u0442\u0430\u0432\u043E\u043A \u2014 \u0432\u0441\u0442\u0430\u0432\u043A\u0430 \u043D\u0435 \u043F\u0440\u043E\u0439\u0434\u0451\u0442 \u043E\u0442 \u0441\u0442\u0435\u043D\u043A\u0438 \u0434\u043E \u0441\u0442\u0435\u043D\u043A\u0438. \u041F\u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 ",
+                                    INS.dir === "x" ? "«Ряды»" : "«Колонки»",
+                                    " = 1 \u0432 \u00AB\u0414\u0435\u043B\u0435\u043D\u0438\u0438 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438\u00BB.")),
+                                slots.length === 0 && (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 } }, "\u26A0 \u041D\u0438 \u043E\u0434\u043D\u043E\u0433\u043E \u043C\u0435\u0441\u0442\u0430 \u043D\u0435 \u043F\u043E\u043C\u0435\u0449\u0430\u0435\u0442\u0441\u044F: \u0443\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u0448\u0430\u0433 \u0438\u043B\u0438 \u0443\u0432\u0435\u043B\u0438\u0447\u044C\u0442\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440."))));
+                        })()))))),
             React.createElement("div", { style: { height: 44 } }),
             React.createElement("div", { style: { borderTop: "1px solid #E4E9EF", paddingTop: 14, paddingBottom: 48 } },
                 React.createElement("p", { style: { fontSize: 12, lineHeight: 1.5, color: "#A9B4C2", fontStyle: "italic", margin: 0, textAlign: "center" } }, quote))),

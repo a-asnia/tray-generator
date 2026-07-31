@@ -17,9 +17,19 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (n, c) => { checks.push([n, !!c]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const quoteLoc = page.locator('p[style*="italic"]');
 
-  for (const tab of ["Модель", "Принтер", "Раскладка"]) {
+  for (const tab of ["Контейнеры", "Принтер", "Раскладка"]) {
     await page.locator("button", { hasText: new RegExp(`^${tab}$`) }).click();
     await page.waitForTimeout(250);
     const n = await quoteLoc.count();
@@ -28,7 +38,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   }
 
   // цитата стабильна при переключении вкладок
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   const q1 = await quoteLoc.first().innerText();
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await page.waitForTimeout(200);

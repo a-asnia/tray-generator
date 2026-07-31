@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const setNum = async (label, v) => {
@@ -50,7 +60,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   const centerIdx = st.containers.findIndex((c) => c.gx === 1 && c.gy === 1);
   ok("центральный контейнер найден", centerIdx >= 0);
   await page.locator("button", { hasText: `№${centerIdx + 1}` }).click();
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await setNum("Ширина", 100);
 
   st = await state();

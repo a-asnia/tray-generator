@@ -24,15 +24,18 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
   // или подсветка изменилась
   const meshRef = useRef(new Map());
   const frameRef = useRef(null);
-  const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, lastX: 0, lastY: 0 });
+  // panX/panY/panZ — сдвиг сцены правой кнопкой: камера и точка,
+  // на которую она смотрит, переносятся вместе
+  const orbitRef = useRef({ theta: Math.PI / 4, phi: Math.PI / 3.2, radius: 320, dragging: false, panning: false, panX: 0, panY: 0, panZ: 0, lastX: 0, lastY: 0 });
 
   const applyCamera = useCallback(() => {
     const cam = cameraRef.current, o = orbitRef.current;
     if (!cam) return;
     const y = o.radius * Math.cos(o.phi);
     const r = o.radius * Math.sin(o.phi);
-    cam.position.set(r * Math.sin(o.theta), y + 15, r * Math.cos(o.theta));
-    cam.lookAt(0, 12, 0);
+    cam.position.set(r * Math.sin(o.theta) + o.panX, y + 15 + o.panY, r * Math.cos(o.theta) + o.panZ);
+    cam.lookAt(o.panX, 12 + o.panY, o.panZ);
+    cam.updateMatrixWorld();
   }, []);
 
   useEffect(() => {
@@ -76,17 +79,45 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
     loop();
 
-    const onDown = (e) => { const o = orbitRef.current; o.dragging = true; o.moved = 0; o.lastX = e.clientX; o.lastY = e.clientY; };
+    const onDown = (e) => {
+      const o = orbitRef.current;
+      // левая кнопка вращает, правая (и средняя) двигает сцену
+      o.panning = e.button === 2 || e.button === 1;
+      o.dragging = true; o.moved = 0; o.lastX = e.clientX; o.lastY = e.clientY;
+    };
     const onMove = (e) => {
       const o = orbitRef.current;
       if (!o.dragging) return;
-      o.moved = (o.moved || 0) + Math.abs(e.clientX - o.lastX) + Math.abs(e.clientY - o.lastY);
-      o.theta -= (e.clientX - o.lastX) * 0.008;
-      o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - (e.clientY - o.lastY) * 0.008));
+      const dx = e.clientX - o.lastX, dy = e.clientY - o.lastY;
+      o.moved = (o.moved || 0) + Math.abs(dx) + Math.abs(dy);
       o.lastX = e.clientX; o.lastY = e.clientY;
+      if (o.panning) {
+        // сдвиг в плоскости экрана: по осям камеры, шаг пропорционален
+        // удалению — на любом масштабе тянется одинаково
+        const cam = cameraRef.current;
+        if (!cam) return;
+        const k = o.radius * 0.0018;
+        const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+        o.panX += -dx * k * right.x + dy * k * up.x;
+        o.panY += -dx * k * right.y + dy * k * up.y;
+        o.panZ += -dx * k * right.z + dy * k * up.z;
+        applyCamera();
+        return;
+      }
+      o.theta -= dx * 0.008;
+      o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - dy * 0.008));
       applyCamera();
     };
-    const onUp = () => { orbitRef.current.dragging = false; };
+    const onUp = () => { const o = orbitRef.current; o.dragging = false; o.panning = false; };
+    // правый клик без протяжки возвращает сцену в центр
+    const onCtx = (e) => {
+      e.preventDefault();
+      const o = orbitRef.current;
+      if ((o.moved || 0) > 5) return;
+      o.panX = 0; o.panY = 0; o.panZ = 0;
+      applyCamera();
+    };
     const onWheel = (e) => {
       e.preventDefault();
       const o = orbitRef.current;
@@ -141,6 +172,7 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("contextmenu", onCtx);
     const onResize = () => {
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
@@ -154,6 +186,7 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("contextmenu", onCtx);
       window.removeEventListener("resize", onResize);
       for (const e of meshRef.current.values()) for (const m of e.meshes) m.geometry.dispose();
       meshRef.current.clear();

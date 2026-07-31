@@ -113,6 +113,11 @@ const sanitizeContainer = (c0) => {
     clr: num(cw2.clr, 0.2, 0, 1),
     lip: num(cw2.lip, 1, 0.4, 6),
     seat: num(cw2.seat, 6, 1, 200),
+    thks: Object.fromEntries(
+      Object.entries(obj(cw2.thks))
+        .filter(([k]) => ["n", "s", "w", "e"].includes(k))
+        .map(([k, v]) => [k, num(v, 1.6, 0.6, 10)])
+    ),
   };
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);

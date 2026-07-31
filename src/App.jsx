@@ -44,8 +44,10 @@ export default function TrayGenerator() {
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
   // размеры соединителя зависят от зазора печати (настройка «Принтер»)
   const CG = connGeom(limits.connClr);
-  const [tab, setTab] = useState("model");
-  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, inserts: true, wparts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  const [tab, setTab] = useState("cont");
+  // подвкладки внутри «Контейнеры»
+  const [sub, setSub] = useState("cont");
+  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, wparts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -394,10 +396,19 @@ export default function TrayGenerator() {
     );
   };
 
+  // Выбор чего-либо сам открывает нужную подвкладку: кликнул по ячейке —
+  // видишь настройки ячейки, кликнул по стенке — настройки стенки.
+  const showFor = (s) => {
+    if (!s) return;
+    setTab("cont");
+    setSub(s.type === "cell" || s.type === "fixed" ? "cell" : "walls");
+  };
+  const selectAndShow = (s) => { setSelection(s); showFor(s); };
   const handleSelect = (s) => {
     if (s?.type === "wall" && selMode === "line") {
-      setSelection({ type: "line", src: s.key, ...lineOf(cur, s.key) });
-    } else setSelection(s);
+      const ln = { type: "line", src: s.key, ...lineOf(cur, s.key) };
+      setSelection(ln); showFor(ln);
+    } else selectAndShow(s);
   };
 
   const posMap = useMemo(() => {
@@ -462,36 +473,10 @@ export default function TrayGenerator() {
   }, [containers, connect, posMap, limits.connClr]);
 
   // ── three.js: сцена, камера, пикинг ──
-  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection });
+  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
 
   const L = layout(cur);
   const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
-
-  const WP = wpartsOf(cur);
-  const WPG = wpGeom(cur);
-  const wpSides = SIDES.filter((x) => wpOn(cur, x));
-  const wpAnyOn = SIDES.some((x) => WP[x]);
-  const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
-  const toggleSide = (side) => {
-    // соединению нужна стенка потолще — подгоняем, как для замков
-    const need = WPG.minWall;
-    const on = !WP[side];
-    if (on && cur.wallOut < need) updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
-    else updWp({ [side]: on });
-  };
-  const exportBase = () => {
-    const { solids, c } = built.items[sel];
-    exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
-  };
-  const exportWalls = () => {
-    const { solids, c } = built.items[sel];
-    wpSides.forEach((side, k) =>
-      setTimeout(() => {
-        const sz = wpSize(c, side);
-        exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
-      }, k * 400)
-    );
-  };
 
   const INS = insertsOf(cur);
   const updIns = (patch) => updCur({ inserts: { ...INS, ...patch } });
@@ -721,15 +706,76 @@ export default function TrayGenerator() {
       }
     }
 
-  // ── редактор стенки/линии/ячейки ──
-  let editor = null;
+  const WP = wpartsOf(cur);
+  const WPG = wpGeom(cur);
+  const wpSides = SIDES.filter((x) => wpOn(cur, x));
+  const wpAnyOn = SIDES.some((x) => WP[x]);
+  const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
+  const toggleSide = (side) => {
+    // соединению нужна стенка потолще — подгоняем, как для замков
+    const need = WPG.minWall;
+    const on = !WP[side];
+    if (on && cur.wallOut < need) updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
+    else updWp({ [side]: on });
+  };
+  const exportBase = () => {
+    const { solids, c } = built.items[sel];
+    exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
+  };
+  const exportWalls = () => {
+    const { solids, c } = built.items[sel];
+    wpSides.forEach((side, k) =>
+      setTimeout(() => {
+        const sz = wpSize(c, side);
+        exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
+      }, k * 400)
+    );
+  };
+
+  // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
+  let editorWall = null, editorCell = null;
   if (selection?.type === "wall") {
     const key = selection.key;
     const w = getWall(cur, key);
     const isOuter = key.startsWith("o");
-    editor = (
+    editorWall = (
       <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>{wallTitle(key)}</div>
+        {isOuter && (() => {
+          const sd = key.split(":")[1];
+          const on = !!WP[sd];
+          const thkS = (WP.thks && WP.thks[sd]) || WP.thk;
+          return (
+            <div style={{ background: "#fff", border: "1px solid #E4E9EF", borderRadius: 8, padding: "8px 9px", marginBottom: 10 }}>
+              <button
+                onClick={() => toggleSide(sd)}
+                style={{
+                  width: "100%", padding: "6px 0", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  border: on ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                  background: on ? "#FFF3EB" : "#fff", color: on ? ACCENT : "#3D4A5C",
+                }}
+              >
+                {on ? "✓ Вставная стенка" : "Сделать вставной"}
+              </button>
+              {on && (
+                <div style={{ marginTop: 8 }}>
+                  <Param
+                    label="Толщина этой стенки" unit="мм" value={thkS} min={0.8} max={6} step={0.1}
+                    onChange={(v) => updWp({ thks: { ...(WP.thks || {}), [sd]: v } })}
+                  />
+                  <Param label="Зазор" unit="мм" value={WP.clr} min={0} max={0.6} step={0.05} onChange={(v) => updWp({ clr: v })} />
+                  <Param label="Наружная губка" unit="мм" value={WP.lip} min={0.6} max={4} step={0.1} onChange={(v) => updWp({ lip: v })} />
+                  <Param label="Глубина посадки" unit="мм" value={WP.seat} min={2} max={Math.max(4, cur.H - 2)} step={0.5} onChange={(v) => updWp({ seat: v })} />
+                  <p style={{ fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.4 }}>
+                    {wpOn(cur, sd)
+                      ? `Деталь ${wpSize(cur, sd).len} × ${wpSize(cur, sd).hgt} × ${wpSize(cur, sd).thk} мм. Высота и скругление кромки — из настроек этой стенки выше.`
+                      : `Не помещается: нужна внешняя стенка от ${wpGeom(cur, sd).minWall} мм.`}
+                  </p>
+                </div>
+              )}
+            </div>
+          );
+        })()}
         <Param label="Высота" unit="мм" value={w.h} min={0} max={limits.maxH} step={0.5} onChange={(v) => updWall(key, { h: v })} />
         <Param label={isOuter ? "Наклон внутрь" : "Наклон в одну сторону"} unit="°" value={w.t1} min={0} max={50} step={1} onChange={(v) => updWall(key, { t1: v })} />
         {!isOuter && (
@@ -792,7 +838,7 @@ export default function TrayGenerator() {
     );
   } else if (selection?.type === "line") {
     const first = getWall(cur, selection.keys[0]);
-    editor = (
+    editorWall = (
       <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>{selection.label}</div>
         <Param label="Высота всех сегментов" unit="мм" value={first.h} min={0} max={limits.maxH} step={0.5} onChange={(v) => updWalls(selection.keys, { h: v })} />
@@ -873,7 +919,7 @@ export default function TrayGenerator() {
         {on ? "🔒" : "🔓"} {text}
       </button>
     );
-    editor = (
+    editorCell = (
       <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>
           Ячейка {selection.i + 1}×{selection.j + 1}
@@ -965,7 +1011,7 @@ export default function TrayGenerator() {
       ["w", "← стенка"], ["e", "→ стенка"],
       ["sw", "↙ угол"], ["s", "↓ стенка"], ["se", "↘ угол"],
     ];
-    editor = (
+    editorCell = (
       <div style={{ background: "#FFF3EB", border: "1px solid #F2620F55", borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, marginBottom: 8 }}>
           🔒 Фиксированная ячейка {k + 1}
@@ -1023,7 +1069,7 @@ export default function TrayGenerator() {
         <h1 style={{ fontSize: 19, fontWeight: 700, margin: "3px 0 0" }}>Система контейнеров</h1>
 
         <div style={{ display: "flex", gap: 6, margin: "12px 0 16px" }}>
-          {[["model", "Модель"], ["printer", "Принтер"], ["layout", "Раскладка"]].map(([t, n]) => (
+          {[["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -1218,7 +1264,46 @@ export default function TrayGenerator() {
         </Collapse>
         </div>)}
 
-        {tab === "model" && (<div>
+        {tab === "cont" && (<div>
+        {containers.length > 1 && (
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
+            {containers.map((_, i) => (
+              <button
+                key={i}
+                onClick={() => { setSel(i); setSelection(null); }}
+                style={{
+                  padding: "5px 11px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                  border: i === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                  background: i === sel ? "#FFF3EB" : "#fff", color: i === sel ? ACCENT : "#3D4A5C",
+                }}
+              >
+                №{i + 1}
+              </button>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
+          {[["cont", `Контейнер №${sel + 1}`], ["cell", "Ячейка"], ["walls", "Стенки"]].map(([t, n]) => (
+            <button
+              key={t}
+              onClick={() => setSub(t)}
+              style={{
+                flex: 1, padding: "7px 2px", borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                border: sub === t ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: sub === t ? "#EFF6FF" : "#fff", color: sub === t ? SEL : "#3D4A5C",
+              }}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+
+        <Schematic c={cur} selection={selection} onSelect={handleSelect} />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 12px", lineHeight: 1.45 }}>
+          Нажми на <b>ячейку</b> или <b>стенку</b> — на схеме или прямо на 3D-модели: нужная подвкладка откроется сама.
+        </p>
+
+        {sub === "cont" && (<div>
         <Collapse title={`Внешний размер — контейнер №${sel + 1}`} open={openSecs.outer} onToggle={() => toggleSec("outer")}>
         <button
           onClick={toggleLockOuter}
@@ -1274,6 +1359,51 @@ export default function TrayGenerator() {
         <Collapse title="Деление на ячейки" open={openSecs.grid} onToggle={() => toggleSec("grid")}>
         <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
         <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
+        </Collapse>
+
+        </div>)}
+
+        {sub === "cell" && (<div>
+        <Collapse title="Настройки ячейки" open={openSecs.cellPick} onToggle={() => toggleSec("cellPick")}>
+        {editorCell}
+        {!editorCell && (
+          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "10px 0 0", lineHeight: 1.45 }}>
+            Ячейка не выбрана. Здесь настраиваются размер ячейки и её фиксация, уровень пола (лесенка) и наклон пола.
+          </p>
+        )}
+        </Collapse>
+        </div>)}
+
+        {sub === "walls" && (<div>
+        <Collapse title="Настройки стенки" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
+        <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+          Режим выбора:
+        </p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          {[["seg", "Сегмент"], ["line", "Вся перегородка"]].map(([m, t]) => (
+            <button
+              key={m}
+              onClick={() => { setSelMode(m); setSelection(null); }}
+              style={{
+                padding: "5px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                border: selMode === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: selMode === m ? "#EFF6FF" : "#fff", color: selMode === m ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        {editorWall}
+        {Object.keys(cur.walls).length > 0 && (
+          <button
+            onClick={() => updCur({ walls: {} })}
+            style={{ marginTop: 10, padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#5A6B80" }}
+          >
+            Сбросить все стенки контейнера №{sel + 1}
+          </button>
+        )}
+
         </Collapse>
 
         <Collapse title="Вставные стенки контейнера" open={openSecs.wparts} onToggle={() => toggleSec("wparts")}>
@@ -1381,38 +1511,7 @@ export default function TrayGenerator() {
         })()}
         </Collapse>
 
-        <Collapse title="Редактор сегментов" open={openSecs.walls} onToggle={() => toggleSec("walls")}>
-        <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          Нажми на <b>стенку</b> или <b>ячейку</b> — на схеме или прямо на 3D-модели. Режим выбора стенки:
-        </p>
-        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-          {[["seg", "Сегмент"], ["line", "Вся перегородка"]].map(([m, t]) => (
-            <button
-              key={m}
-              onClick={() => { setSelMode(m); setSelection(null); }}
-              style={{
-                padding: "5px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
-                border: selMode === m ? `2px solid ${SEL}` : "1px solid #D6DDE6",
-                background: selMode === m ? "#EFF6FF" : "#fff", color: selMode === m ? SEL : "#3D4A5C",
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        <Schematic c={cur} selection={selection} onSelect={handleSelect} />
-        {editor}
-        {Object.keys(cur.walls).length > 0 && (
-          <button
-            onClick={() => updCur({ walls: {} })}
-            style={{ marginTop: 10, padding: "6px 12px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #D6DDE6", background: "#fff", color: "#5A6B80" }}
-          >
-            Сбросить все стенки контейнера №{sel + 1}
-          </button>
-        )}
-
-        </Collapse>
-
+        </div>)}
         </div>)}
 
         {/* воздух под кнопками + случайная цитата (одна на сеанс) */}

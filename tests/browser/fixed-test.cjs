@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const fixedRects = () => page.evaluate(() => {
@@ -56,6 +66,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("сетка ряда отдала ячейку", st.containers[0].rowColWs && st.containers[0].rowColWs[0].length === 1);
 
   // ужать контейнер: бокс держит размер, позиция — у северо-западного угла
+  await goCont();
   await setNum("Ширина", 140);
   let fx = await fixedRects();
   ok(`бокс держит 81.4 мм при W=140 (${(fx[0].x1 - fx[0].x0).toFixed(1)})`, near(fx[0].x1 - fx[0].x0, 81.45, 0.1));
@@ -88,7 +99,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.screenshot({ path: "/tmp/fixedcell.png" });
 
   // снять фиксацию
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await page.locator("svg g").last().click();
   await page.waitForTimeout(200);
   await page.locator("button", { hasText: "Снять фиксацию" }).click();

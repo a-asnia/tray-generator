@@ -16,6 +16,16 @@ await new Promise((r) => server.listen(8946, r));
 const browser = await chromium.launch();
 let fail = 0;
 const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
+const goSub = async (n) => {
+  await page.locator(`button:text-is("${n}")`).first().click();
+  await page.waitForTimeout(250);
+};
+const goCont = async () => {
+  await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+  await page.waitForTimeout(200);
+  await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+  await page.waitForTimeout(250);
+};
 
 const load = async (stored) => {
   const page = await browser.newPage({ viewport: { width: 1200, height: 850 } });

@@ -24,6 +24,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const rows = () => page.evaluate(() => {
     const st = JSON.parse(window.localStorage.getItem("trayGenState"));
@@ -56,6 +66,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   // вернуть контейнеру 170: в ряду 1 замкнутая держит 60, сосед впитал;
   // ряд 2 остался равномерным — его ячейки менялись свободно
+  await goCont();
   await setNum("Ширина", 170);
   r = await rows();
   ok(`замок держит только свою ячейку (${r[0][0].toFixed(1)})`, near(r[0][0], 60));

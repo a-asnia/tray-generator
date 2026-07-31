@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const state = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("trayGenState")));
   const setNum = async (label, v) => {
@@ -50,7 +60,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   // ужать выбранный (восточный) до 120: сосед у лимита принтера →
   // остаток 50 закрывает новый контейнер
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await setNum("Ширина", 120);
   st = await state();
   const widths = st.containers.map((c) => c.W).sort((a, b) => a - b);
@@ -69,7 +79,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await page.locator("label", { hasText: "Магнит соседей" }).locator("input").click();
   await page.waitForTimeout(200);
-  await page.locator("button", { hasText: /^Модель$/ }).click();
+  await goCont();
   await setNum("Ширина", 80);
   st = await state();
   ok(`магнит выключен: контейнеров по-прежнему ${st.containers.length}, сумма ужалась (${sumW(st)})`,

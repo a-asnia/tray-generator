@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
 
   const colWs = () => page.evaluate(() => {
@@ -49,6 +59,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("замок виден на схеме", await page.locator("svg text", { hasText: "🔒" }).count());
 
   // ужать контейнер: Ширина 170 → 150
+  await goCont();
   const wInput = page.locator('div:has(label:text-is("Ширина")) input[type="number"]').first();
   await wInput.fill("150");
   await wInput.press("Enter");
@@ -66,6 +77,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("после возврата W замкнутая всё ещё держит размер", near(back[0], before[0]) && near(back[1], before[1]));
 
   // снять замок — сетка выравнивается
+  await goSub("Ячейка");
   await page.locator("button", { hasText: /🔒 ширина/ }).click();
   await page.waitForTimeout(200);
   const freed = await colWs();

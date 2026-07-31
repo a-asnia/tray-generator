@@ -26,23 +26,38 @@ await page.waitForTimeout(700);
 
 let fail = 0;
 const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
+const goSub = async (n) => {
+  await page.locator(`button:text-is("${n}")`).first().click();
+  await page.waitForTimeout(250);
+};
+const goCont = async () => {
+  await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+  await page.waitForTimeout(200);
+  await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+  await page.waitForTimeout(250);
+};
 const numOf = async (label) => +(await page.locator(String.raw`div:has(> div > label:has-text("${label}")) input[type="number"]`).first().inputValue());
 const setNum = async (label, v) => {
   const el = page.locator(String.raw`div:has(> div > label:has-text("${label}")) input[type="number"]`).first();
   await el.fill(String(v)); await el.press("Enter"); await page.waitForTimeout(250);
 };
 
+await goSub("Стенки");
 ok("группа на месте", await page.locator("button", { hasText: "Вставные стенки контейнера" }).count() === 1);
 ok("по умолчанию выключено", await page.locator("text=Толщина стенки").count() === 0);
 
 // внешняя стенка по умолчанию 2.75 — соединению мало, должна подрасти
+await goCont();
 await setNum("Внешние стенки", 2.8);
 const wallBefore = await numOf("Внешние стенки");
+await goSub("Стенки");
 await page.locator('button:text-is("Задняя")').click();
 await page.waitForTimeout(600);
 ok("сторона включилась", await page.locator('button:text-is("✓ Задняя")').count() === 1);
 ok("остальные стороны не тронуты", await page.locator('button:text-is("Передняя")').count() === 1);
+await goCont();
 const wallAfter = await numOf("Внешние стенки");
+await goSub("Стенки");
 ok("толщина стенки подогнана под соединение", wallAfter > wallBefore, ` (${wallBefore} → ${wallAfter})`);
 ok("настройки появились", await page.locator("text=Наружная губка").count() === 1);
 
@@ -81,8 +96,8 @@ if (got.length === 2) {
 await page.reload({ waitUntil: "load" });
 await page.waitForSelector("canvas");
 await page.waitForTimeout(700);
-await page.locator("button", { hasText: /^Модель$/ }).click();
-await page.waitForTimeout(300);
+await goCont();
+await goSub("Стенки");
 ok("выбор сторон сохранился", await page.locator('button:text-is("✓ Задняя")').count() === 1);
 
 // выключение возвращает цельные стенки

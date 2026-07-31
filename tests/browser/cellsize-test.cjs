@@ -25,6 +25,16 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
 
   const checks = [];
   const ok = (name, cond) => { checks.push([name, !!cond]); };
+  const goSub = async (n) => {
+    await page.locator(`button:text-is("${n}")`).first().click();
+    await page.waitForTimeout(250);
+  };
+  const goCont = async () => {
+    await page.locator("button", { hasText: /^Контейнеры$/ }).first().click();
+    await page.waitForTimeout(200);
+    await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+    await page.waitForTimeout(250);
+  };
   const near = (a, b, eps = 0.05) => Math.abs(a - b) < eps;
   const model = () => page.evaluate(() => {
     const c = JSON.parse(window.localStorage.getItem("trayGenState")).containers[0];
@@ -68,9 +78,11 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("замок на схеме", await page.locator("svg text", { hasText: "🔒" }).count());
 
   // ужать контейнер: зафиксированная держит 100, свободная ужимается
+  await goCont();
   await setNum("Ширина", 150);
   const m3 = await model();
   ok(`W=150: зафиксированная держит 100 (${m3.colWs[0].toFixed(1)})`, near(m3.colWs[0], 100));
+  await goSub("Ячейка");
   ok(`свободная ужалась (${m3.colWs[1].toFixed(1)})`, near(m3.colWs[1], 150 - 2 * 2.75 - 1.6 - 100));
 
   // снять замки — вписанные размеры сохраняются
