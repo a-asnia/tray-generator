@@ -1,12 +1,16 @@
 // Проверка фрагмента для превью-артефакта: он публикуется внутрь чужого
 // <html>/<body>, поэтому проверяем именно так — оборачиваем в скелет и
 // смотрим, что страница живёт (канвас, вкладки, нет экрана ошибки).
-//   node build.mjs --artifact /tmp/frag.html && node tests/artifact-check.cjs /tmp/
+//   node build.mjs --artifact /tmp/frag.html && node tests/artifact-check.cjs /tmp/frag.html
 const { createServer } = require("node:http");
 const { readFileSync } = require("node:fs");
 const { chromium } = require("playwright");
-const SP = process.argv[2] || "/tmp/";
-const frag = readFileSync(SP + "tray-preview.html", "utf8");
+const FRAG = process.argv[2];
+if (!FRAG) {
+  console.error("Укажите файл фрагмента: node tests/artifact-check.cjs <файл.html>");
+  process.exit(2);
+}
+const frag = readFileSync(FRAG, "utf8");
 const page_html = `<!doctype html><html><head><meta charset="utf-8"></head><body>${frag}</body></html>`;
 (async () => {
   const server = createServer((q, s) => { s.setHeader("Content-Type", "text/html; charset=utf-8"); s.end(page_html); });
