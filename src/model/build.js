@@ -10,34 +10,13 @@ import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits } from "./connectors.js";
 import { layout, getWall, getCellLvl, DEFAULT_CORNER_R } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
-import { wpGeom, wpOn, wpActive, wpSpan, wpSlotSpan } from "./wallparts.js";
 
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
-export function buildContainer(c, conn0, opts = {}) {
-  let conn = conn0;
+export function buildContainer(c, conn, opts = {}) {
   const { W, D, H, wall, wallOut, floor } = c;
   const L = layout(c);
-  let solids = [];
-  // Собрать часть тел в отдельную ДЕТАЛЬ (вставная стенка контейнера):
-  // они помечаются part, чтобы экспорт мог разложить контейнер на детали,
-  // а превью по-прежнему показывало его собранным.
-  const asPart = (part, fn) => {
-    const acc = solids;
-    solids = [];
-    fn();
-    const got = solids;
-    solids = acc;
-    for (const b of got) b.part = part;
-    solids.push(...got);
-  };
-  // вставные стенки контейнера: включаются по каждой стороне отдельно
-  const wpIns = (side) => wpOn(c, side);
-  // на вставной стороне контейнеры не смыкаются вплотную — замка там нет
-  if (wpActive(c)) {
-    conn = { ...conn };
-    for (const [s2, k] of [["n", "N"], ["s", "S"], ["w", "W"], ["e", "E"]]) if (wpIns(s2)) conn[k] = null;
-  }
+  const solids = [];
   const tan = (deg) => Math.tan((deg * Math.PI) / 180);
 
   // Галтель: небольшое скругление внутреннего угла в месте примыкания
@@ -211,8 +190,7 @@ export function buildContainer(c, conn0, opts = {}) {
   // Радиус скругления угла по плану: настройка контейнера, но не меньше
   // радиуса кромки (иначе угол вырождается) и не больше толщины стенки
   // (иначе дуга съела бы внутреннюю грань).
-  const cornerR = (kA, symA, kB, symB, sA, sB) => {
-    if (wpIns(sA) || wpIns(sB)) return 0;
+  const cornerR = (kA, symA, kB, symB) => {
     const rA = rOuter(kA, wallOut, symA), rB = rOuter(kB, wallOut, symB);
     if (rA < 0.05 || Math.abs(rA - rB) > 0.01) return 0;
     const wA = getWall(c, kA), wB = getWall(c, kB);
@@ -666,62 +644,6 @@ export function buildContainer(c, conn0, opts = {}) {
     else pushWallBody(key, wc, thk, sym, s0, s1, S0, S1, mapFn, trim);
   };
 
-  // ── Вставные стенки контейнера ──
-  // Основание получает канавку по линии стенки: наружная губка, паз,
-  // внутренняя губка. Сама стенка — отдельная плоская деталь, вставляется
-  // в паз сверху и стоит на дне.
-  const wpBase = (side) => {
-    const g = wpGeom(c, side);
-    const key = `o:${side}:0`;
-    const wc = getWall(c, key);
-    if (wc.h <= 0.3) return;
-    const [u0, u1] = wpSlotSpan(c, side);
-    if (u1 - u0 < 1) return;
-    const hSeat = Math.min(g.seat, wc.h);
-    const along = side === "n" || side === "s";
-    const at = (o, y, u) => (along
-      ? [u, y, side === "n" ? -D / 2 + o : D / 2 - o]
-      : [side === "w" ? -W / 2 + o : W / 2 - o, y, u]);
-    const slab = (oA, oB) => {
-      if (oB - oA < 0.05) return;
-      const q = (u) => [at(oA, 0, u), at(oB, 0, u), at(oB, hSeat, u), at(oA, hSeat, u)];
-      solids.push(prismSolid(q(u0), q(u1), key));
-    };
-    slab(0, g.lip);                       // наружная губка
-    slab(g.lip + g.cw, wallOut);          // внутренняя губка
-    // торцы канавки: у печатной соседней стенки паз упирается в её грань,
-    // и там канавку надо закрыть, иначе стенка выедет вбок
-    for (const [u, dir] of [[u0, 1], [u1, -1]]) {
-      const perp = along ? (dir > 0 ? "w" : "e") : (dir > 0 ? "n" : "s");
-      if (wpIns(perp)) continue;
-      const q = (uu) => [at(g.lip, 0, uu), at(g.lip + g.cw, 0, uu), at(g.lip + g.cw, hSeat, uu), at(g.lip, hSeat, uu)];
-      solids.push(prismSolid(q(u), q(u + dir * Math.min(1, g.clr + 0.6)), key));
-    }
-  };
-
-  // Плоская деталь-стенка на своём месте (превью). В экспорт уходит той
-  // же геометрией, разложенной плашмя (wpFlatten).
-  const wpPlate = (side) => {
-    const g = wpGeom(c, side);
-    const key = `o:${side}:0`;
-    const wc = getWall(c, key);
-    if (wc.h <= 0.3) return;
-    const [u0, u1] = wpSpan(c, side);
-    if (u1 - u0 < 1) return;
-    const along = side === "n" || side === "s";
-    const o0 = g.lip + g.clr;
-    const at = (o, y, u) => (along
-      ? [u, y + floor, side === "n" ? -D / 2 + o : D / 2 - o]
-      : [side === "w" ? -W / 2 + o : W / 2 - o, y + floor, u]);
-    // профиль с скруглением верхней кромки, как у обычной стенки
-    const parts = wallProfile(g.thk, Math.min(wc.h, H) - floor, wc.rnd, true);
-    for (const quad of parts) {
-      const qa = quad.map(([o, y]) => at(o0 + g.thk / 2 + o, y, u0));
-      const qb = quad.map(([o, y]) => at(o0 + g.thk / 2 + o, y, u1));
-      solids.push(prismSolid(qa, qb, key));
-    }
-  };
-
   // ── Радиусы наружных вертикальных углов ──
   // Считаются до построения стенок и пола: стенки укорачивают торцы на эту
   // величину, пол вырезает у себя квадратик угла, а само тело угла ставится
@@ -731,10 +653,10 @@ export function buildContainer(c, conn0, opts = {}) {
   const kS0 = "o:s:0", kSL = `o:s:${L.nColsAt(L.nRows - 1) - 1}`;
   const kW0 = "o:w:0", kWL = `o:w:${L.nRows - 1}`;
   const kE0 = "o:e:0", kEL = `o:e:${L.nRows - 1}`;
-  const rNW = cornerR(kN0, symN, kW0, symW, "n", "w");
-  const rNE = cornerR(kNL, symN, kE0, symE, "n", "e");
-  const rSW = cornerR(kS0, symS, kWL, symW, "s", "w");
-  const rSE = cornerR(kSL, symS, kEL, symE, "s", "e");
+  const rNW = cornerR(kN0, symN, kW0, symW);
+  const rNE = cornerR(kNL, symN, kE0, symE);
+  const rSW = cornerR(kS0, symS, kWL, symW);
+  const rSE = cornerR(kSL, symS, kEL, symE);
   // Что подрезать в углу. Скруглённый угол: обе стенки на постоянный
   // радиус (место для тела угла). Смешанный угол (у одной стенки замок):
   // только стенка с замком, по дуге свободной — иначе валик свободной
@@ -892,11 +814,7 @@ export function buildContainer(c, conn0, opts = {}) {
           : (o, y, x) => [x, y, D / 2 - off - o];
         // в углах корпуса торец подрезается под скругление W/E-стенки
         const rL = side === "n" ? cutNW_ns : cutSW_ns, rR = side === "n" ? cutNE_ns : cutSE_ns;
-        // вставная сторона строится целиком отдельно: канавка в основании
-        // и плоская деталь-стенка (см. wpBase/wpPlate), поэтому обычные
-        // сегменты этой стороны не нужны
-        if (!wpIns(side))
-          for (const [a, b] of splitRange(bx0, bx1, zones))
+        for (const [a, b] of splitRange(bx0, bx1, zones))
             pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
               a: a <= -W / 2 + 0.01 ? rL : 0,
               b: b >= W / 2 - 0.01 ? rR : 0,
@@ -922,8 +840,7 @@ export function buildContainer(c, conn0, opts = {}) {
           ? (o, y, z) => [-W / 2 + off + o, y, z]
           : (o, y, z) => [W / 2 - off - o, y, z];
         const rT = side === "w" ? cutNW_we : cutNE_we, rB = side === "w" ? cutSW_we : cutSE_we;
-        if (!wpIns(side))
-          for (const [a, b] of splitRange(bz0, bz1, zones))
+        for (const [a, b] of splitRange(bz0, bz1, zones))
             pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
               a: a <= -D / 2 + 0.01 ? rT : 0,
               b: b >= D / 2 - 0.01 ? rB : 0,
@@ -933,13 +850,6 @@ export function buildContainer(c, conn0, opts = {}) {
           addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);
       }
     }
-  }
-
-  // вставные стенки: канавка в основании + сама деталь
-  for (const side of ["n", "s", "w", "e"]) {
-    if (!wpIns(side)) continue;
-    wpBase(side);
-    if (opts.walls !== false) asPart(`wall:${side}`, () => wpPlate(side));
   }
 
   // тела наружных вертикальных углов

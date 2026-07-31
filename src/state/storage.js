@@ -4,7 +4,6 @@
 
 import { CONN, connGeom } from "../model/connectors.js";
 import { DEF_INSERTS } from "../model/inserts.js";
-import { DEF_WPARTS } from "../model/wallparts.js";
 import { layout } from "../model/layout.js";
 
 let nextId = 2;
@@ -29,9 +28,6 @@ export const makeContainer = (src, gx, gy) => ({
   // вставные стенки: направляющие на внутренних гранях, сами перегородки
   // печатаются отдельно и вдвигаются сверху
   inserts: { ...DEF_INSERTS },
-  // вставные стенки контейнера: база (дно + угловые стойки) и четыре
-  // плоские стенки, которые вдвигаются в стойки сверху
-  wparts: { ...DEF_WPARTS },
 });
 
 // ── Приведение чисел к разумным пределам ──
@@ -106,19 +102,7 @@ const sanitizeContainer = (c0) => {
     rail: num(ci.rail, 1.6, 0.6, 6),
     show: !!ci.show,
   };
-  const cw2 = obj(c.wparts);
-  c.wparts = {
-    n: !!cw2.n, s: !!cw2.s, w: !!cw2.w, e: !!cw2.e,
-    thk: num(cw2.thk, 1.6, 0.6, 10),
-    clr: num(cw2.clr, 0.2, 0, 1),
-    lip: num(cw2.lip, 1, 0.4, 6),
-    seat: num(cw2.seat, 6, 1, 200),
-    thks: Object.fromEntries(
-      Object.entries(obj(cw2.thks))
-        .filter(([k]) => ["n", "s", "w", "e"].includes(k))
-        .map(([k, v]) => [k, num(v, 1.6, 0.6, 10)])
-    ),
-  };
+  delete c.wparts; // фича вставных стенок контейнера убрана
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);
   // явные размеры по рядам: только конечные положительные числа

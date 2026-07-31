@@ -37,7 +37,6 @@ const MODULES = [
   "src/geometry/manifold.js",
   "src/model/connectors.js",
   "src/model/inserts.js",
-  "src/model/wallparts.js",
   "src/model/layout.js",
   "src/model/build.js",
   "src/state/storage.js",

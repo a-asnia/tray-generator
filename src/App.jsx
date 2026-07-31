@@ -8,7 +8,6 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
-import { wpartsOf, wpGeom, wpSize, wpFlatten, wpOn, SIDES, SIDE_NAME } from "./model/wallparts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -47,7 +46,7 @@ export default function TrayGenerator() {
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
-  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, wparts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -710,32 +709,6 @@ export default function TrayGenerator() {
       }
     }
 
-  const WP = wpartsOf(cur);
-  const WPG = wpGeom(cur);
-  const wpSides = SIDES.filter((x) => wpOn(cur, x));
-  const wpAnyOn = SIDES.some((x) => WP[x]);
-  const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
-  const toggleSide = (side) => {
-    // соединению нужна стенка потолще — подгоняем, как для замков
-    const need = WPG.minWall;
-    const on = !WP[side];
-    if (on && cur.wallOut < need) updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
-    else updWp({ [side]: on });
-  };
-  const exportBase = () => {
-    const { solids, c } = built.items[sel];
-    exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
-  };
-  const exportWalls = () => {
-    const { solids, c } = built.items[sel];
-    wpSides.forEach((side, k) =>
-      setTimeout(() => {
-        const sz = wpSize(c, side);
-        exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
-      }, k * 400)
-    );
-  };
-
   // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
   let editorWall = null, editorCell = null;
   if (selection?.type === "wall") {
@@ -745,41 +718,6 @@ export default function TrayGenerator() {
     editorWall = (
       <div style={{ background: "#EFF6FF", border: `1px solid ${SEL}33`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: SEL, marginBottom: 8 }}>{wallTitle(key)}</div>
-        {isOuter && (() => {
-          const sd = key.split(":")[1];
-          const on = !!WP[sd];
-          const thkS = (WP.thks && WP.thks[sd]) || WP.thk;
-          return (
-            <div style={{ background: "#fff", border: "1px solid #E4E9EF", borderRadius: 8, padding: "8px 9px", marginBottom: 10 }}>
-              <button
-                onClick={() => toggleSide(sd)}
-                style={{
-                  width: "100%", padding: "6px 0", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                  border: on ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                  background: on ? "#FFF3EB" : "#fff", color: on ? ACCENT : "#3D4A5C",
-                }}
-              >
-                {on ? "✓ Вставная стенка" : "Сделать вставной"}
-              </button>
-              {on && (
-                <div style={{ marginTop: 8 }}>
-                  <Param
-                    label="Толщина этой стенки" unit="мм" value={thkS} min={0.8} max={6} step={0.1}
-                    onChange={(v) => updWp({ thks: { ...(WP.thks || {}), [sd]: v } })}
-                  />
-                  <Param label="Зазор" unit="мм" value={WP.clr} min={0} max={0.6} step={0.05} onChange={(v) => updWp({ clr: v })} />
-                  <Param label="Наружная губка" unit="мм" value={WP.lip} min={0.6} max={4} step={0.1} onChange={(v) => updWp({ lip: v })} />
-                  <Param label="Глубина посадки" unit="мм" value={WP.seat} min={2} max={Math.max(4, cur.H - 2)} step={0.5} onChange={(v) => updWp({ seat: v })} />
-                  <p style={{ fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.4 }}>
-                    {wpOn(cur, sd)
-                      ? `Деталь ${wpSize(cur, sd).len} × ${wpSize(cur, sd).hgt} × ${wpSize(cur, sd).thk} мм. Высота и скругление кромки — из настроек этой стенки выше.`
-                      : `Не помещается: нужна внешняя стенка от ${wpGeom(cur, sd).minWall} мм.`}
-                  </p>
-                </div>
-              )}
-            </div>
-          );
-        })()}
         <Param label="Высота" unit="мм" value={w.h} min={0} max={limits.maxH} step={0.5} onChange={(v) => updWall(key, { h: v })} />
         <Param label={isOuter ? "Наклон внутрь" : "Наклон в одну сторону"} unit="°" value={w.t1} min={0} max={50} step={1} onChange={(v) => updWall(key, { t1: v })} />
         {!isOuter && (
@@ -1230,22 +1168,6 @@ export default function TrayGenerator() {
         >
           {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
         </button>
-        {wpSides.length > 0 && (
-          <>
-            <button
-              onClick={exportBase}
-              style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #16202E", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
-            >
-              Скачать базу (дно + стойки)
-            </button>
-            <button
-              onClick={exportWalls}
-              style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
-            >
-              Скачать вставные стенки ({wpSides.length} файла)
-            </button>
-          </>
-        )}
         {INS.dir !== "none" && insertSlots(cur, INS.dir).length > 0 && (
           <button
             onClick={exportInsert}
@@ -1338,9 +1260,9 @@ export default function TrayGenerator() {
         <Collapse title="Толщина стенок и дна" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
         <Param
           label="Внешние стенки" unit="мм" value={cur.wallOut}
-          min={Math.max(connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0)} max={8} step={0.1}
+          min={connect ? CG.minWall : 0.8} max={8} step={0.1}
           disabled={cur.lockOuter && cur.lockCell}
-          onChange={(v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0) })}
+          onChange={(v) => applyParam({ wallOut: connect ? Math.max(v, CG.minWall) : v })}
         />
         {connect && (
           cur.wallOut < CG.minWall - 0.001 ? (
@@ -1414,51 +1336,6 @@ export default function TrayGenerator() {
           </button>
         )}
 
-        </Collapse>
-
-        <Collapse title="Вставные стенки контейнера" open={openSecs.wparts} onToggle={() => toggleSec("wparts")}>
-        <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 }}>
-          В основании по линии стенки идёт канавка из двух губок, а сама стенка печатается отдельной плоской деталью и вставляется в неё сверху. Включается по каждой стороне отдельно.
-        </p>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
-          {SIDES.map((sd) => (
-            <button
-              key={sd}
-              onClick={() => toggleSide(sd)}
-              style={{
-                padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                border: WP[sd] ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                background: WP[sd] ? "#FFF3EB" : "#fff", color: WP[sd] ? ACCENT : "#3D4A5C",
-              }}
-            >
-              {WP[sd] ? "✓ " : ""}{SIDE_NAME[sd]}
-            </button>
-          ))}
-        </div>
-        {wpAnyOn && (
-          <>
-            <Param label="Толщина стенки" unit="мм" value={WP.thk} min={0.8} max={6} step={0.1} onChange={(v) => updWp({ thk: v })} />
-            <Param label="Зазор" unit="мм" value={WP.clr} min={0} max={0.6} step={0.05} onChange={(v) => updWp({ clr: v })} />
-            <Param label="Наружная губка" unit="мм" value={WP.lip} min={0.6} max={4} step={0.1} onChange={(v) => updWp({ lip: v })} />
-            <Param label="Глубина посадки" unit="мм" value={WP.seat} min={2} max={Math.max(4, cur.H - 2)} step={0.5} onChange={(v) => updWp({ seat: v })} />
-            {wpSides.length > 0 ? (
-              <>
-                <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
-                  Детали: база + {wpSides.length} шт.{" "}
-                  {wpSides.map((sd) => `${SIDE_NAME[sd].toLowerCase()} ${wpSize(cur, sd).len}×${wpSize(cur, sd).hgt}`).join(", ")} мм,
-                  толщина {WP.thk} мм, печатаются плашмя. Зазор {WP.clr} мм на сторону. Скачать — на вкладке «Принтер».
-                </p>
-                <p style={{ fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 }}>
-                  ⚠ Вставная стенка утоплена на {WP.lip} мм: на этих сторонах контейнеры не сомкнутся вплотную, поэтому замок соединителя там не ставится.
-                </p>
-              </>
-            ) : (
-              <p style={{ fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 }}>
-                ⚠ Соединение не помещается: нужна внешняя стенка от {WPG.minWall} мм и высота больше посадки. Пока стенки печатаются целиком.
-              </p>
-            )}
-          </>
-        )}
         </Collapse>
 
         <Collapse title="Вставные перегородки" open={openSecs.inserts} onToggle={() => toggleSec("inserts")}>

@@ -41,8 +41,8 @@ ok("подвкладка «Стенки»", await has('button:text-is("Стен�
 ok("на «Контейнер №N» — размер и деление", (await has("text=Внешний размер")) && (await has("text=Деление на ячейки")));
 await page.locator('button:text-is("Стенки")').click();
 await page.waitForTimeout(300);
-ok("на «Стенки» — вставные стенки и перегородки",
-  (await has("text=Вставные стенки контейнера")) && (await has("text=Вставные перегородки")));
+ok("на «Стенки» — настройки стенки и вставные перегородки",
+  (await has("text=Настройки стенки")) && (await has("text=Вставные перегородки")));
 ok("на «Стенки» нет размеров контейнера", !(await has("text=Деление на ячейки")));
 
 await page.locator("button", { hasText: /^Принтер$/ }).click();
