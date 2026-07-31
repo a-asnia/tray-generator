@@ -118,7 +118,7 @@ export function buildContainer(c, conn0, opts = {}) {
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
   const zonesOf = (side) =>
-    conn[side]
+    conn[side] && CONN.fits
       ? conn[side].vs
           .map((vc) => [vc - CONN.bossW / 2, vc + CONN.bossW / 2])
           .sort((a, b) => a[0] - b[0])

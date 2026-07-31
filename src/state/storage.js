@@ -2,7 +2,7 @@
 // Контейнеры и автосохранение в localStorage
 // ══════════════════════════════════════════════════════════════
 
-import { CONN } from "../model/connectors.js";
+import { CONN, connGeom } from "../model/connectors.js";
 import { DEF_INSERTS } from "../model/inserts.js";
 import { DEF_WPARTS } from "../model/wallparts.js";
 import { layout } from "../model/layout.js";
@@ -179,9 +179,12 @@ export function normalizeProject(d) {
       connClr: num(lim.connClr, 0.2, 0, 1),
     };
     // габариты не могут превышать лимиты принтера — приложение держит этот
-    // инвариант при смене лимитов, файл проекта тоже обязан ему подчиняться
+    // инвариант при смене лимитов, файл проекта тоже обязан ему подчиняться.
+    // Стенка с замком не может быть тоньше паза: иначе паз прорезал бы её.
+    const minW = d.connect === false ? 0 : connGeom(d.limits.connClr).minWall;
     d.containers = d.containers.map((c) => ({
       ...c,
+      wallOut: Math.max(c.wallOut, minW),
       W: Math.min(c.W, d.limits.maxW),
       D: Math.min(c.D, d.limits.maxD),
       H: Math.min(c.H, d.limits.maxH),

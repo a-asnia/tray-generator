@@ -23,7 +23,24 @@ export function connGeom(clr) {
   g.bossW = g.w2 + 2 * g.clr + 2 * g.flank;     // ширина зоны соединителя
   return g;
 }
-export const connOf = (c) => connGeom(c && c.connClr);
+// Геометрия замка для конкретного контейнера. Паз живёт ВНУТРИ толщины
+// внешней стенки, поэтому за ним обязан оставаться задний слой (back).
+// Если стенка тоньше — паз ужимается, а когда ужимать уже некуда, замок
+// на этой стороне не ставится вовсе: лучше без замка, чем дыра в стенке
+// (в такое состояние можно попасть, выключив стыковку, утоньшив стенку и
+// включив обратно, или увеличив зазор, или открыв старый проект).
+export const MIN_DG = 0.9; // мельче этого «ласточкин хвост» не держит
+export const connOf = (c) => {
+  const g = connGeom(c && c.connClr);
+  const wallOut = c && Number.isFinite(c.wallOut) ? c.wallOut : Infinity;
+  const maxDg = wallOut - g.back;
+  if (maxDg < g.dg) {
+    g.dg = Math.max(0, maxDg);
+    g.depth = Math.max(0, g.dg - g.clr);
+  }
+  g.fits = g.dg >= MIN_DG;
+  return g;
+};
 // значения по умолчанию (совместимость со старым кодом)
 Object.assign(CONN, connGeom(DEFAULT_CLR));
 
@@ -52,6 +69,7 @@ export function splitRange(a, b, zones) {
 export function addConnUnits(solids, c, side, vs, rnd = 0) {
   const { W, D, H, wallOut } = c;
   const CONN = connOf(c); // зазор берётся из настройки контейнера
+  if (!CONN.fits) return; // стенка слишком тонкая — замок не ставим
   const dg = CONN.dg;
   const axis = side === "E" || side === "W" ? "x" : "z";
   const s = side === "E" || side === "S" ? 1 : -1;

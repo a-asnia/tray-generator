@@ -61,10 +61,14 @@ export default function TrayGenerator() {
 
   const updLimits = (patch) => {
     const nl = { ...limits, ...patch };
+    // при росте зазора паз становится глубже и требует более толстой
+    // стенки — иначе он прорезал бы её насквозь
+    const minW = connect ? connGeom(nl.connClr).minWall : 0;
     // габариты и высоты стенок не могут превышать лимиты принтера
     setContainers((cs) =>
       cs.map((c) => ({
         ...c,
+        wallOut: Math.max(c.wallOut, minW),
         W: Math.min(c.W, nl.maxW),
         D: Math.min(c.D, nl.maxD),
         H: Math.min(c.H, nl.maxH),
@@ -1339,9 +1343,15 @@ export default function TrayGenerator() {
           onChange={(v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0) })}
         />
         {connect && (
-          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
-            Минимум {CG.minWall} мм — паз соединителя прячется внутри стенки.
-          </p>
+          cur.wallOut < CG.minWall - 0.001 ? (
+            <p style={{ fontSize: 11.5, color: "#B45309", margin: "-6px 0 10px", lineHeight: 1.4 }}>
+              ⚠ Для замка нужна стенка от {CG.minWall} мм — сейчас {cur.wallOut} мм. Паз ужат, а если и так не помещается, замок на этом контейнере не ставится: стенка важнее.
+            </p>
+          ) : (
+            <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
+              Минимум {CG.minWall} мм — паз соединителя прячется внутри стенки.
+            </p>
+          )
         )}
         <Param label="Перегородки" unit="мм" value={cur.wall} min={0.8} max={5} step={0.1} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ wall: v })} />
         <Param label="Толщина дна" unit="мм" value={cur.floor} min={0.8} max={5} step={0.1} onChange={(v) => updCur({ floor: v })} />
