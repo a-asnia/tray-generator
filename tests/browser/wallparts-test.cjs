@@ -33,20 +33,25 @@ const setNum = async (label, v) => {
 };
 
 ok("группа на месте", await page.locator("button", { hasText: "Вставные стенки контейнера" }).count() === 1);
-ok("по умолчанию выключено", await page.locator("text=Толщина шипа").count() === 0);
+ok("по умолчанию выключено", await page.locator("text=Толщина стенки").count() === 0);
 
 // внешняя стенка по умолчанию 2.75 — соединению мало, должна подрасти
 await setNum("Внешние стенки", 2.8);
 const wallBefore = await numOf("Внешние стенки");
-await page.locator("button", { hasText: "Сделать стенки вставными" }).click();
+await page.locator('button:text-is("Задняя")').click();
 await page.waitForTimeout(600);
-ok("режим включился", await page.locator("button", { hasText: "Стенки вставные" }).count() === 1);
+ok("сторона включилась", await page.locator('button:text-is("✓ Задняя")').count() === 1);
+ok("остальные стороны не тронуты", await page.locator('button:text-is("Передняя")').count() === 1);
 const wallAfter = await numOf("Внешние стенки");
 ok("толщина стенки подогнана под соединение", wallAfter > wallBefore, ` (${wallBefore} → ${wallAfter})`);
-ok("настройки соединения появились", await page.locator("text=Толщина шипа").count() === 1);
+ok("настройки появились", await page.locator("text=Наружная губка").count() === 1);
 
 const info = async () => (await page.locator("text=/Детали: база/").first().textContent()) || "";
-ok("размеры деталей показаны", /Детали: база \+ 4 стенки/.test(await info()), ` → ${(await info()).trim().slice(0, 90)}`);
+ok("размеры детали показаны", /Детали: база \+ 1 шт/.test(await info()), ` → ${(await info()).trim().slice(0, 90)}`);
+// вторая сторона добавляет ещё одну деталь
+await page.locator('button:text-is("Левая")').click();
+await page.waitForTimeout(500);
+ok("две стороны — две детали", /Детали: база \+ 2 шт/.test(await info()), ` → ${(await info()).trim().slice(0, 70)}`);
 
 // экспорт: база и четыре стенки
 await page.locator("button", { hasText: /^Принтер$/ }).click();
@@ -64,12 +69,12 @@ const got = [];
 page.on("download", (d) => got.push(d));
 await page.locator("button", { hasText: "Скачать вставные стенки" }).click();
 await page.waitForTimeout(3000);
-ok("скачались четыре стенки", got.length === 4, ` → ${got.map((d) => d.suggestedFilename()).join(", ")}`);
-if (got.length === 4) {
+ok("скачались обе стенки", got.length === 2, ` → ${got.map((d) => d.suggestedFilename()).join(", ")}`);
+if (got.length === 2) {
   const b = readFileSync(await got[0].path());
   const n = b.readUInt32LE(80);
   ok("STL стенки валиден", b.length === 84 + n * 50 && n > 10, ` (${n} треугольников)`);
-  ok("имена деталей различаются", new Set(got.map((d) => d.suggestedFilename())).size === 4);
+  ok("имена деталей различаются", new Set(got.map((d) => d.suggestedFilename())).size === 2);
 }
 
 // настройка переживает перезагрузку
@@ -78,12 +83,13 @@ await page.waitForSelector("canvas");
 await page.waitForTimeout(700);
 await page.locator("button", { hasText: /^Модель$/ }).click();
 await page.waitForTimeout(300);
-ok("режим сохранился", await page.locator("button", { hasText: "Стенки вставные" }).count() === 1);
+ok("выбор сторон сохранился", await page.locator('button:text-is("✓ Задняя")').count() === 1);
 
-// выключение возвращает цельный контейнер
-await page.locator("button", { hasText: "Стенки вставные" }).click();
+// выключение возвращает цельные стенки
+await page.locator('button:text-is("✓ Задняя")').click();
+await page.locator('button:text-is("✓ Левая")').click();
 await page.waitForTimeout(500);
-ok("режим выключается", await page.locator("button", { hasText: "Сделать стенки вставными" }).count() === 1);
+ok("стороны выключаются", await page.locator('button:text-is("Задняя")').count() === 1);
 await page.locator("button", { hasText: /^Принтер$/ }).click();
 await page.waitForTimeout(300);
 ok("кнопок деталей больше нет", await page.locator("button", { hasText: "Скачать базу" }).count() === 0);

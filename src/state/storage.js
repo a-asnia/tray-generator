@@ -107,10 +107,11 @@ const sanitizeContainer = (c0) => {
   };
   const cw2 = obj(c.wparts);
   c.wparts = {
-    on: !!cw2.on,
-    tng: num(cw2.tng, 1.4, 0.6, 8),
+    n: !!cw2.n, s: !!cw2.s, w: !!cw2.w, e: !!cw2.e,
+    thk: num(cw2.thk, 1.6, 0.6, 10),
     clr: num(cw2.clr, 0.2, 0, 1),
-    post: num(cw2.post, 12, 4, 60),
+    lip: num(cw2.lip, 1, 0.4, 6),
+    seat: num(cw2.seat, 6, 1, 200),
   };
   c.lockedCellW = obj(c.lockedCellW);
   c.lockedRows = obj(c.lockedRows);

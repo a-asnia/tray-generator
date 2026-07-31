@@ -8,7 +8,7 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
-import { wpartsOf, wpGeom, wpSize, wpFlatten, wpOk } from "./model/wallparts.js";
+import { wpartsOf, wpGeom, wpSize, wpFlatten, wpOn, wpActive, SIDES, SIDE_NAME } from "./model/wallparts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -469,23 +469,25 @@ export default function TrayGenerator() {
 
   const WP = wpartsOf(cur);
   const WPG = wpGeom(cur);
-  const wpReady = WP.on && wpOk(cur);
-  const toggleWparts = () => {
+  const wpSides = SIDES.filter((x) => wpOn(cur, x));
+  const wpAnyOn = SIDES.some((x) => WP[x]);
+  const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
+  const toggleSide = (side) => {
     // соединению нужна стенка потолще — подгоняем, как для замков
     const need = WPG.minWall;
-    if (!WP.on && cur.wallOut < need) updCur({ wparts: { ...WP, on: true }, wallOut: Math.max(cur.wallOut, need) });
-    else updCur({ wparts: { ...WP, on: !WP.on } });
+    const on = !WP[side];
+    if (on && cur.wallOut < need) updCur({ wparts: { ...WP, [side]: true }, wallOut: Math.max(cur.wallOut, need) });
+    else updWp({ [side]: on });
   };
-  const updWp = (patch) => updCur({ wparts: { ...WP, ...patch } });
   const exportBase = () => {
     const { solids, c } = built.items[sel];
     exportSTL(solids.filter((b) => !b.part), `base_${c.W}x${c.D}x${c.H}.stl`);
   };
   const exportWalls = () => {
     const { solids, c } = built.items[sel];
-    ["n", "s", "w", "e"].forEach((side, k) =>
+    wpSides.forEach((side, k) =>
       setTimeout(() => {
-        const sz = wpSize(c, side === "n" || side === "s" ? "x" : "z");
+        const sz = wpSize(c, side);
         exportSTL(wpFlatten(solids.filter((b) => b.part === `wall:${side}`), side, c), `wall_${side}_${sz.len}x${sz.hgt}x${sz.thk}.stl`);
       }, k * 400)
     );
@@ -1178,7 +1180,7 @@ export default function TrayGenerator() {
         >
           {solidBusy ? "Объединяю тело…" : `Скачать цельный STL (солид) — №${sel + 1}`}
         </button>
-        {wpReady && (
+        {wpSides.length > 0 && (
           <>
             <button
               onClick={exportBase}
@@ -1190,7 +1192,7 @@ export default function TrayGenerator() {
               onClick={exportWalls}
               style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
             >
-              Скачать вставные стенки (4 файла)
+              Скачать вставные стенки ({wpSides.length} файла)
             </button>
           </>
         )}
@@ -1247,9 +1249,9 @@ export default function TrayGenerator() {
         <Collapse title="Толщина стенок и дна" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
         <Param
           label="Внешние стенки" unit="мм" value={cur.wallOut}
-          min={Math.max(connect ? CG.minWall : 0.8, wpReady ? WPG.minWall : 0)} max={8} step={0.1}
+          min={Math.max(connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0)} max={8} step={0.1}
           disabled={cur.lockOuter && cur.lockCell}
-          onChange={(v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpReady ? WPG.minWall : 0) })}
+          onChange={(v) => applyParam({ wallOut: Math.max(v, connect ? CG.minWall : 0.8, wpAnyOn ? WPG.minWall : 0) })}
         />
         {connect && (
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
@@ -1268,31 +1270,43 @@ export default function TrayGenerator() {
 
         <Collapse title="Вставные стенки контейнера" open={openSecs.wparts} onToggle={() => toggleSec("wparts")}>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 }}>
-          Контейнер печатается как <b>база</b> (дно с угловыми стойками) и <b>четыре плоские стенки</b>, которые вдвигаются в стойки сверху. Снаружи стенка стоит вровень с габаритом, поэтому контейнеры по-прежнему смыкаются вплотную и замки работают.
+          В основании по линии стенки идёт канавка из двух губок, а сама стенка печатается отдельной плоской деталью и вставляется в неё сверху. Включается по каждой стороне отдельно.
         </p>
-        <button
-          onClick={toggleWparts}
-          style={{
-            width: "100%", padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-            border: WP.on ? `2px solid ${ACCENT}` : "1px solid #D6DDE6", marginBottom: 10,
-            background: WP.on ? "#FFF3EB" : "#fff", color: WP.on ? ACCENT : "#3D4A5C",
-          }}
-        >
-          {WP.on ? "✓ Стенки вставные" : "Сделать стенки вставными"}
-        </button>
-        {WP.on && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
+          {SIDES.map((sd) => (
+            <button
+              key={sd}
+              onClick={() => toggleSide(sd)}
+              style={{
+                padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: WP[sd] ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: WP[sd] ? "#FFF3EB" : "#fff", color: WP[sd] ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {WP[sd] ? "✓ " : ""}{SIDE_NAME[sd]}
+            </button>
+          ))}
+        </div>
+        {wpAnyOn && (
           <>
-            <Param label="Толщина шипа" unit="мм" value={WP.tng} min={0.8} max={4} step={0.1} onChange={(v) => updWp({ tng: v })} />
+            <Param label="Толщина стенки" unit="мм" value={WP.thk} min={0.8} max={6} step={0.1} onChange={(v) => updWp({ thk: v })} />
             <Param label="Зазор" unit="мм" value={WP.clr} min={0} max={0.6} step={0.05} onChange={(v) => updWp({ clr: v })} />
-            <Param label="Длина угловой стойки" unit="мм" value={WP.post} min={6} max={40} step={1} onChange={(v) => updWp({ post: v })} />
-            {wpReady ? (
-              <p style={{ fontSize: 11.5, color: "#64748B", margin: 0, lineHeight: 1.45 }}>
-                Детали: база + 4 стенки. Стенка вдоль ширины — <b>{wpSize(cur, "x").len} × {wpSize(cur, "x").hgt} × {wpSize(cur, "x").thk} мм</b>, вдоль глубины — <b>{wpSize(cur, "z").len} × {wpSize(cur, "z").hgt} × {wpSize(cur, "z").thk} мм</b>; печатаются плашмя.
-                Зазор {WP.clr} мм на сторону. Скачать — на вкладке «Принтер».
-              </p>
+            <Param label="Наружная губка" unit="мм" value={WP.lip} min={0.6} max={4} step={0.1} onChange={(v) => updWp({ lip: v })} />
+            <Param label="Глубина посадки" unit="мм" value={WP.seat} min={2} max={Math.max(4, cur.H - 2)} step={0.5} onChange={(v) => updWp({ seat: v })} />
+            {wpSides.length > 0 ? (
+              <>
+                <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+                  Детали: база + {wpSides.length} шт.{" "}
+                  {wpSides.map((sd) => `${SIDE_NAME[sd].toLowerCase()} ${wpSize(cur, sd).len}×${wpSize(cur, sd).hgt}`).join(", ")} мм,
+                  толщина {WP.thk} мм, печатаются плашмя. Зазор {WP.clr} мм на сторону. Скачать — на вкладке «Принтер».
+                </p>
+                <p style={{ fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 }}>
+                  ⚠ Вставная стенка утоплена на {WP.lip} мм: на этих сторонах контейнеры не сомкнутся вплотную, поэтому замок соединителя там не ставится.
+                </p>
+              </>
             ) : (
               <p style={{ fontSize: 11.5, color: "#B45309", margin: 0, lineHeight: 1.45 }}>
-                ⚠ Соединение не помещается: нужна внешняя стенка от {WPG.minWall} мм и контейнер побольше. Пока контейнер печатается целиком.
+                ⚠ Соединение не помещается: нужна внешняя стенка от {WPG.minWall} мм и высота больше посадки. Пока стенки печатаются целиком.
               </p>
             )}
           </>

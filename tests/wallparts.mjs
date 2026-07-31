@@ -1,16 +1,15 @@
-// Вставные стенки контейнера: контейнер делится на базу (дно + угловые
-// стойки) и четыре плоские стенки. Главное, что проверяем: наружные
-// плоскости остаются идеально ровными на всю высоту (иначе контейнеры не
-// сомкнутся и замки перестанут работать), а шип точно входит в паз.
+// Вставные стенки контейнера: в основании канавка (наружная губка, паз,
+// внутренняя губка), стенка — отдельная плоская деталь, вставляется в паз.
+// Включается по каждой стороне отдельно.
 import { buildContainer } from "../src/model/build.js";
-import { wpGeom, wpSpans, wpSize, wpFlatten, wpOk } from "../src/model/wallparts.js";
+import { wpGeom, wpOn, wpSpan, wpSize, wpFlatten, SIDES } from "../src/model/wallparts.js";
 
 const mk = (wp, o = {}) => ({
-  W: 120, D: 90, H: 30, cols: 1, rows: 1, gridMode: "count",
+  W: 80, D: 50, H: 18, cols: 1, rows: 1, gridMode: "count",
   wall: 1.6, wallOut: 4, floor: 1.6,
   walls: {}, cells: {}, rowColWs: null, rowDs: null,
   lockedCellW: {}, lockedRows: {}, fixedCells: [],
-  wparts: { on: false, tng: 1.4, clr: 0.2, post: 12, ...wp },
+  wparts: { n: false, s: false, w: false, e: false, thk: 1.6, clr: 0.2, lip: 1, seat: 6, ...wp },
   ...o,
 });
 const noConn = { N: null, S: null, W: null, E: null };
@@ -25,117 +24,99 @@ const bbox = (b) => {
   return { lo, hi };
 };
 
-// ── деление на детали ──
+// ── включение по сторонам ──
 {
-  const c = mk({ on: true });
-  const s = buildContainer(c, noConn, {});
+  ok("по умолчанию всё выключено", SIDES.every((sd) => !wpOn(mk({}), sd)));
+  const one = mk({ n: true });
+  ok("включена только одна сторона", wpOn(one, "n") && !wpOn(one, "s") && !wpOn(one, "w") && !wpOn(one, "e"));
+  const s = buildContainer(one, noConn, {});
   const parts = new Set(s.map((b) => b.part).filter(Boolean));
-  ok("контейнер делится на четыре стенки", parts.size === 4 && ["n", "s", "w", "e"].every((x) => parts.has(`wall:${x}`)), ` → ${[...parts].join(", ")}`);
-  ok("база остаётся отдельной", s.some((b) => !b.part));
-  const off = buildContainer(mk({ on: false }), noConn, {});
-  ok("выключено — деталей нет", off.every((b) => !b.part));
+  ok("деталь ровно одна", parts.size === 1 && parts.has("wall:n"), ` → ${[...parts]}`);
+  const all = buildContainer(mk({ n: true, s: true, w: true, e: true }), noConn, {});
+  ok("все четыре — четыре детали", new Set(all.map((b) => b.part).filter(Boolean)).size === 4);
 }
 
-// ── наружные плоскости ровные на всю высоту ──
+// ── канавка: губки и паз ──
 {
-  const c = mk({ on: true });
-  const s = buildContainer(c, noConn, {});
-  for (const [side, axis, want] of [["n", 2, -c.D / 2], ["s", 2, c.D / 2], ["w", 0, -c.W / 2], ["e", 0, c.W / 2]]) {
-    let out = false, hits = 0;
-    for (const b of s) for (const t of b.tris) for (const p of t) {
-      if (want < 0 ? p[axis] < want - 0.001 : p[axis] > want + 0.001) out = true;
-      if (near(p[axis], want, 0.001)) hits++;
-    }
-    ok(`сторона ${side}: за габарит ничего не выходит и плоскость есть`, !out && hits > 20);
-  }
-  // по высоте плоскость непрерывна: и стойка, и стенка достают до неё
-  const atOuter = (yLo, yHi) => s.filter((b) => {
-    const x = bbox(b);
-    return near(x.lo[2], -c.D / 2, 0.001) && x.hi[1] > yLo && x.lo[1] < yHi;
-  });
-  ok("низ северной плоскости образован базой (стойки)", atOuter(0.5, 2).some((b) => !b.part));
-  ok("верх северной плоскости образован стенкой-деталью", atOuter(c.H - 3, c.H).some((b) => b.part === "wall:n"));
-}
-
-// ── шип и паз ──
-{
-  const c = mk({ on: true });
+  const c = mk({ n: true });
   const g = wpGeom(c);
-  const sp = wpSpans(c, c.W);
   const s = buildContainer(c, noConn, {});
-  const nWall = s.filter((b) => b.part === "wall:n");
-  // самый крайний по X кусок детали — шип
-  const tip = nWall.map(bbox).sort((a, b) => a.lo[0] - b.lo[0])[0];
-  ok(`шип доходит до угла (${tip.lo[0].toFixed(1)} = ${(-sp.tip).toFixed(1)})`, near(tip.lo[0], -sp.tip, 0.05));
-  ok(`толщина шипа ${(tip.hi[2] - tip.lo[2]).toFixed(2)} = ${g.tng}`, near(tip.hi[2] - tip.lo[2], g.tng));
-  ok(`шип утоплен от наружной плоскости на ${(tip.lo[2] + c.D / 2).toFixed(2)} = ${g.tOut}`, near(tip.lo[2] + c.D / 2, g.tOut));
-  // паз в стойке: между наружным и внутренним слоями
-  // тела стойки: не деталь, в пределах длины стойки и толщины стенки,
-  // достают до верха
-  const post = s.filter((b) => {
-    const x = bbox(b);
-    return !b.part
-      && x.lo[0] > -c.W / 2 - 0.01 && x.hi[0] < -c.W / 2 + g.post + 0.01
-      && x.lo[2] > -c.D / 2 - 0.01 && x.hi[2] < -c.D / 2 + c.wallOut + 0.01
-      && x.hi[1] > c.H - 1;
-  }).map(bbox);
-  // слои считаем на участке паза (дальше сплошного куска у угла)
-  const inSlot = post.filter((b) => b.lo[0] > -c.W / 2 + c.wallOut - 0.01);
-  const outerSlab = inSlot.find((b) => b.hi[2] < -c.D / 2 + g.tOut + 0.01);
-  ok("у стойки есть наружный слой", !!outerSlab, outerSlab ? ` (толщина ${(outerSlab.hi[2] - outerSlab.lo[2]).toFixed(2)})` : "");
-  if (outerSlab) {
-    const innerSlab = inSlot.find((b) => b.lo[2] > outerSlab.hi[2] + 0.01);
-    ok("у стойки есть внутренний слой", !!innerSlab);
-    if (innerSlab) {
-      const gap = innerSlab.lo[2] - outerSlab.hi[2];
-      ok(`паз = шип + два зазора (${gap.toFixed(2)} = ${g.cw.toFixed(2)})`, near(gap, g.cw));
-      ok(`шип входит в паз с зазором ${g.clr} мм на сторону`, near(tip.lo[2] - outerSlab.hi[2], g.clr) && near(innerSlab.lo[2] - tip.hi[2], g.clr));
-    }
+  const base = s.filter((b) => !b.part).map(bbox)
+    .filter((b) => b.lo[2] < -c.D / 2 + c.wallOut + 0.01 && b.hi[1] < g.seat + 0.5 && b.hi[1] > 1);
+  const lipOut = base.find((b) => near(b.lo[2], -c.D / 2) && b.hi[2] < -c.D / 2 + g.lip + 0.01);
+  ok("наружная губка на габарите", !!lipOut, lipOut ? ` (толщина ${(lipOut.hi[2] - lipOut.lo[2]).toFixed(2)} = ${g.lip})` : "");
+  const lipIn = base.find((b) => b.lo[2] > -c.D / 2 + g.lip + g.cw - 0.01);
+  ok("внутренняя губка есть", !!lipIn);
+  if (lipOut && lipIn) {
+    ok(`паз = толщина + два зазора (${(lipIn.lo[2] - lipOut.hi[2]).toFixed(2)} = ${g.cw.toFixed(2)})`, near(lipIn.lo[2] - lipOut.hi[2], g.cw));
+    ok(`губки высотой ${g.seat} мм`, near(Math.max(lipOut.hi[1], lipIn.hi[1]), g.seat, 0.05));
   }
-  // тело стенки не упирается в стойку
-  const body = nWall.map(bbox).filter((b) => near(b.hi[2] - b.lo[2], c.wallOut, 0.2));
-  const bodyLo = Math.min(...body.map((b) => b.lo[0]));
-  ok(`между телом стенки и стойкой зазор ${g.clr} мм`, near(bodyLo, -sp.body, 0.05), ` (${bodyLo.toFixed(2)} = ${(-sp.body).toFixed(2)})`);
+  // деталь стоит в пазу с зазором и опирается на дно
+  const plate = s.filter((b) => b.part === "wall:n").map(bbox);
+  const pz0 = Math.min(...plate.map((b) => b.lo[2])), pz1 = Math.max(...plate.map((b) => b.hi[2]));
+  ok(`стенка в пазу с зазором ${g.clr} мм на сторону`, near(pz0 - (lipOut ? lipOut.hi[2] : 0), g.clr) && near((lipIn ? lipIn.lo[2] : 0) - pz1, g.clr), ` (${pz0.toFixed(2)}…${pz1.toFixed(2)})`);
+  ok(`толщина стенки ${(pz1 - pz0).toFixed(2)} = ${g.thk}`, near(pz1 - pz0, g.thk));
+  ok("стенка стоит на дне", near(Math.min(...plate.map((b) => b.lo[1])), c.floor));
+  ok("стенка доходит до верха", near(Math.max(...plate.map((b) => b.hi[1])), c.H, 0.05));
 }
 
-// ── деталь раскладывается плашмя ──
+// ── пролёты и углы ──
 {
-  const c = mk({ on: true });
+  // печатная соседняя стенка занимает угол
+  const c1 = mk({ n: true });
+  const [a1] = wpSpan(c1, "n");
+  ok("рядом с печатной стенкой деталь начинается за её гранью", near(a1, -c1.W / 2 + c1.wallOut + 0.2), ` (${a1.toFixed(2)})`);
+  // если соседняя тоже вставная — N/S идут до углов, W/E встают между ними
+  const c2 = mk({ n: true, w: true });
+  const [a2] = wpSpan(c2, "n");
+  const [b2] = wpSpan(c2, "w");
+  const g = wpGeom(c2);
+  ok("N доходит до угла за наружную губку", near(a2, -c2.W / 2 + g.lip + g.clr), ` (${a2.toFixed(2)})`);
+  ok("W встаёт за стенкой N", near(b2, -c2.D / 2 + g.lip + g.cw + g.clr), ` (${b2.toFixed(2)})`);
+  // угол закрыт: на высоте между посадкой и верхом материал есть
+  const s = buildContainer(c2, noConn, {});
+  const inSolid = (pt) => s.some((b) => {
+    const bb = bbox(b);
+    return pt.every((v, k) => v > bb.lo[k] - 0.001 && v < bb.hi[k] + 0.001);
+  });
+  ok("угол не разошёлся", inSolid([-c2.W / 2 + g.lip + 0.5, c2.H - 2, -c2.D / 2 + g.lip + 0.5]));
+}
+
+// ── деталь плашмя ──
+{
+  const c = mk({ n: true, w: true });
   const s = buildContainer(c, noConn, {});
-  for (const [side, axis] of [["n", "x"], ["w", "z"]]) {
+  for (const side of ["n", "w"]) {
     const flat = wpFlatten(s.filter((b) => b.part === `wall:${side}`), side, c);
-    const sz = wpSize(c, axis);
-    let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+    const sz = wpSize(c, side);
+    const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
     for (const b of flat) for (const t of b.tris) for (const p of t) for (let k = 0; k < 3; k++) {
       lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]);
     }
-    ok(`деталь ${side}: лежит на столе`, near(lo[1], 0, 0.05), ` (низ ${lo[1].toFixed(2)})`);
+    ok(`деталь ${side}: лежит на столе`, near(lo[1], 0, 0.05));
     ok(`деталь ${side}: толщина по вертикали ${(hi[1] - lo[1]).toFixed(2)} = ${sz.thk}`, near(hi[1] - lo[1], sz.thk, 0.05));
     ok(`деталь ${side}: длина ${(hi[0] - lo[0]).toFixed(1)} = ${sz.len}`, near(hi[0] - lo[0], sz.len, 0.1));
-    ok(`деталь ${side}: высота стенки легла в плоскость стола`, hi[2] - lo[2] > c.H - c.floor - 1.5);
+    ok(`деталь ${side}: высота ${(hi[2] - lo[2]).toFixed(1)} = ${sz.hgt}`, near(hi[2] - lo[2], sz.hgt, 0.1));
   }
 }
 
-// ── когда соединение не влезает, режим не включается ──
+// ── ограничения и совместимость ──
 {
-  ok("тонкая стенка — соединение невозможно", !wpOk(mk({ on: true }, { wallOut: 2 })));
-  ok("крошечный контейнер — соединение невозможно", !wpOk(mk({ on: true }, { W: 30, D: 30 })));
-  const thin = buildContainer(mk({ on: true }, { wallOut: 2 }), noConn, {});
+  ok("тонкая стенка — сторона не включается", !wpOn(mk({ n: true }, { wallOut: 2 }), "n"));
+  ok("низкий контейнер — сторона не включается", !wpOn(mk({ n: true }, { H: 6 }), "n"));
+  const thin = buildContainer(mk({ n: true }, { wallOut: 2 }), noConn, {});
   ok("при тонкой стенке контейнер строится целиком", thin.every((b) => !b.part));
-}
-
-// ── совместимость ──
-{
-  const withConn = buildContainer(mk({ on: true }), { ...noConn, E: { male: true, vs: [-20, 20] }, W: { male: false, vs: [-20, 20] } }, {});
-  ok("строится с замками", withConn.length > 0 && withConn.some((b) => b.part === "wall:e"));
-  let out = false;
-  for (const b of withConn) for (const t of b.tris) for (const p of t) if (p[0] > 60.001 + 1.7) out = true;
-  ok("рельс замка остаётся на детали-стенке", withConn.some((b) => b.tag === "conn"));
-  void out;
-  const grid = buildContainer(mk({ on: true }, { cols: 3, rows: 2 }), noConn, {});
-  ok("строится с сеткой перегородок", grid.some((b) => b.tag.startsWith("v:")) && grid.some((b) => b.part));
-  const box = buildContainer(mk({ on: true }, { fixedCells: [{ w: 30, d: 25, anchor: "nw", lvl: 0 }] }), noConn, {});
-  ok("строится с фиксированной ячейкой", box.some((b) => b.tag.startsWith("fw:")));
+  // на вставной стороне замок не ставится, на печатной — остаётся
+  const conn = { N: { male: false, vs: [-15, 15] }, S: { male: true, vs: [-15, 15] }, W: null, E: null };
+  const s = buildContainer(mk({ n: true }), conn, {});
+  let nConn = 0;
+  for (const b of s) if (b.tag === "conn") { const bb = bbox(b); if (bb.lo[2] < 0) nConn++; }
+  ok("на вставной стороне замка нет", nConn === 0);
+  ok("на печатной стороне замок остался", s.some((b) => b.tag === "conn"));
+  const grid = buildContainer(mk({ n: true, s: true }, { cols: 3, rows: 2 }), noConn, {});
+  ok("работает с сеткой перегородок", grid.some((b) => b.tag.startsWith("v:")) && grid.some((b) => b.part));
+  const box = buildContainer(mk({ n: true }, { fixedCells: [{ w: 20, d: 15, anchor: "ne", lvl: 0 }] }), noConn, {});
+  ok("работает с фиксированной ячейкой", box.some((b) => b.tag.startsWith("fw:")));
 }
 
 console.log(fail === 0 ? "\nWALL PART TESTS PASSED" : `\n${fail} FAILURES`);
