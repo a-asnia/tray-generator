@@ -3,7 +3,7 @@
 // что рёбра не лезут в чужие ячейки и не портят наружные плоскости,
 // и что деталь физически влезает между стенками.
 import { buildContainer } from "../src/model/build.js";
-import { insertSlots, insertSize, insertPlateSolids, insertsOf } from "../src/model/inserts.js";
+import { insertSlots, insertSlotsAll, insertSize, insertPlateSolids, insertInPlace, insertProfile, insertsOf, MIN_WEB } from "../src/model/inserts.js";
 
 const mk = (ins, o = {}) => ({
   W: 120, D: 80, H: 28, cols: 1, rows: 1, gridMode: "count",
@@ -126,6 +126,66 @@ const ribsAt = (solids, face, inward) => {
   // бокс на пути — место пропускается
   const box = buildContainer(mk({ dir: "x" }, { fixedCells: [{ w: 40, d: 30, anchor: "nw", lvl: 0 }] }), noConn, {});
   ok("строится с фиксированной ячейкой", box.length > 0);
+}
+
+// ── поперечные печатные стенки: вырез, а не пересечение ──
+{
+  // 2 ряда, низкая перегородка между ними — вставка обязана её оседлать
+  const c = mk({ dir: "x" }, { rows: 2, walls: { "h:0:0": { h: 8 } } });
+  const slots = insertSlots(c, "x");
+  ok("низкая поперечная стенка не отнимает места", slots.length > 0, ` → ${slots.length}`);
+  const rects = insertProfile(c, "x", 0);
+  const zd = 0; // перегородка посередине глубины
+  const over = rects.filter((r) => r.s0 < zd && r.s1 > zd);
+  ok("над стенкой ровно один прямоугольник (вырез снизу)", over.length === 1);
+  ok(`низ выреза выше стенки (${over[0]?.y0} ≥ 8.5)`, over.length === 1 && near(over[0].y0, 8.5));
+  // тело вставки нигде не пересекает тело печатной перегородки
+  const wallTop = 8, wallBand = [zd - c.wall / 2, zd + c.wall / 2];
+  const collide = rects.some((r) => r.s0 < wallBand[1] - 0.01 && r.s1 > wallBand[0] + 0.01 && r.y0 < wallTop - 0.01);
+  ok("вставка не проходит сквозь печатную стенку", !collide);
+  // и по бокам выреза остаётся зазор
+  const left = rects.find((r) => Math.abs(r.s1 - (wallBand[0] - insertsOf(c).clr)) < 0.01);
+  ok("вырез шире стенки на зазор с каждой стороны", !!left);
+
+  // полноразмерная поперечная стенка делает место непригодным
+  const cTall = mk({ dir: "x" }, { rows: 2 });
+  ok("высокая поперечная стенка блокирует места", insertSlots(cTall, "x").length === 0);
+  ok("сами места геометрически есть", insertSlotsAll(cTall, "x").length > 0);
+  ok("порог — сплошная полоса MIN_WEB над вырезом",
+    insertSlots(mk({ dir: "x" }, { rows: 2, walls: { "h:0:0": { h: cTall.H - 0.3 - MIN_WEB - 0.6 } } }), "x").length > 0);
+}
+
+// ── лесенка полов: низ повторяет уровни, верх не торчит над кромкой ──
+{
+  const c = mk({ dir: "x" }, { rows: 2, walls: { "h:0:0": { h: 8 } }, cells: { "0:0": { lvl: 10 } } });
+  const solidsIn = insertInPlace(c, "x", 0);
+  let yTop = -1e9;
+  for (const b of solidsIn) for (const t of b.tris) for (const p of t) yTop = Math.max(yTop, p[1]);
+  ok(`верх вставки не выше кромки (${yTop.toFixed(1)} ≤ ${c.H})`, yTop <= c.H - 0.29);
+  const rects = insertProfile(c, "x", 0);
+  const rowA = rects.find((r) => r.s1 < 0 && r.s0 < -5); // ряд 0 (поднятый пол)
+  const rowB = rects.find((r) => r.s0 > 0 && r.s1 > 5);  // ряд 1 (пол на дне)
+  ok("над поднятым полом низ сидит на нём", rowA && near(rowA.y0, c.floor + 10));
+  ok("над обычным полом низ сидит на дне", rowB && near(rowB.y0, c.floor));
+  // деталь плашмя: высота bbox — от самого низкого низа
+  const sz = insertSize(c, "x");
+  ok(`высота детали от низкого участка (${sz.hgt})`, near(sz.hgt, c.H - 0.3 - c.floor, 0.06));
+  const plate = insertPlateSolids(c, "x");
+  ok("деталь из нескольких кусков (ступени и вырез)", plate.length >= 3, ` → ${plate.length}`);
+  let py = [1e9, -1e9];
+  for (const b of plate) for (const t of b.tris) for (const p of t) py = [Math.min(py[0], p[1]), Math.max(py[1], p[1])];
+  ok("деталь по-прежнему лежит плашмя", near(py[0], 0) && near(py[1], insertsOf(c).thk));
+}
+
+// ── вставка «вдоль» седлает вертикальные перегородки своего ряда ──
+{
+  const c = mk({ dir: "z" }, { cols: 2, walls: { "v:0:0": { h: 6 } } });
+  const slots = insertSlots(c, "z");
+  ok("вдоль: место есть при низкой перегородке", slots.length > 0, ` → ${slots.length}`);
+  const rects = insertProfile(c, "z", 0);
+  const over = rects.filter((r) => r.s0 < 0 && r.s1 > 0);
+  ok("вдоль: вырез над перегородкой", over.length === 1 && near(over[0].y0, 6.5));
+  ok("вдоль: полноразмерная перегородка блокирует", insertSlots(mk({ dir: "z" }, { cols: 2 }), "z").length === 0);
 }
 
 console.log(fail === 0 ? "\nINSERT TESTS PASSED" : `\n${fail} FAILURES`);

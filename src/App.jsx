@@ -7,7 +7,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
-import { insertsOf, insertSlots, insertSize, insertPlateSolids } from "./model/inserts.js";
+import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
@@ -561,17 +561,24 @@ export default function TrayGenerator() {
   // ── проект в файл и обратно ──
   const fileRef = useRef(null);
   const [ioMsg, setIoMsg] = useState("");
+  // прежний таймер гасится: иначе старое «Проект открыт» стирало бы
+  // новое сообщение раньше времени
+  const ioTimer = useRef(null);
+  const flashIo = (msg, ms) => {
+    setIoMsg(msg);
+    clearTimeout(ioTimer.current);
+    ioTimer.current = setTimeout(() => setIoMsg(""), ms);
+  };
   const saveProject = () => {
     exportProject({ containers, limits, connect, magnet, openSecs });
-    setIoMsg("Проект сохранён в файл");
-    setTimeout(() => setIoMsg(""), 3000);
+    flashIo("Проект сохранён в файл", 3000);
   };
   const openProjectFile = (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value = ""; // чтобы повторный выбор того же файла сработал
     if (!file) return;
     importProject(file, (proj) => {
-      if (!proj) { setIoMsg("Не удалось открыть: это не файл проекта"); setTimeout(() => setIoMsg(""), 4000); return; }
+      if (!proj) { flashIo("Не удалось открыть: это не файл проекта", 4000); return; }
       setContainers(proj.containers);
       if (proj.limits) setLimits(proj.limits);
       setConnect(proj.connect !== false);
@@ -579,8 +586,7 @@ export default function TrayGenerator() {
       if (proj.openSecs) setOpenSecs((o) => ({ ...o, ...proj.openSecs }));
       setSel(0);
       setSelection(null);
-      setIoMsg(`Проект открыт: ${proj.containers.length} контейнер(ов)`);
-      setTimeout(() => setIoMsg(""), 4000);
+      flashIo(`Проект открыт: ${proj.containers.length} контейнер(ов)`, 4000);
     });
   };
 
@@ -1376,7 +1382,9 @@ export default function TrayGenerator() {
           ))}
         </div>
         {INS.dir !== "none" && (() => {
+          const slotsAll = insertSlotsAll(cur, INS.dir);
           const slots = insertSlots(cur, INS.dir);
+          const blockedTall = slotsAll.length - slots.length;
           const sz = insertSize(cur, INS.dir);
           const crossing = INS.dir === "x" ? L.nRows > 1 : L.nColsAt(0) > 1;
           return (
@@ -1400,13 +1408,20 @@ export default function TrayGenerator() {
                 Мест под вставку: <b>{slots.length}</b>. Деталь: <b>{sz.len} × {sz.hgt} × {sz.thk} мм</b>, печатается плашмя.
                 Скачать её — на вкладке «Принтер».
               </p>
-              {crossing && (
-                <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
-                  ⚠ Печатные перегородки идут поперёк вставок — вставка не пройдёт от стенки до стенки.
-                  Поставьте {INS.dir === "x" ? "«Ряды»" : "«Колонки»"} = 1 в «Делении на ячейки».
+              {crossing && slots.length > 0 && (
+                <p style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0 0", lineHeight: 1.45 }}>
+                  Печатные стенки поперёк вставки — не помеха: в детали снизу вырезы,
+                  она седлает стенки, а низ повторяет уровни полов.
                 </p>
               )}
-              {slots.length === 0 && (
+              {blockedTall > 0 && (
+                <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
+                  ⚠ Мест пропущено: {blockedTall}. Поперечная печатная стенка почти в высоту
+                  контейнера — над вырезом должно оставаться не меньше {MIN_WEB} мм сплошной
+                  полосы. Понизьте поперечную стенку, и место вернётся.
+                </p>
+              )}
+              {slots.length === 0 && blockedTall === 0 && (
                 <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
                   ⚠ Ни одного места не помещается: уменьшите шаг или увеличьте контейнер.
                 </p>

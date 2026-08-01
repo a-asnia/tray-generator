@@ -932,26 +932,30 @@ export function buildContainer(c, conn, opts = {}) {
             if (Math.abs(L.cz0(j) + L.cd(j) + wall / 2 - u) < half + wall) { blocked = true; break; }
         if (blocked) continue;
 
+        // ряд, в котором стоит вставка «вдоль» (рёбра — на его стенках W/E)
+        let jz = 0, bz = -1e9;
+        if (axis === "z")
+          for (let jj = 0; jj < L.nRows; jj++) {
+            const d = Math.min(u - L.cz0(jj), L.cz0(jj) + L.cd(jj) - u);
+            if (d > bz) { bz = d; jz = jj; }
+          }
         // две противоположные стенки, поперёк которых идёт вставка
         const sides = axis === "x"
           ? [["n", 0, -D / 2 + wallOut, 1], ["s", L.nRows - 1, D / 2 - wallOut, -1]]
-          : [["w", 0, -W / 2 + wallOut, 1], ["e", 0, W / 2 - wallOut, -1]];
+          : [["w", jz, -W / 2 + wallOut, 1], ["e", jz, W / 2 - wallOut, -1]];
         for (const [side, rowHint, faceP, dirP] of sides) {
           const i = axis === "x" ? L.cellIndexAt(rowHint, u) : side === "w" ? 0 : L.nColsAt(rowHint) - 1;
-          const j = axis === "x" ? rowHint : 0;
+          const j = rowHint;
           const key = axis === "x" ? `o:${side}:${i}` : `o:${side}:${j}`;
           const wc = getWall(c, key);
           if (wc.h <= 1 || !flatWall(key)) continue; // на пандусе направляющая не нужна
-          const yBot = floor + cellLvl(axis === "x" ? i : 0, axis === "x" ? j : 0);
+          const yBot = floor + cellLvl(i, j);
           const yTop = Math.min(wc.h, H) - 1;
           rib(u - half - ins.rail, u - half, faceP, dirP, yBot, yTop, key);
           rib(u + half, u + half + ins.rail, faceP, dirP, yBot, yTop, key);
         }
         // вставка «на месте» — только для превью, в экспорт контейнера не идёт
-        if (ins.show && opts.inserts !== false) {
-          const i0 = axis === "x" ? L.cellIndexAt(0, u) : 0;
-          solids.push(insertInPlace(c, axis, u, floor + cellLvl(i0, 0)));
-        }
+        if (ins.show && opts.inserts !== false) solids.push(...insertInPlace(c, axis, u));
       }
     }
   }
