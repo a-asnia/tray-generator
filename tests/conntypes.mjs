@@ -135,6 +135,32 @@ const anyInside = (solids, p) => solids.some((b) => inside(b, p));
   ok("при отключённых pins стенка цела", !sNone.some((b) => b.tag === "conn"));
 }
 
+// ── сторона может переопределить тип и зазор (тест-детали) ──
+{
+  const c = mk({ wallOut: 3.5 });
+  // на одном контейнере: E — хвост с зазором 0.1, N — выступы с зазором 0.35
+  const s = buildContainer(c, {
+    ...noConn,
+    E: { male: false, vs, type: "dove", clr: 0.1 },
+    N: { male: false, vs, type: "pins", clr: 0.35 },
+  }, { fillets: false });
+  const conns = s.filter((b) => b.tag === "conn");
+  ok("обе стороны с замками построились", conns.length > 0);
+  // ширина зоны хвоста зависит от зазора: bossW = w2 + 2·clr + 2·flank
+  const gD = connGeom(0.1, "dove"), gP = connGeom(0.35, "pins");
+  let zMin = 1e9, zMax = -1e9; // протяжённость зоны на стороне E (вдоль Z)
+  for (const b of conns) {
+    const bb = bbox(b);
+    if (bb.hi[0] > c.W / 2 - c.wallOut + 0.01) { zMin = Math.min(zMin, bb.lo[2]); zMax = Math.max(zMax, bb.hi[2]); }
+  }
+  ok(`зона хвоста по зазору 0.1 (${(zMax - zMin).toFixed(1)} = ${gD.bossW})`, near(zMax - zMin, gD.bossW));
+  // карман pins на N шире шипа на свой зазор 0.35
+  const yc = gP.pin.y0 + gP.pin.h / 2, zN = -c.D / 2;
+  ok("pins: карман открыт", !anyInside(s, [0, yc, zN + gP.dg / 2]));
+  ok("pins: зазор 0.35 расширил карман", !anyInside(s, [gP.pin.w / 2 + 0.3, yc, zN + gP.dg / 2]));
+  ok("pins: за зазором — материал щёчки", anyInside(s, [gP.pin.w / 2 + gP.clr + 0.8, yc, zN + gP.dg / 2]));
+}
+
 // ── два замка на широкой стенке, разные высоты сегментов ──
 {
   // 2 колонки: левый сегмент понижен — левый замок следует ему,

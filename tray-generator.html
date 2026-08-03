@@ -408,17 +408,22 @@ function splitRange(a, b, zones) {
 // pins female: глухой карман в толщине стенки, открытый к соседу.
 // Внутренняя грань стенки не меняется — ячейки остаются ровно заданного
 // размера, а наружные плоскости соседей смыкаются вплотную по всей длине.
-function addConnUnits(solids, c, side, units, type) {
+function addConnUnits(solids, c, side, units, ov) {
     const { W, D, H, wallOut } = c;
-    // зазор — из настроек контейнера; тип — оттуда же либо задан стороной
-    const CONN = connOf(type ? { ...c, connType: type } : c);
+    // тип и зазор — из настроек контейнера, либо переопределены стороной
+    // (ov = {type, clr}): так строятся тест-детали со всеми видами замков
+    const CONN = connOf(ov && (ov.type || ov.clr != null)
+        ? { ...c, connType: ov.type ?? c.connType, connClr: ov.clr ?? c.connClr }
+        : c);
     if (!CONN.fits)
         return; // стенка слишком тонкая — замок не ставим
     const dg = CONN.dg;
     const axis = side === "E" || side === "W" ? "x" : "z";
     const s = side === "E" || side === "S" ? 1 : -1;
     const p = axis === "x" ? (s * W) / 2 : (s * D) / 2;
-    const male = side === "E" || side === "S";
+    // male/female — из описания стороны; по умолчанию (как в раскладке
+    // приложения) male смотрит на восток и юг
+    const male = ov && ov.male !== undefined ? !!ov.male : side === "E" || side === "S";
     const mk = (u, y, v) => (axis === "x" ? [u, y, v] : [v, y, u]);
     // профиль стенки, выдавленный вдоль отрезка v0..v1 вглубь от наружной
     // плоскости; yFrom поднимает низ первой трапеции (стенка над карманом)
@@ -1202,11 +1207,11 @@ function buildContainer(c, conn, opts = {}) {
         return low ? Math.max(0.4, Math.min(wc.dropH, wc.h)) : wc.h;
     };
     const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-    // Тип замка обычно общий на контейнер (c.connType), но сторона может
-    // нести свой: conn[side].type — так строятся тест-детали, где на одном
-    // контейнере живут и «ласточкин хвост», и «выступы»
-    const connSide = (side) => conn[side] && conn[side].type && conn[side].type !== CONN.type
-        ? connOf({ ...c, connType: conn[side].type })
+    // Тип и зазор замка обычно общие на контейнер (c.connType/c.connClr),
+    // но сторона может нести свои: conn[side].type / conn[side].clr — так
+    // строятся тест-детали, где на одном контейнере живут все виды замков
+    const connSide = (side) => conn[side] && (conn[side].type || conn[side].clr != null)
+        ? connOf({ ...c, connType: conn[side].type ?? c.connType, connClr: conn[side].clr ?? c.connClr })
         : CONN;
     // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
     // сегмента, на котором он стоит (зона может накрыть два сегмента —
@@ -2474,7 +2479,7 @@ function buildContainer(c, conn, opts = {}) {
     const sideUnits = { N: uN, S: uS, W: uW, E: uE };
     for (const side of ["N", "S", "W", "E"])
         if (conn[side] && sideUnits[side].length)
-            addConnUnits(solids, c, side, sideUnits[side], conn[side].type);
+            addConnUnits(solids, c, side, sideUnits[side], conn[side]);
     return solids;
 }
 // ── src/state/storage.js ──
@@ -3597,32 +3602,53 @@ function TrayGenerator() {
     const geoCache = useRef(new WeakMap());
     // ── сборка: соединители по соседям + раскладка сеткой ──
     const built = useMemo(() => {
-        // «Тест соединителей»: вместо проекта — две маленькие детали со всеми
-        // видами замков. На стыке между ними «ласточкин хвост», на ближних
-        // сторонах — «выступы»: одна пара печатается и проверяется всё сразу.
+        // «Тест соединителей»: вместо проекта — три маленькие детали со ВСЕМИ
+        // шестью видами замков (2 типа × 3 пресета зазора). Пара «male —
+        // female» всегда на разных деталях; на дне у каждой стороны риски по
+        // числу пресета (| = 0,1, || = 0,2, ||| = 0,35) — пара ищется по
+        // совпадению типа и числа рисок. В сцене состыкованы пары со
+        // стандартным зазором.
         if (connTest) {
-            const gD = connGeom(limits.connClr, "dove"), gP = connGeom(limits.connClr, "pins");
+            const clrs = CLR_PRESETS.map(([, v]) => v);
+            const wallOut = Math.max(...clrs.flatMap((v) => [connGeom(v, "dove").minWall, connGeom(v, "pins").minWall]));
             const t = {
                 W: 60, D: 60, H: 20, cols: 1, rows: 1, gridMode: "count",
-                wall: 1.6, wallOut: Math.max(gD.minWall, gP.minWall), floor: 1.6,
+                wall: 1.6, wallOut, floor: 1.6,
                 walls: {}, cells: {}, rowColWs: null, rowDs: null,
                 lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
-                connClr: limits.connClr,
             };
-            const one = [0];
-            const items = [
-                {
-                    c: { ...t },
-                    solids: buildContainer({ ...t }, { E: { male: true, vs: one, type: "dove" }, S: { male: true, vs: one, type: "pins" }, N: null, W: null }),
-                    ox: -t.W / 2, oz: 0,
-                },
-                {
-                    c: { ...t },
-                    solids: buildContainer({ ...t }, { W: { male: false, vs: one, type: "dove" }, N: { male: false, vs: one, type: "pins" }, S: null, E: null }),
-                    ox: t.W / 2, oz: 0,
-                },
+            const u = (male, type, k) => ({ male, vs: [0], type, clr: clrs[k] });
+            // 6 пар на 12 сторонах, пары всегда между разными деталями:
+            // A—B: хвост 0,2 (стык в сцене) и хвост 0,1; B—C: выступы 0,2 (стык)
+            // и выступы 0,35; A—C: хвост 0,35 и выступы 0,1
+            const conns = [
+                { E: u(true, "dove", 1), N: u(true, "dove", 0), S: u(true, "pins", 0), W: u(true, "dove", 2) },
+                { W: u(false, "dove", 1), N: u(false, "dove", 0), E: u(true, "pins", 1), S: u(true, "pins", 2) },
+                { W: u(false, "pins", 1), N: u(false, "pins", 0), S: u(false, "dove", 2), E: u(false, "pins", 2) },
             ];
-            return { items, totalW: 2 * t.W, totalD: t.D };
+            // риски-метки на дне у стенки: столько штрихов, какой пресет зазора
+            const marks = (solids, conn2) => {
+                const inner = t.W / 2 - wallOut;
+                for (const [side, cu] of Object.entries(conn2)) {
+                    if (!cu)
+                        continue;
+                    const n = clrs.indexOf(cu.clr) + 1;
+                    for (let k = 0; k < n; k++) {
+                        const off = (k - (n - 1) / 2) * 3;
+                        const near = inner - 4;
+                        const [x, z, sx, sz] = side === "N" ? [off, -near, 0.8, 4] : side === "S" ? [off, near, 0.8, 4]
+                            : side === "W" ? [-near, off, 4, 0.8] : [near, off, 4, 0.8];
+                        solids.push(boxSolid(x, t.floor + 0.3, z, sx, 0.6, sz, "conn"));
+                    }
+                }
+                return solids;
+            };
+            const items = conns.map((conn2, i) => ({
+                c: { ...t },
+                solids: marks(buildContainer({ ...t }, { N: null, S: null, W: null, E: null, ...conn2 }), conn2),
+                ox: (i - 1) * t.W, oz: 0,
+            }));
+            return { items, totalW: 3 * t.W, totalD: t.D };
         }
         const nb = (c, dx, dy) => {
             const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
@@ -3688,7 +3714,9 @@ function TrayGenerator() {
     };
     const exportOne = (idx) => {
         const { solids, c } = built.items[idx];
-        exportSTL(solids, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
+        exportSTL(solids, connTest
+            ? `conn_test_${"ABC"[idx] ?? idx + 1}.stl`
+            : `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
     };
     const exportAll = () => built.items.forEach((_, idx) => setTimeout(() => exportOne(idx), idx * 500));
     const [solidBusy, setSolidBusy] = useState(false);
@@ -4167,16 +4195,22 @@ function TrayGenerator() {
                     } }, connTest ? "↩ Вернуться к проекту" : "🧪 Тест соединителей"),
                 connTest ? (React.createElement(React.Fragment, null,
                     React.createElement("p", { style: { fontSize: 11.5, color: "#3D4A5C", margin: "8px 0 0", lineHeight: 1.45 } },
-                        "\u0412 \u0441\u0446\u0435\u043D\u0435 \u2014 \u0434\u0432\u0435 \u0442\u0435\u0441\u0442\u043E\u0432\u044B\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 60\u00D760\u00D720 \u043C\u043C \u0432\u043C\u0435\u0441\u0442\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432 (\u043F\u0440\u043E\u0435\u043A\u0442 \u0446\u0435\u043B, \u0432\u0435\u0440\u043D\u0438\u0441\u044C \u043A\u043D\u043E\u043F\u043A\u043E\u0439). \u041D\u0430 \u0441\u0442\u044B\u043A\u0435 \u043C\u0435\u0436\u0434\u0443 \u043D\u0438\u043C\u0438 \u00AB\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D \u0445\u0432\u043E\u0441\u0442\u00BB \u2014 \u0432\u0434\u0432\u0438\u043D\u044C \u043F\u0440\u0430\u0432\u0443\u044E \u0434\u0435\u0442\u0430\u043B\u044C \u0432 \u043B\u0435\u0432\u0443\u044E \u0441\u0432\u0435\u0440\u0445\u0443. \u041D\u0430 \u0431\u043B\u0438\u0436\u043D\u0438\u0445 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u0445 \u00AB\u0432\u044B\u0441\u0442\u0443\u043F\u044B\u00BB \u2014 \u043F\u0440\u0438\u0441\u0442\u0430\u0432\u044C \u0434\u0435\u0442\u0430\u043B\u0438 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u044D\u0442\u0438\u043C\u0438 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u043C\u0438. \u0417\u0430\u0437\u043E\u0440 \u2014 \u0442\u0435\u043A\u0443\u0449\u0438\u0439: ",
-                        (limits.connClr ?? DEFAULT_CLR).toLocaleString("ru"),
-                        " \u043C\u043C; \u043F\u043E\u043C\u0435\u043D\u044F\u0439 \u0435\u0433\u043E \u0432\u044B\u0448\u0435 \u0438 \u0441\u043A\u0430\u0447\u0430\u0439 \u0437\u0430\u043D\u043E\u0432\u043E."),
-                    React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 8 } }, [0, 1].map((i) => (React.createElement("button", { key: i, onClick: () => exportOne(i), style: {
+                        "\u0412 \u0441\u0446\u0435\u043D\u0435 \u2014 \u0442\u0440\u0438 \u0442\u0435\u0441\u0442\u043E\u0432\u044B\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 60\u00D760\u00D720 \u043C\u043C \u0432\u043C\u0435\u0441\u0442\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432 (\u043F\u0440\u043E\u0435\u043A\u0442 \u0446\u0435\u043B, \u0432\u0435\u0440\u043D\u0438\u0441\u044C \u043A\u043D\u043E\u043F\u043A\u043E\u0439). \u041D\u0430 \u043D\u0438\u0445 \u2014 \u0432\u0441\u0435 ",
+                        React.createElement("b", null, "\u0448\u0435\u0441\u0442\u044C \u0432\u0438\u0434\u043E\u0432"),
+                        " \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439: \u00AB\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D \u0445\u0432\u043E\u0441\u0442\u00BB \u0438 \u00AB\u0432\u044B\u0441\u0442\u0443\u043F\u044B\u00BB, \u043A\u0430\u0436\u0434\u044B\u0439 \u0441 \u0437\u0430\u0437\u043E\u0440\u0430\u043C\u0438 0,1 / 0,2 / 0,35 \u043C\u043C. \u041F\u0430\u0440\u0430 \u00AB\u0440\u0435\u043B\u044C\u0441\u2014\u043F\u0430\u0437\u00BB \u0438\u043B\u0438 \u00AB\u0448\u0438\u043F\u2014\u043A\u0430\u0440\u043C\u0430\u043D\u00BB \u0432\u0441\u0435\u0433\u0434\u0430 \u043D\u0430 \u0440\u0430\u0437\u043D\u044B\u0445 \u0434\u0435\u0442\u0430\u043B\u044F\u0445; \u0438\u0449\u0438 \u0435\u0451 \u043F\u043E \u0440\u0438\u0441\u043A\u0430\u043C \u043D\u0430 \u0434\u043D\u0435 \u0443 \u0441\u0442\u0435\u043D\u043A\u0438: ",
+                        React.createElement("b", null, "\u01C0"),
+                        " \u2014 0,1, ",
+                        React.createElement("b", null, "\u01C0\u01C0"),
+                        " \u2014 0,2,",
+                        React.createElement("b", null, " \u01C0\u01C0\u01C0"),
+                        " \u2014 0,35 (\u0443 \u043F\u0430\u0440\u044B \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0442 \u0442\u0438\u043F \u0438 \u0447\u0438\u0441\u043B\u043E \u0440\u0438\u0441\u043E\u043A). \u0412 \u0441\u0446\u0435\u043D\u0435 \u0441\u043E\u0441\u0442\u044B\u043A\u043E\u0432\u0430\u043D\u044B \u043E\u0431\u0435 \u043F\u0430\u0440\u044B \u0441\u043E \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u043C \u0437\u0430\u0437\u043E\u0440\u043E\u043C 0,2."),
+                    React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 8 } }, ["A", "B", "C"].map((n, i) => (React.createElement("button", { key: n, onClick: () => exportOne(i), style: {
                             flex: 1, padding: "8px 0", background: ACCENT, color: "#fff", border: "none",
                             borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
                         } },
-                        "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0434\u0435\u0442\u0430\u043B\u044C ",
-                        i === 0 ? "A" : "B",
-                        " (STL)")))))) : (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 } }, "\u041F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u0434\u0432\u0435 \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u0438\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 \u0441\u043E \u0432\u0441\u0435\u043C\u0438 \u0432\u0438\u0434\u0430\u043C\u0438 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439 \u0441\u0440\u0430\u0437\u0443 \u2014 \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043F\u043E\u0441\u0430\u0434\u043A\u0443 \u0438 \u043F\u043E\u0434\u043E\u0431\u0440\u0430\u0442\u044C \u0437\u0430\u0437\u043E\u0440, \u043D\u0435 \u043F\u0435\u0447\u0430\u0442\u0430\u044F \u0431\u043E\u043B\u044C\u0448\u0438\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B.")),
+                        "\u0414\u0435\u0442\u0430\u043B\u044C ",
+                        n,
+                        " (STL)")))))) : (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 } }, "\u041F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u0442\u0440\u0438 \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u0438\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 \u0441\u043E \u0432\u0441\u0435\u043C\u0438 \u0448\u0435\u0441\u0442\u044C\u044E \u0432\u0438\u0434\u0430\u043C\u0438 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439 \u0441\u0440\u0430\u0437\u0443 (\u043E\u0431\u0430 \u0442\u0438\u043F\u0430, \u0432\u0441\u0435 \u0442\u0440\u0438 \u0437\u0430\u0437\u043E\u0440\u0430) \u2014 \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043F\u043E\u0441\u0430\u0434\u043A\u0443 \u0438 \u0432\u044B\u0431\u0440\u0430\u0442\u044C \u0437\u0430\u0437\u043E\u0440, \u043D\u0435 \u043F\u0435\u0447\u0430\u0442\u0430\u044F \u0431\u043E\u043B\u044C\u0448\u0438\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B.")),
                 React.createElement(SectionTitle, null, "\u041B\u0438\u043C\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438"),
                 React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E X", unit: "\u0441\u043C", value: limits.layW, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layW: Math.round(v) }) }),
                 React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E Y", unit: "\u0441\u043C", value: limits.layD, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layD: Math.round(v) }) }),

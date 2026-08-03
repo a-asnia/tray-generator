@@ -5,6 +5,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
+import { boxSolid } from "./geometry/solids.js";
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR, CLR_PRESETS } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
@@ -431,32 +432,53 @@ export default function TrayGenerator() {
   const geoCache = useRef(new WeakMap());
   // ── сборка: соединители по соседям + раскладка сеткой ──
   const built = useMemo(() => {
-    // «Тест соединителей»: вместо проекта — две маленькие детали со всеми
-    // видами замков. На стыке между ними «ласточкин хвост», на ближних
-    // сторонах — «выступы»: одна пара печатается и проверяется всё сразу.
+    // «Тест соединителей»: вместо проекта — три маленькие детали со ВСЕМИ
+    // шестью видами замков (2 типа × 3 пресета зазора). Пара «male —
+    // female» всегда на разных деталях; на дне у каждой стороны риски по
+    // числу пресета (| = 0,1, || = 0,2, ||| = 0,35) — пара ищется по
+    // совпадению типа и числа рисок. В сцене состыкованы пары со
+    // стандартным зазором.
     if (connTest) {
-      const gD = connGeom(limits.connClr, "dove"), gP = connGeom(limits.connClr, "pins");
+      const clrs = CLR_PRESETS.map(([, v]) => v);
+      const wallOut = Math.max(...clrs.flatMap((v) => [connGeom(v, "dove").minWall, connGeom(v, "pins").minWall]));
       const t = {
         W: 60, D: 60, H: 20, cols: 1, rows: 1, gridMode: "count",
-        wall: 1.6, wallOut: Math.max(gD.minWall, gP.minWall), floor: 1.6,
+        wall: 1.6, wallOut, floor: 1.6,
         walls: {}, cells: {}, rowColWs: null, rowDs: null,
         lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
-        connClr: limits.connClr,
       };
-      const one = [0];
-      const items = [
-        {
-          c: { ...t },
-          solids: buildContainer({ ...t }, { E: { male: true, vs: one, type: "dove" }, S: { male: true, vs: one, type: "pins" }, N: null, W: null }),
-          ox: -t.W / 2, oz: 0,
-        },
-        {
-          c: { ...t },
-          solids: buildContainer({ ...t }, { W: { male: false, vs: one, type: "dove" }, N: { male: false, vs: one, type: "pins" }, S: null, E: null }),
-          ox: t.W / 2, oz: 0,
-        },
+      const u = (male, type, k) => ({ male, vs: [0], type, clr: clrs[k] });
+      // 6 пар на 12 сторонах, пары всегда между разными деталями:
+      // A—B: хвост 0,2 (стык в сцене) и хвост 0,1; B—C: выступы 0,2 (стык)
+      // и выступы 0,35; A—C: хвост 0,35 и выступы 0,1
+      const conns = [
+        { E: u(true, "dove", 1), N: u(true, "dove", 0), S: u(true, "pins", 0), W: u(true, "dove", 2) },
+        { W: u(false, "dove", 1), N: u(false, "dove", 0), E: u(true, "pins", 1), S: u(true, "pins", 2) },
+        { W: u(false, "pins", 1), N: u(false, "pins", 0), S: u(false, "dove", 2), E: u(false, "pins", 2) },
       ];
-      return { items, totalW: 2 * t.W, totalD: t.D };
+      // риски-метки на дне у стенки: столько штрихов, какой пресет зазора
+      const marks = (solids, conn2) => {
+        const inner = t.W / 2 - wallOut;
+        for (const [side, cu] of Object.entries(conn2)) {
+          if (!cu) continue;
+          const n = clrs.indexOf(cu.clr) + 1;
+          for (let k = 0; k < n; k++) {
+            const off = (k - (n - 1) / 2) * 3;
+            const near = inner - 4;
+            const [x, z, sx, sz] =
+              side === "N" ? [off, -near, 0.8, 4] : side === "S" ? [off, near, 0.8, 4]
+              : side === "W" ? [-near, off, 4, 0.8] : [near, off, 4, 0.8];
+            solids.push(boxSolid(x, t.floor + 0.3, z, sx, 0.6, sz, "conn"));
+          }
+        }
+        return solids;
+      };
+      const items = conns.map((conn2, i) => ({
+        c: { ...t },
+        solids: marks(buildContainer({ ...t }, { N: null, S: null, W: null, E: null, ...conn2 }), conn2),
+        ox: (i - 1) * t.W, oz: 0,
+      }));
+      return { items, totalW: 3 * t.W, totalD: t.D };
     }
     const nb = (c, dx, dy) => {
       const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
@@ -521,7 +543,9 @@ export default function TrayGenerator() {
 
   const exportOne = (idx) => {
     const { solids, c } = built.items[idx];
-    exportSTL(solids, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
+    exportSTL(solids, connTest
+      ? `conn_test_${"ABC"[idx] ?? idx + 1}.stl`
+      : `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
   };
   const exportAll = () => built.items.forEach((_, idx) => setTimeout(() => exportOne(idx), idx * 500));
 
@@ -1208,30 +1232,32 @@ export default function TrayGenerator() {
         {connTest ? (
           <>
             <p style={{ fontSize: 11.5, color: "#3D4A5C", margin: "8px 0 0", lineHeight: 1.45 }}>
-              В сцене — две тестовые детали 60×60×20 мм вместо контейнеров (проект цел, вернись кнопкой).
-              На стыке между ними «ласточкин хвост» — вдвинь правую деталь в левую сверху.
-              На ближних сторонах «выступы» — приставь детали вплотную этими сторонами.
-              Зазор — текущий: {(limits.connClr ?? DEFAULT_CLR).toLocaleString("ru")} мм; поменяй его выше и скачай заново.
+              В сцене — три тестовые детали 60×60×20 мм вместо контейнеров (проект цел, вернись
+              кнопкой). На них — все <b>шесть видов</b> соединителей: «ласточкин хвост» и «выступы»,
+              каждый с зазорами 0,1 / 0,2 / 0,35 мм. Пара «рельс—паз» или «шип—карман» всегда на
+              разных деталях; ищи её по рискам на дне у стенки: <b>ǀ</b> — 0,1, <b>ǀǀ</b> — 0,2,
+              <b> ǀǀǀ</b> — 0,35 (у пары совпадают тип и число рисок). В сцене состыкованы обе пары
+              со стандартным зазором 0,2.
             </p>
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              {[0, 1].map((i) => (
+              {["A", "B", "C"].map((n, i) => (
                 <button
-                  key={i}
+                  key={n}
                   onClick={() => exportOne(i)}
                   style={{
                     flex: 1, padding: "8px 0", background: ACCENT, color: "#fff", border: "none",
                     borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
                   }}
                 >
-                  Скачать деталь {i === 0 ? "A" : "B"} (STL)
+                  Деталь {n} (STL)
                 </button>
               ))}
             </div>
           </>
         ) : (
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 }}>
-            Печатаются две маленькие детали со всеми видами соединителей сразу — проверить посадку
-            и подобрать зазор, не печатая большие контейнеры.
+            Печатаются три маленькие детали со всеми шестью видами соединителей сразу (оба типа,
+            все три зазора) — проверить посадку и выбрать зазор, не печатая большие контейнеры.
           </p>
         )}
 

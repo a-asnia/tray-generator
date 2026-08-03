@@ -96,12 +96,12 @@ export function buildContainer(c, conn, opts = {}) {
   };
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-  // Тип замка обычно общий на контейнер (c.connType), но сторона может
-  // нести свой: conn[side].type — так строятся тест-детали, где на одном
-  // контейнере живут и «ласточкин хвост», и «выступы»
+  // Тип и зазор замка обычно общие на контейнер (c.connType/c.connClr),
+  // но сторона может нести свои: conn[side].type / conn[side].clr — так
+  // строятся тест-детали, где на одном контейнере живут все виды замков
   const connSide = (side) =>
-    conn[side] && conn[side].type && conn[side].type !== CONN.type
-      ? connOf({ ...c, connType: conn[side].type })
+    conn[side] && (conn[side].type || conn[side].clr != null)
+      ? connOf({ ...c, connType: conn[side].type ?? c.connType, connClr: conn[side].clr ?? c.connClr })
       : CONN;
   // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
   // сегмента, на котором он стоит (зона может накрыть два сегмента —
@@ -1225,7 +1225,7 @@ export function buildContainer(c, conn, opts = {}) {
   const sideUnits = { N: uN, S: uS, W: uW, E: uE };
   for (const side of ["N", "S", "W", "E"])
     if (conn[side] && sideUnits[side].length)
-      addConnUnits(solids, c, side, sideUnits[side], conn[side].type);
+      addConnUnits(solids, c, side, sideUnits[side], conn[side]);
 
   return solids;
 }

@@ -70,16 +70,21 @@ const nBefore = await page.evaluate(() => JSON.parse(localStorage.getItem("trayG
 await page.locator("button", { hasText: /Тест соединителей/ }).click();
 await page.waitForTimeout(900);
 ok("баннер тест-режима появился", (await page.getByText(/проект не тронут/).count()) > 0);
-ok("подсказка про обе посадки", (await page.getByText(/ласточкин хвост/i).count()) > 0 && (await page.getByText(/вплотную/).count()) > 0);
+ok("подсказка про шесть видов", (await page.getByText(/шесть видов/).count()) > 0 && (await page.getByText(/рискам/).count()) > 0);
 const nAfter = await page.evaluate(() => JSON.parse(localStorage.getItem("trayGenState")).containers.length);
 ok(`проект не изменился (контейнеров: ${nBefore})`, nAfter === nBefore && nBefore >= 2);
-const [dlT] = await Promise.all([
-  page.waitForEvent("download", { timeout: 15000 }),
-  page.locator("button", { hasText: /Скачать деталь A/ }).click(),
-]);
-const bufT = readFileSync(await dlT.path());
-const nT = bufT.readUInt32LE(80);
-ok(`STL тест-детали валиден (${nT} тр.)`, bufT.length === 84 + nT * 50 && nT > 50);
+ok("три кнопки скачивания",
+  (await page.locator("button", { hasText: /^Деталь [ABC] \(STL\)$/ }).count()) === 3);
+for (const nm of ["A", "B", "C"]) {
+  const [dlT] = await Promise.all([
+    page.waitForEvent("download", { timeout: 15000 }),
+    page.locator("button", { hasText: new RegExp(`^Деталь ${nm} \\(STL\\)$`) }).click(),
+  ]);
+  ok(`имя файла детали ${nm}`, dlT.suggestedFilename() === `conn_test_${nm}.stl`);
+  const bufT = readFileSync(await dlT.path());
+  const nT = bufT.readUInt32LE(80);
+  ok(`STL детали ${nm} валиден (${nT} тр.)`, bufT.length === 84 + nT * 50 && nT > 50);
+}
 await page.locator("button", { hasText: /Вернуться к проекту/ }).click();
 await page.waitForTimeout(700);
 ok("возврат: баннер пропал", (await page.getByText(/проект не тронут/).count()) === 0);

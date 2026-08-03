@@ -104,16 +104,21 @@ export function splitRange(a, b, zones) {
 // pins female: глухой карман в толщине стенки, открытый к соседу.
 // Внутренняя грань стенки не меняется — ячейки остаются ровно заданного
 // размера, а наружные плоскости соседей смыкаются вплотную по всей длине.
-export function addConnUnits(solids, c, side, units, type) {
+export function addConnUnits(solids, c, side, units, ov) {
   const { W, D, H, wallOut } = c;
-  // зазор — из настроек контейнера; тип — оттуда же либо задан стороной
-  const CONN = connOf(type ? { ...c, connType: type } : c);
+  // тип и зазор — из настроек контейнера, либо переопределены стороной
+  // (ov = {type, clr}): так строятся тест-детали со всеми видами замков
+  const CONN = connOf(ov && (ov.type || ov.clr != null)
+    ? { ...c, connType: ov.type ?? c.connType, connClr: ov.clr ?? c.connClr }
+    : c);
   if (!CONN.fits) return; // стенка слишком тонкая — замок не ставим
   const dg = CONN.dg;
   const axis = side === "E" || side === "W" ? "x" : "z";
   const s = side === "E" || side === "S" ? 1 : -1;
   const p = axis === "x" ? (s * W) / 2 : (s * D) / 2;
-  const male = side === "E" || side === "S";
+  // male/female — из описания стороны; по умолчанию (как в раскладке
+  // приложения) male смотрит на восток и юг
+  const male = ov && ov.male !== undefined ? !!ov.male : side === "E" || side === "S";
   const mk = (u, y, v) => (axis === "x" ? [u, y, v] : [v, y, u]);
   // профиль стенки, выдавленный вдоль отрезка v0..v1 вглубь от наружной
   // плоскости; yFrom поднимает низ первой трапеции (стенка над карманом)
