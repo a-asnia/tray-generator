@@ -35,7 +35,8 @@ for (const [name, raw] of Object.entries(broken)) {
       const nan = s.some((b) => b.tris.some((t) => t.some((q) => q.some((v) => !Number.isFinite(v)))));
       good = !nan;
       note = nan ? " — в геометрии NaN" : ` (построено тел: ${s.length})`;
-      for (const v of Object.values(p.limits)) if (!Number.isFinite(v)) { good = false; note = " — битый лимит"; }
+      // числовые лимиты обязаны быть конечными; connType — строка-настройка
+      for (const v of Object.values(p.limits)) if (typeof v !== "string" && !Number.isFinite(v)) { good = false; note = " — битый лимит"; }
     } catch (e) { note = ` — падение: ${e.message}`; }
   ok(`битый проект «${name}»`, good, note);
 }

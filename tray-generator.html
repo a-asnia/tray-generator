@@ -304,45 +304,81 @@ function getManifold() {
     return manifoldPromise;
 }
 // ── src/model/connectors.js ──
-// ── «Ласточкин хвост» ЦЕЛИКОМ внутри толщины внешней стенки ──
-// Паз не выступает ни внутрь ячейки, ни наружу; стенки соседей
-// смыкаются вплотную. Требование: внешняя стенка ≥ minWall.
-// Зазор (clr) — на сторону, между рельсом и пазом. Рекомендации для FDM:
+// ── Соединители контейнеров. Всегда ЦЕЛИКОМ внутри толщины внешней
+// стенки: ничего не выступает внутрь ячейки, стенки соседей смыкаются
+// вплотную (у «выступов» наружу торчит только сам шип — он входит в
+// карман соседа, и плоскости всё равно смыкаются).
+//
+// Два типа:
+//  - "dove" — «ласточкин хвост»: рельс вдвигается в паз сверху, держит
+//    контейнеры на отрыв. Разъём — только подъёмом.
+//  - "pins" — «выступы» (как лего): шип на одной стороне входит в карман
+//    другой при горизонтальном прижатии. Держит от сдвига вдоль стыка и
+//    по вертикали, но не на отрыв: контейнеры ставятся вплотную и так же
+//    легко разнимаются.
+// Зазор (clr) — на сторону, между рельсом/шипом и пазом/карманом.
+// Рекомендации для FDM:
 // 0.1 мм — press fit, детали приходится вдавливать (PLA, жёсткая посадка);
 // 0.2 мм — плотно, но собирается руками (значение по умолчанию);
 // 0.3–0.4 мм — свободное скольжение (PETG, крупные детали, усадка).
 const DEFAULT_CLR = 0.2;
-// top — насколько рельс не доходит до верхней кромки контейнера: сверху
-// остаётся ровная полоска стенки, замок не выглядывает наружу и не
-// цепляется при сборке. Паз при этом сквозной — иначе рельс не вдвинуть.
+const DEFAULT_TYPE = "dove";
+// Пресеты зазора «ласточкиного хвоста» — чтобы не подбирать вручную
+const CLR_PRESETS = [
+    ["Плотно", 0.1],
+    ["Стандарт", 0.2],
+    ["Свободно", 0.35],
+];
+// top — насколько рельс не доходит до верхней кромки стенки: сверху
+// остаётся ровная полоска, замок не выглядывает наружу и не цепляется
+// при сборке. Паз при этом сквозной — иначе рельс не вдвинуть.
 const CONN = { w1: 5.5, w2: 8.5, depth: 1.7, clr: DEFAULT_CLR, back: 0.85, stop: 3, flank: 2.5, top: 2 };
-// Производные размеры зависят от зазора, поэтому считаются функцией.
-// c.connClr — настройка «Зазор соединителя» (вкладка «Принтер»).
-function connGeom(clr) {
-    const g = { ...CONN, clr: clr ?? DEFAULT_CLR };
-    g.dg = g.depth + g.clr; // глубина паза
+// «Выступы»: шип — усечённая пирамида (скаты 45°, печатается на
+// вертикальной стенке без поддержек), карман — прямой, шип самоцентрируется
+const PIN = { w: 10, h: 5, prot: 1.6, y0: 5 };
+// Производные размеры зависят от зазора и типа, поэтому считаются функцией.
+// limits.connClr — «Зазор соединителя», limits.connType — тип (вкладка «Принтер»).
+function connGeom(clr, type) {
+    const g = { ...CONN, clr: clr ?? DEFAULT_CLR, type: type === "pins" ? "pins" : "dove" };
+    if (g.type === "pins") {
+        g.pin = { ...PIN };
+        g.dg = g.pin.prot + 0.2; // глубина кармана
+        g.bossW = g.pin.w + 2 * g.clr + 2 * g.flank; // ширина зоны соединителя
+    }
+    else {
+        g.dg = g.depth + g.clr; // глубина паза
+        g.bossW = g.w2 + 2 * g.clr + 2 * g.flank; // ширина зоны соединителя
+    }
     g.minWall = Math.round((g.dg + g.back) * 100) / 100; // минимум внешней стенки
-    g.bossW = g.w2 + 2 * g.clr + 2 * g.flank; // ширина зоны соединителя
+    g.lockMin = Math.round(lockMinH(g) * 10) / 10; // минимальная высота стенки под замок
     return g;
 }
-// Геометрия замка для конкретного контейнера. Паз живёт ВНУТРИ толщины
-// внешней стенки, поэтому за ним обязан оставаться задний слой (back).
-// Если стенка тоньше — паз ужимается, а когда ужимать уже некуда, замок
-// на этой стороне не ставится вовсе: лучше без замка, чем дыра в стенке
-// (в такое состояние можно попасть, выключив стыковку, утоньшив стенку и
-// включив обратно, или увеличив зазор, или открыв старый проект).
+// Геометрия замка для конкретного контейнера. Паз/карман живёт ВНУТРИ
+// толщины внешней стенки, поэтому за ним обязан оставаться задний слой
+// (back). Если стенка тоньше — глубина ужимается, а когда ужимать уже
+// некуда, замок на этой стороне не ставится вовсе: лучше без замка, чем
+// дыра в стенке (в такое состояние можно попасть, выключив стыковку,
+// утоньшив стенку и включив обратно, или увеличив зазор, или открыв
+// старый проект).
 const MIN_DG = 0.9; // мельче этого «ласточкин хвост» не держит
+const MIN_PROT = 0.8; // ниже этого шип ничего не центрирует
 const connOf = (c) => {
-    const g = connGeom(c && c.connClr);
+    const g = connGeom(c && c.connClr, c && c.connType);
     const wallOut = c && Number.isFinite(c.wallOut) ? c.wallOut : Infinity;
     const maxDg = wallOut - g.back;
     if (maxDg < g.dg) {
         g.dg = Math.max(0, maxDg);
-        g.depth = Math.max(0, g.dg - g.clr);
+        if (g.type === "pins")
+            g.pin.prot = Math.max(0, g.dg - 0.2);
+        else
+            g.depth = Math.max(0, g.dg - g.clr);
     }
-    g.fits = g.dg >= MIN_DG;
+    g.fits = g.type === "pins" ? g.pin.prot >= MIN_PROT : g.dg >= MIN_DG;
     return g;
 };
+// Минимальная высота стенки, на которой замок имеет смысл: ниже неё зона
+// не режется и замок не ставится — стенка остаётся целой.
+const lockMinH = (g) => g.type === "pins" ? g.pin.y0 + g.pin.h + g.clr + 4 : g.stop + g.top + 5;
 // значения по умолчанию (совместимость со старым кодом)
 Object.assign(CONN, connGeom(DEFAULT_CLR));
 const connectorVs = (dim) => (dim < 90 ? [0] : [-dim / 4, dim / 4]);
@@ -360,17 +396,21 @@ function splitRange(a, b, zones) {
         out.push([cur, b]);
     return out.filter(([p, q]) => q - p > 0.05);
 }
-// Соединительные узлы одной стороны. male: рельс, выступающий наружу и
-// входящий в паз соседа. female: паз, вырезанный ВНУТРИ толщины внешней
-// стенки (упор снизу + задний слой + две щёчки-ласточки). Внутренняя грань
-// стенки не меняется — ячейки остаются ровно заданного размера, а наружные
-// плоскости соседей смыкаются вплотную по всей длине.
-// rnd — радиус скругления верхней кромки стенки этой стороны: задний
-// слой паза получает такое же скругление у внутренней грани, иначе в
-// кромке остаётся провал в зоне замка
-function addConnUnits(solids, c, side, vs, rnd = 0) {
+// Соединительные узлы одной стороны. units — по одному на замок:
+// {vc — позиция вдоль стенки, h — высота стенки в этой зоне, rnd —
+// скругление её кромки}. Замок следует высоте СВОЕЙ стенки: понизили
+// стенку — паз, задний слой и рельс понизились вместе с ней.
+//
+// dove male: рельс, выступающий наружу и входящий в паз соседа.
+// dove female: паз ВНУТРИ толщины стенки (упор снизу + задний слой +
+//   две щёчки-ласточки), сквозной сверху — иначе рельс не вдвинуть.
+// pins male: шип-пирамидка на наружной плоскости.
+// pins female: глухой карман в толщине стенки, открытый к соседу.
+// Внутренняя грань стенки не меняется — ячейки остаются ровно заданного
+// размера, а наружные плоскости соседей смыкаются вплотную по всей длине.
+function addConnUnits(solids, c, side, units) {
     const { W, D, H, wallOut } = c;
-    const CONN = connOf(c); // зазор берётся из настройки контейнера
+    const CONN = connOf(c); // зазор и тип берутся из настроек контейнера
     if (!CONN.fits)
         return; // стенка слишком тонкая — замок не ставим
     const dg = CONN.dg;
@@ -379,47 +419,82 @@ function addConnUnits(solids, c, side, vs, rnd = 0) {
     const p = axis === "x" ? (s * W) / 2 : (s * D) / 2;
     const male = side === "E" || side === "S";
     const mk = (u, y, v) => (axis === "x" ? [u, y, v] : [v, y, u]);
-    for (const vc of vs) {
+    // профиль стенки, выдавленный вдоль отрезка v0..v1 вглубь от наружной
+    // плоскости; yFrom поднимает низ первой трапеции (стенка над карманом)
+    const pushProfile = (parts, tBase, v0, v1, yFrom = 0) => {
+        for (const [qi, quad] of parts.entries()) {
+            const q = qi === 0 && yFrom > 0 ? quad.map(([o, y]) => [o, y === 0 ? yFrom : y]) : quad;
+            const qa = q.map(([o, y]) => mk(p - s * (tBase + o), y, v0));
+            const qb = q.map(([o, y]) => mk(p - s * (tBase + o), y, v1));
+            solids.push(prismSolid(qa, qb, "conn"));
+        }
+    };
+    const pushBox = (t0, t1, y0, y1, v0, v1) => {
+        const cu = p - s * ((t0 + t1) / 2), su = Math.abs(t1 - t0);
+        const cv = (v0 + v1) / 2, sv = v1 - v0;
+        if (axis === "x")
+            solids.push(boxSolid(cu, (y0 + y1) / 2, cv, su, y1 - y0, sv, "conn"));
+        else
+            solids.push(boxSolid(cv, (y0 + y1) / 2, cu, sv, y1 - y0, su, "conn"));
+    };
+    for (const { vc, h, rnd } of units) {
+        const hz = Math.max(4, h); // высота стенки в зоне — замок следует ей
+        if (CONN.type === "pins") {
+            const { w, h: ph, prot, y0 } = CONN.pin;
+            if (male) {
+                // шип: усечённая пирамида от наружной плоскости наружу
+                const base = (dv, dy) => [
+                    mk(p, y0 + dy, vc - w / 2 + dv), mk(p, y0 + dy, vc + w / 2 - dv),
+                    mk(p, y0 + ph - dy, vc + w / 2 - dv), mk(p, y0 + ph - dy, vc - w / 2 + dv),
+                ];
+                const qa = base(0, 0);
+                const qb = base(prot, prot).map(([x, y, z]) => (axis === "x" ? [x + s * prot, y, z] : [x, y, z + s * prot]));
+                solids.push(prismSolid(qa, qb, "conn"));
+            }
+            else {
+                // карман: прямой, шип-пирамидка самоцентрируется при прижатии
+                const pw2 = w / 2 + CONN.clr;
+                const yPk0 = Math.max(0.4, y0 - CONN.clr), yPk1 = Math.min(hz - 1, y0 + ph + CONN.clr);
+                const v0 = vc - CONN.bossW / 2, v1 = vc + CONN.bossW / 2;
+                const parts = wallProfile(wallOut, hz, rnd, false);
+                pushProfile(parts, 0, v0, vc - pw2); // щёчки по бокам кармана
+                pushProfile(parts, 0, vc + pw2, v1);
+                pushBox(0, wallOut, 0, yPk0, vc - pw2, vc + pw2); // стенка под карманом
+                pushProfile(parts, 0, vc - pw2, vc + pw2, yPk1); // стенка над карманом
+                pushBox(dg, wallOut, yPk0, yPk1, vc - pw2, vc + pw2); // задний слой (дно кармана)
+            }
+            continue;
+        }
         if (male) {
             const u0 = p - s * 0.6, u1 = p + s * CONN.depth;
             const q = (y) => [
                 mk(u0, y, vc - CONN.w1 / 2), mk(u0, y, vc + CONN.w1 / 2),
                 mk(u1, y, vc + CONN.w2 / 2), mk(u1, y, vc - CONN.w2 / 2),
             ];
-            // рельс заканчивается чуть ниже верхней кромки контейнера
-            const yTop = Math.max(CONN.stop + CONN.clr + 1, H - CONN.top);
+            // рельс заканчивается чуть ниже верхней кромки СВОЕЙ стенки
+            const yTop = Math.max(CONN.stop + CONN.clr + 1, Math.min(hz, H) - CONN.top);
             solids.push(prismSolid(q(CONN.stop + CONN.clr), q(yTop), "conn"));
         }
         else {
-            const uAt = (t) => p - s * t; // t — глубина от наружной плоскости внутрь стенки
-            const pushBox = (t0, t1, y0, y1, v0, v1) => {
-                const cu = (uAt(t0) + uAt(t1)) / 2, su = Math.abs(t1 - t0);
-                const cv = (v0 + v1) / 2, sv = v1 - v0;
-                if (axis === "x")
-                    solids.push(boxSolid(cu, (y0 + y1) / 2, cv, su, y1 - y0, sv, "conn"));
-                else
-                    solids.push(boxSolid(cv, (y0 + y1) / 2, cu, sv, y1 - y0, su, "conn"));
-            };
-            pushBox(0, wallOut, 0, CONN.stop, vc - CONN.bossW / 2, vc + CONN.bossW / 2); // упор снизу
-            // задний слой (дно паза) — профилем, чтобы верхняя кромка была
-            // скруглена так же, как у остальной стенки
-            const thkBack = wallOut - dg;
-            const parts = wallProfile(thkBack, H - CONN.stop, rnd, false);
             const v0 = vc - CONN.bossW / 2, v1 = vc + CONN.bossW / 2;
+            pushBox(0, wallOut, 0, CONN.stop, v0, v1); // упор снизу
+            // задний слой (дно паза) — профилем, чтобы верхняя кромка была
+            // скруглена так же, как у остальной стенки этой зоны
+            const parts = wallProfile(wallOut - dg, hz - CONN.stop, rnd, false);
             for (const quad of parts) {
-                const qa = quad.map(([o, y]) => mk(uAt(dg + o), CONN.stop + y, v0));
-                const qb = quad.map(([o, y]) => mk(uAt(dg + o), CONN.stop + y, v1));
+                const qa = quad.map(([o, y]) => mk(p - s * (dg + o), CONN.stop + y, v0));
+                const qb = quad.map(([o, y]) => mk(p - s * (dg + o), CONN.stop + y, v1));
                 solids.push(prismSolid(qa, qb, "conn"));
             }
             const cw1 = CONN.w1 / 2 + CONN.clr, cw2 = CONN.w2 / 2 + CONN.clr;
             for (const sg of [-1, 1]) {
                 const q = (y) => [
-                    mk(uAt(0), y, vc + (sg * CONN.bossW) / 2),
-                    mk(uAt(dg), y, vc + (sg * CONN.bossW) / 2),
-                    mk(uAt(dg), y, vc + sg * cw2),
-                    mk(uAt(0), y, vc + sg * cw1),
+                    mk(p, y, vc + (sg * CONN.bossW) / 2),
+                    mk(p - s * dg, y, vc + (sg * CONN.bossW) / 2),
+                    mk(p - s * dg, y, vc + sg * cw2),
+                    mk(p, y, vc + sg * cw1),
                 ];
-                solids.push(prismSolid(q(CONN.stop), q(H), "conn"));
+                solids.push(prismSolid(q(CONN.stop), q(hz), "conn"));
             }
         }
     }
@@ -1126,12 +1201,48 @@ function buildContainer(c, conn, opts = {}) {
         return low ? Math.max(0.4, Math.min(wc.dropH, wc.h)) : wc.h;
     };
     const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-    const zonesOf = (side) => conn[side] && CONN.fits
-        ? conn[side].vs
-            .map((vc) => [vc - CONN.bossW / 2, vc + CONN.bossW / 2])
-            .sort((a, b) => a[0] - b[0])
+    // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
+    // сегмента, на котором он стоит (зона может накрыть два сегмента —
+    // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
+    // и замок не ставится: стенка остаётся целой и ровной.
+    const zoneInfo = (side, vc) => {
+        const sideL = side.toLowerCase();
+        const segs = [];
+        if (sideL === "n" || sideL === "s") {
+            const j = sideL === "n" ? 0 : L.nRows - 1;
+            for (let i = 0; i < L.nColsAt(j); i++)
+                segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
+        }
+        else {
+            for (let j = 0; j < L.nRows; j++)
+                segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
+        }
+        const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+        let h = Infinity, rnd = 0, best = -1e9;
+        for (const sg of segs) {
+            if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01)
+                continue;
+            const wc = getWall(c, sg.key);
+            h = Math.min(h, wc.h);
+            const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
+            if (ov > best) {
+                best = ov;
+                rnd = wc.rnd;
+            }
+        }
+        if (!Number.isFinite(h)) {
+            const wc = getWall(c, `o:${sideL}:0`);
+            h = wc.h;
+            rnd = wc.rnd;
+        }
+        return { vc, h, rnd };
+    };
+    const unitsOf = (side) => conn[side] && CONN.fits
+        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
         : [];
-    const zN = zonesOf("N"), zS = zonesOf("S"), zW = zonesOf("W"), zE = zonesOf("E");
+    const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
+    const zonesFrom = (units) => units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
+    const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
     const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
         if (tilt < 0.5 || h <= yBase + 0.3)
             return;
@@ -1997,30 +2108,28 @@ function buildContainer(c, conn, opts = {}) {
         if (flatWall(sR) && flatWall(eB))
             addFillet(cx, cz, -1, -1, hCorner(sR, eB), sR, -1, rCorner(sR, symS, eB, symE));
     }
-    // В male-зонах стенка ставится обратно на полную высоту (несёт рельс) —
-    // тем же профилем, что и остальная стенка, иначе в скруглённой верхней
-    // кромке остаётся прямоугольный провал на месте замка
-    const zoneWall = (side, a, b) => {
-        const key = `o:${side}:0`;
-        const rnd = getWall(c, key).rnd;
+    // В male-зонах стенка ставится обратно (несёт рельс или шип) — тем же
+    // профилем, той же высотой и скруглением, что стенка этой зоны, иначе
+    // на месте замка получается ступенька по высоте или провал в кромке
+    const zoneWall = (side, u) => {
         const mapFn = side === "n" ? (o, y, x) => [x, y, -D / 2 + o]
             : side === "s" ? (o, y, x) => [x, y, D / 2 - o]
                 : side === "w" ? (o, y, z) => [-W / 2 + o, y, z]
                     : (o, y, z) => [W / 2 - o, y, z];
-        pushProfiled(wallProfile(wallOut, H, rnd, false), mapFn, a, b, "conn");
+        pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn, u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2, "conn");
     };
     if (conn.S?.male)
-        for (const [a, b] of zS)
-            zoneWall("s", a, b);
+        for (const u of uS)
+            zoneWall("s", u);
     if (conn.N?.male)
-        for (const [a, b] of zN)
-            zoneWall("n", a, b);
+        for (const u of uN)
+            zoneWall("n", u);
     if (conn.E?.male)
-        for (const [a, b] of zE)
-            zoneWall("e", a, b);
+        for (const u of uE)
+            zoneWall("e", u);
     if (conn.W?.male)
-        for (const [a, b] of zW)
-            zoneWall("w", a, b);
+        for (const u of uW)
+            zoneWall("w", u);
     // ── Вставные стенки: направляющие на внутренних гранях ──
     // Пара вертикальных рёбер образует канал, в который перегородка
     // вдвигается сверху уже после печати. Рёбра ставятся НА грань: внутри
@@ -2349,12 +2458,11 @@ function buildContainer(c, conn, opts = {}) {
             }
         }
     }
-    // соединители (скругление кромки в зоне паза — как у стенки этой стороны)
+    // соединители (высота и скругление кромки — от стенки своей зоны)
+    const sideUnits = { N: uN, S: uS, W: uW, E: uE };
     for (const side of ["N", "S", "W", "E"])
-        if (conn[side]) {
-            const key = `o:${side.toLowerCase()}:0`;
-            addConnUnits(solids, c, side, conn[side].vs, rEff(key, wallOut, false));
-        }
+        if (conn[side] && sideUnits[side].length)
+            addConnUnits(solids, c, side, sideUnits[side]);
     return solids;
 }
 // ── src/state/storage.js ──
@@ -2484,6 +2592,8 @@ const sanitizeContainer = (c0) => {
     c.rowDs = Array.isArray(c.rowDs) ? c.rowDs.map((x) => num(x, 10, 0.5, 2000)) : sizes(c.rowDs);
     if (c.connClr !== undefined)
         c.connClr = num(c.connClr, 0.2, 0, 1);
+    if (c.connType !== undefined)
+        c.connType = c.connType === "pins" ? "pins" : "dove";
     return c;
 };
 // Приведение сохранённого/импортированного проекта к текущей модели:
@@ -2529,11 +2639,12 @@ function normalizeProject(d) {
             layW: num(lim.layW, 40, 3, 500),
             layD: num(lim.layD, 40, 3, 500),
             connClr: num(lim.connClr, 0.2, 0, 1),
+            connType: lim.connType === "pins" ? "pins" : "dove",
         };
         // габариты не могут превышать лимиты принтера — приложение держит этот
         // инвариант при смене лимитов, файл проекта тоже обязан ему подчиняться.
         // Стенка с замком не может быть тоньше паза: иначе паз прорезал бы её.
-        const minW = d.connect === false ? 0 : connGeom(d.limits.connClr).minWall;
+        const minW = d.connect === false ? 0 : connGeom(d.limits.connClr, d.limits.connType).minWall;
         d.containers = d.containers.map((c) => ({
             ...c,
             wallOut: Math.max(c.wallOut, minW),
@@ -3073,9 +3184,9 @@ function TrayGenerator() {
     // магнит соседей: изменение размера контейнера компенсируется соседями
     const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
     // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
-    const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
+    const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
     // размеры соединителя зависят от зазора печати (настройка «Принтер»)
-    const CG = connGeom(limits.connClr);
+    const CG = connGeom(limits.connClr, limits.connType);
     const [tab, setTab] = useState("cont");
     // подвкладки внутри «Контейнеры»
     const [sub, setSub] = useState("cont");
@@ -3093,7 +3204,7 @@ function TrayGenerator() {
         const nl = { ...limits, ...patch };
         // при росте зазора паз становится глубже и требует более толстой
         // стенки — иначе он прорезал бы её насквозь
-        const minW = connect ? connGeom(nl.connClr).minWall : 0;
+        const minW = connect ? connGeom(nl.connClr, nl.connType).minWall : 0;
         // габариты и высоты стенок не могут превышать лимиты принтера
         setContainers((cs) => cs.map((c) => ({
             ...c,
@@ -3261,7 +3372,7 @@ function TrayGenerator() {
         setSelection(null);
         setConnect(true);
         setMagnet(true);
-        setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
+        setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
         setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
         // вкладка не переключается — остаёмся там, где нажали сброс
     };
@@ -3507,10 +3618,10 @@ function TrayGenerator() {
                     S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
                     N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
                 };
-            const ck = `${limits.connClr}|${JSON.stringify(conn)}`;
+            const ck = `${limits.connClr}|${limits.connType ?? "dove"}|${JSON.stringify(conn)}`;
             let hit = geoCache.current.get(c);
             if (!hit || hit.key !== ck) {
-                hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr }, conn) };
+                hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr, connType: limits.connType }, conn) };
                 geoCache.current.set(c, hit);
             }
             return {
@@ -3521,7 +3632,7 @@ function TrayGenerator() {
             };
         });
         return { items, totalW, totalD };
-    }, [containers, connect, posMap, limits.connClr]);
+    }, [containers, connect, posMap, limits.connClr, limits.connType]);
     // ── three.js: сцена, камера, пикинг ──
     const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
     const L = layout(cur);
@@ -3982,18 +4093,48 @@ function TrayGenerator() {
                 React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0433\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: limits.maxD, min: 50, max: 500, step: 1, onChange: (v) => updLimits({ maxD: v }) }),
                 React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0432\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: limits.maxH, min: 30, max: 500, step: 1, onChange: (v) => updLimits({ maxH: v }) }),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } }, "\u041B\u0438\u043C\u0438\u0442\u044B \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044E\u0442 \u043D\u0430 \u041E\u0414\u0418\u041D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E \u0435\u0433\u043E \u0432\u043D\u0435\u0448\u043D\u0438\u043C \u0433\u0430\u0431\u0430\u0440\u0438\u0442\u0430\u043C (\u0438 \u043D\u0430 \u0432\u044B\u0441\u043E\u0442\u0443 \u0441\u0442\u0435\u043D\u043E\u043A). \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E \u2014 \u0447\u0443\u0442\u044C \u043C\u0435\u043D\u044C\u0448\u0435 \u0441\u0442\u043E\u043B\u0430 Bambu A1 mini (180\u00D7180\u00D7180 \u043C\u043C), \u0441 \u0437\u0430\u043F\u0430\u0441\u043E\u043C \u043F\u043E\u0434 \u044E\u0431\u043A\u0443. \u041D\u0443\u0436\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043C\u0435\u0441\u0442\u0430 \u2014 \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u0443\u0439 \u0435\u0449\u0451 \u043E\u0434\u0438\u043D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430\u00BB."),
-                React.createElement(SectionTitle, null, "\u0417\u0430\u0437\u043E\u0440 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439"),
+                React.createElement(SectionTitle, null, "\u0421\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0438"),
+                React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, [["dove", "Ласточкин хвост"], ["pins", "Выступы (лего)"]].map(([v, t]) => (React.createElement("button", { key: v, onClick: () => updLimits({ connType: v }), style: {
+                        flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                        border: (limits.connType ?? "dove") === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                        background: (limits.connType ?? "dove") === v ? "#FFF3EB" : "#fff",
+                        color: (limits.connType ?? "dove") === v ? ACCENT : "#3D4A5C",
+                    } }, t)))),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, (limits.connType ?? "dove") === "pins"
+                    ? React.createElement(React.Fragment, null, "\u0428\u0438\u043F-\u043F\u0438\u0440\u0430\u043C\u0438\u0434\u043A\u0430 \u043D\u0430 \u043E\u0434\u043D\u043E\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435 \u0432\u0445\u043E\u0434\u0438\u0442 \u0432 \u043A\u0430\u0440\u043C\u0430\u043D \u0434\u0440\u0443\u0433\u043E\u0439 \u043F\u0440\u0438 \u043F\u0440\u0438\u0436\u0430\u0442\u0438\u0438 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u2014 \u043A\u0430\u043A \u043B\u0435\u0433\u043E: \u0434\u0435\u0440\u0436\u0438\u0442 \u043E\u0442 \u0441\u0434\u0432\u0438\u0433\u0430 \u0432\u0434\u043E\u043B\u044C \u0441\u0442\u044B\u043A\u0430 \u0438 \u043F\u043E \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u0438, \u043D\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0442\u0430\u043A \u0436\u0435 \u043B\u0435\u0433\u043A\u043E \u0440\u0430\u0437\u043D\u0438\u043C\u0430\u044E\u0442\u0441\u044F. \u041D\u0438\u0447\u0435\u0433\u043E \u0432\u0434\u0432\u0438\u0433\u0430\u0442\u044C \u0441\u0432\u0435\u0440\u0445\u0443 \u043D\u0435 \u043D\u0443\u0436\u043D\u043E.")
+                    : React.createElement(React.Fragment, null, "\u0420\u0435\u043B\u044C\u0441 \u0432\u0434\u0432\u0438\u0433\u0430\u0435\u0442\u0441\u044F \u0432 \u043F\u0430\u0437 \u0441\u043E\u0441\u0435\u0434\u0430 \u0441\u0432\u0435\u0440\u0445\u0443 \u0438 \u0434\u0435\u0440\u0436\u0438\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043D\u0430 \u043E\u0442\u0440\u044B\u0432 \u043D\u0430\u043C\u0435\u0440\u0442\u0432\u043E. \u0420\u0430\u0437\u044A\u0451\u043C \u2014 \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u0434\u044A\u0451\u043C\u043E\u043C.")),
                 React.createElement(Param, { label: "\u0417\u0430\u0437\u043E\u0440 \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443", unit: "\u043C\u043C", value: limits.connClr ?? DEFAULT_CLR, min: 0.05, max: 0.5, step: 0.05, onChange: (v) => updLimits({ connClr: Math.round(v * 100) / 100 }) }),
+                React.createElement("div", { style: { display: "flex", gap: 6, margin: "-2px 0 8px" } }, CLR_PRESETS.map(([t, v]) => (React.createElement("button", { key: t, onClick: () => updLimits({ connClr: v }), style: {
+                        flex: 1, padding: "5px 0", borderRadius: 8, fontSize: 11.5, cursor: "pointer",
+                        border: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                        background: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? "#FFF3EB" : "#fff",
+                        color: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? ACCENT : "#3D4A5C",
+                    } },
+                    t,
+                    " ",
+                    v.toLocaleString("ru"))))),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } },
-                    "\u0429\u0435\u043B\u044C \u043C\u0435\u0436\u0434\u0443 \u0440\u0435\u043B\u044C\u0441\u043E\u043C \u00AB\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D\u043E\u0433\u043E \u0445\u0432\u043E\u0441\u0442\u0430\u00BB \u0438 \u043F\u0430\u0437\u043E\u043C \u0441\u043E\u0441\u0435\u0434\u0430, \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443 (\u043E\u0431\u0449\u0438\u0439 \u0437\u0430\u0437\u043E\u0440 \u0432\u0434\u0432\u043E\u0435 \u0431\u043E\u043B\u044C\u0448\u0435). \u0414\u043B\u044F FDM: ",
-                    React.createElement("b", null, "0,1 \u043C\u043C"),
-                    " \u2014 \u0436\u0451\u0441\u0442\u043A\u0430\u044F \u043F\u043E\u0441\u0430\u0434\u043A\u0430, \u0434\u0435\u0442\u0430\u043B\u0438 \u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442\u0441\u044F \u0432\u0434\u0430\u0432\u043B\u0438\u0432\u0430\u0442\u044C; ",
-                    React.createElement("b", null, "0,2 \u043C\u043C"),
-                    " \u2014 \u043F\u043B\u043E\u0442\u043D\u043E, \u043D\u043E \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0440\u0443\u043A\u0430\u043C\u0438 (\u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E); ",
-                    React.createElement("b", null, "0,3\u20130,4 \u043C\u043C"),
-                    " \u2014 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E, \u0434\u043B\u044F PETG \u0438 \u043A\u0440\u0443\u043F\u043D\u044B\u0445 \u0434\u0435\u0442\u0430\u043B\u0435\u0439. \u0422\u043E\u0447\u043D\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0437\u0430\u0432\u0438\u0441\u0438\u0442 \u043E\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u2014 \u043D\u0430\u043F\u0435\u0447\u0430\u0442\u0430\u0439\u0442\u0435 \u043F\u0430\u0440\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432 \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435. \u041C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F \u0432\u043D\u0435\u0448\u043D\u044F\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u043F\u0440\u0438 \u044D\u0442\u043E\u043C \u0437\u0430\u0437\u043E\u0440\u0435: ",
+                    (limits.connType ?? "dove") === "pins"
+                        ? React.createElement(React.Fragment, null,
+                            "\u0429\u0435\u043B\u044C \u043C\u0435\u0436\u0434\u0443 \u0448\u0438\u043F\u043E\u043C \u0438 \u043A\u0430\u0440\u043C\u0430\u043D\u043E\u043C, \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443. ",
+                            React.createElement("b", null, "0,1 \u043C\u043C"),
+                            " \u2014 \u0441\u0438\u0434\u0438\u0442 \u0441 \u043B\u0451\u0433\u043A\u0438\u043C \u0442\u0440\u0435\u043D\u0438\u0435\u043C, ",
+                            React.createElement("b", null, "0,2 \u043C\u043C"),
+                            " \u2014 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u0430\u044F \u043F\u043E\u0441\u0430\u0434\u043A\u0430 (\u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E), \u0431\u043E\u043B\u044C\u0448\u0435 \u2014 \u0441\u043E\u0432\u0441\u0435\u043C \u0431\u0435\u0437 \u0443\u0441\u0438\u043B\u0438\u044F.")
+                        : React.createElement(React.Fragment, null,
+                            "\u0429\u0435\u043B\u044C \u043C\u0435\u0436\u0434\u0443 \u0440\u0435\u043B\u044C\u0441\u043E\u043C \u00AB\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D\u043E\u0433\u043E \u0445\u0432\u043E\u0441\u0442\u0430\u00BB \u0438 \u043F\u0430\u0437\u043E\u043C \u0441\u043E\u0441\u0435\u0434\u0430, \u043D\u0430 \u0441\u0442\u043E\u0440\u043E\u043D\u0443 (\u043E\u0431\u0449\u0438\u0439 \u0437\u0430\u0437\u043E\u0440 \u0432\u0434\u0432\u043E\u0435 \u0431\u043E\u043B\u044C\u0448\u0435). \u0414\u043B\u044F FDM: ",
+                            React.createElement("b", null, "0,1 \u043C\u043C"),
+                            " \u2014 \u0436\u0451\u0441\u0442\u043A\u0430\u044F \u043F\u043E\u0441\u0430\u0434\u043A\u0430, \u0434\u0435\u0442\u0430\u043B\u0438 \u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442\u0441\u044F \u0432\u0434\u0430\u0432\u043B\u0438\u0432\u0430\u0442\u044C; ",
+                            React.createElement("b", null, "0,2 \u043C\u043C"),
+                            " \u2014 \u043F\u043B\u043E\u0442\u043D\u043E, \u043D\u043E \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0440\u0443\u043A\u0430\u043C\u0438 (\u043F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E); ",
+                            React.createElement("b", null, "0,3\u20130,4 \u043C\u043C"),
+                            " \u2014 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E, \u0434\u043B\u044F PETG \u0438 \u043A\u0440\u0443\u043F\u043D\u044B\u0445 \u0434\u0435\u0442\u0430\u043B\u0435\u0439. \u0422\u043E\u0447\u043D\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0437\u0430\u0432\u0438\u0441\u0438\u0442 \u043E\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u2014 \u043D\u0430\u043F\u0435\u0447\u0430\u0442\u0430\u0439\u0442\u0435 \u043F\u0430\u0440\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432 \u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435."),
+                    " ",
+                    "\u041C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F \u0432\u043D\u0435\u0448\u043D\u044F\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u043F\u0440\u0438 \u044D\u0442\u0438\u0445 \u043D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0430\u0445: ",
                     CG.minWall,
-                    " \u043C\u043C."),
+                    " \u043C\u043C. \u0417\u0430\u043C\u043E\u043A \u0441\u0442\u0430\u0432\u0438\u0442\u0441\u044F \u043D\u0430 \u0441\u0442\u0435\u043D\u043A\u0443 \u043D\u0435 \u043D\u0438\u0436\u0435 ",
+                    CG.lockMin,
+                    " \u043C\u043C \u2014 \u043D\u0430 \u0431\u043E\u043B\u0435\u0435 \u043D\u0438\u0437\u043A\u043E\u0439 \u0437\u043E\u043D\u0430 \u043D\u0435 \u0440\u0435\u0436\u0435\u0442\u0441\u044F \u0438 \u0441\u0442\u0435\u043D\u043A\u0430 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0446\u0435\u043B\u043E\u0439."),
                 React.createElement("div", { style: { height: 12 } }),
                 React.createElement(Collapse, { title: "\u041F\u0440\u043E\u0435\u043A\u0442", open: openSecs.project, onToggle: () => toggleSec("project") },
                     React.createElement("button", { onClick: saveProject, style: {

@@ -7,7 +7,7 @@
 
 import { prismSolid, boxSolid, rampSolid, wallProfile, ARC_SEGS } from "../geometry/solids.js";
 import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
-import { connOf, splitRange, addConnUnits } from "./connectors.js";
+import { connOf, splitRange, addConnUnits, lockMinH } from "./connectors.js";
 import { layout, getWall, getCellLvl, DEFAULT_CORNER_R } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
 
@@ -96,13 +96,41 @@ export function buildContainer(c, conn, opts = {}) {
   };
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-  const zonesOf = (side) =>
+  // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
+  // сегмента, на котором он стоит (зона может накрыть два сегмента —
+  // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
+  // и замок не ставится: стенка остаётся целой и ровной.
+  const zoneInfo = (side, vc) => {
+    const sideL = side.toLowerCase();
+    const segs = [];
+    if (sideL === "n" || sideL === "s") {
+      const j = sideL === "n" ? 0 : L.nRows - 1;
+      for (let i = 0; i < L.nColsAt(j); i++)
+        segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
+    } else {
+      for (let j = 0; j < L.nRows; j++)
+        segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
+    }
+    const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+    let h = Infinity, rnd = 0, best = -1e9;
+    for (const sg of segs) {
+      if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01) continue;
+      const wc = getWall(c, sg.key);
+      h = Math.min(h, wc.h);
+      const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
+      if (ov > best) { best = ov; rnd = wc.rnd; }
+    }
+    if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; rnd = wc.rnd; }
+    return { vc, h, rnd };
+  };
+  const unitsOf = (side) =>
     conn[side] && CONN.fits
-      ? conn[side].vs
-          .map((vc) => [vc - CONN.bossW / 2, vc + CONN.bossW / 2])
-          .sort((a, b) => a[0] - b[0])
+      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
       : [];
-  const zN = zonesOf("N"), zS = zonesOf("S"), zW = zonesOf("W"), zE = zonesOf("E");
+  const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
+  const zonesFrom = (units) =>
+    units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
+  const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
 
   const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
     if (tilt < 0.5 || h <= yBase + 0.3) return;
@@ -875,22 +903,21 @@ export function buildContainer(c, conn, opts = {}) {
     if (flatWall(sR) && flatWall(eB)) addFillet(cx, cz, -1, -1, hCorner(sR, eB), sR, -1, rCorner(sR, symS, eB, symE));
   }
 
-  // В male-зонах стенка ставится обратно на полную высоту (несёт рельс) —
-  // тем же профилем, что и остальная стенка, иначе в скруглённой верхней
-  // кромке остаётся прямоугольный провал на месте замка
-  const zoneWall = (side, a, b) => {
-    const key = `o:${side}:0`;
-    const rnd = getWall(c, key).rnd;
+  // В male-зонах стенка ставится обратно (несёт рельс или шип) — тем же
+  // профилем, той же высотой и скруглением, что стенка этой зоны, иначе
+  // на месте замка получается ступенька по высоте или провал в кромке
+  const zoneWall = (side, u) => {
     const mapFn = side === "n" ? (o, y, x) => [x, y, -D / 2 + o]
       : side === "s" ? (o, y, x) => [x, y, D / 2 - o]
       : side === "w" ? (o, y, z) => [-W / 2 + o, y, z]
       : (o, y, z) => [W / 2 - o, y, z];
-    pushProfiled(wallProfile(wallOut, H, rnd, false), mapFn, a, b, "conn");
+    pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn,
+      u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2, "conn");
   };
-  if (conn.S?.male) for (const [a, b] of zS) zoneWall("s", a, b);
-  if (conn.N?.male) for (const [a, b] of zN) zoneWall("n", a, b);
-  if (conn.E?.male) for (const [a, b] of zE) zoneWall("e", a, b);
-  if (conn.W?.male) for (const [a, b] of zW) zoneWall("w", a, b);
+  if (conn.S?.male) for (const u of uS) zoneWall("s", u);
+  if (conn.N?.male) for (const u of uN) zoneWall("n", u);
+  if (conn.E?.male) for (const u of uE) zoneWall("e", u);
+  if (conn.W?.male) for (const u of uW) zoneWall("w", u);
 
   // ── Вставные стенки: направляющие на внутренних гранях ──
   // Пара вертикальных рёбер образует канал, в который перегородка
@@ -1183,12 +1210,10 @@ export function buildContainer(c, conn, opts = {}) {
     }
   }
 
-  // соединители (скругление кромки в зоне паза — как у стенки этой стороны)
+  // соединители (высота и скругление кромки — от стенки своей зоны)
+  const sideUnits = { N: uN, S: uS, W: uW, E: uE };
   for (const side of ["N", "S", "W", "E"])
-    if (conn[side]) {
-      const key = `o:${side.toLowerCase()}:0`;
-      addConnUnits(solids, c, side, conn[side].vs, rEff(key, wallOut, false));
-    }
+    if (conn[side] && sideUnits[side].length) addConnUnits(solids, c, side, sideUnits[side]);
 
   return solids;
 }

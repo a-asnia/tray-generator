@@ -6,7 +6,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
 import { getManifold } from "./geometry/manifold.js";
-import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
+import { connectorVs, connGeom, DEFAULT_CLR, CLR_PRESETS } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
@@ -40,9 +40,9 @@ export default function TrayGenerator() {
   // магнит соседей: изменение размера контейнера компенсируется соседями
   const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
-  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
+  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
   // размеры соединителя зависят от зазора печати (настройка «Принтер»)
-  const CG = connGeom(limits.connClr);
+  const CG = connGeom(limits.connClr, limits.connType);
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
@@ -62,7 +62,7 @@ export default function TrayGenerator() {
     const nl = { ...limits, ...patch };
     // при росте зазора паз становится глубже и требует более толстой
     // стенки — иначе он прорезал бы её насквозь
-    const minW = connect ? connGeom(nl.connClr).minWall : 0;
+    const minW = connect ? connGeom(nl.connClr, nl.connType).minWall : 0;
     // габариты и высоты стенок не могут превышать лимиты принтера
     setContainers((cs) =>
       cs.map((c) => ({
@@ -234,7 +234,7 @@ export default function TrayGenerator() {
     setSelection(null);
     setConnect(true);
     setMagnet(true);
-    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR });
+    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
     setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
   };
@@ -459,10 +459,10 @@ export default function TrayGenerator() {
             S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
             N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
           };
-      const ck = `${limits.connClr}|${JSON.stringify(conn)}`;
+      const ck = `${limits.connClr}|${limits.connType ?? "dove"}|${JSON.stringify(conn)}`;
       let hit = geoCache.current.get(c);
       if (!hit || hit.key !== ck) {
-        hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr }, conn) };
+        hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr, connType: limits.connType }, conn) };
         geoCache.current.set(c, hit);
       }
       return {
@@ -473,7 +473,7 @@ export default function TrayGenerator() {
       };
     });
     return { items, totalW, totalD };
-  }, [containers, connect, posMap, limits.connClr]);
+  }, [containers, connect, posMap, limits.connClr, limits.connType]);
 
   // ── three.js: сцена, камера, пикинг ──
   const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
@@ -1127,14 +1127,54 @@ export default function TrayGenerator() {
           Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
         </p>
 
-        <SectionTitle>Зазор соединителей</SectionTitle>
+        <SectionTitle>Соединители</SectionTitle>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          {[["dove", "Ласточкин хвост"], ["pins", "Выступы (лего)"]].map(([v, t]) => (
+            <button
+              key={v}
+              onClick={() => updLimits({ connType: v })}
+              style={{
+                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                border: (limits.connType ?? "dove") === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: (limits.connType ?? "dove") === v ? "#FFF3EB" : "#fff",
+                color: (limits.connType ?? "dove") === v ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+          {(limits.connType ?? "dove") === "pins"
+            ? <>Шип-пирамидка на одной стороне входит в карман другой при прижатии вплотную — как лего: держит от сдвига вдоль стыка и по вертикали, но контейнеры так же легко разнимаются. Ничего вдвигать сверху не нужно.</>
+            : <>Рельс вдвигается в паз соседа сверху и держит контейнеры на отрыв намертво. Разъём — только подъёмом.</>}
+        </p>
         <Param
           label="Зазор на сторону" unit="мм" value={limits.connClr ?? DEFAULT_CLR}
           min={0.05} max={0.5} step={0.05}
           onChange={(v) => updLimits({ connClr: Math.round(v * 100) / 100 })}
         />
+        <div style={{ display: "flex", gap: 6, margin: "-2px 0 8px" }}>
+          {CLR_PRESETS.map(([t, v]) => (
+            <button
+              key={t}
+              onClick={() => updLimits({ connClr: v })}
+              style={{
+                flex: 1, padding: "5px 0", borderRadius: 8, fontSize: 11.5, cursor: "pointer",
+                border: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                background: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? "#FFF3EB" : "#fff",
+                color: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? ACCENT : "#3D4A5C",
+              }}
+            >
+              {t} {v.toLocaleString("ru")}
+            </button>
+          ))}
+        </div>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          Щель между рельсом «ласточкиного хвоста» и пазом соседа, на сторону (общий зазор вдвое больше). Для FDM: <b>0,1 мм</b> — жёсткая посадка, детали приходится вдавливать; <b>0,2 мм</b> — плотно, но собирается руками (по умолчанию); <b>0,3–0,4 мм</b> — свободно, для PETG и крупных деталей. Точное значение зависит от принтера — напечатайте пару контейнеров и проверьте. Минимальная внешняя стенка при этом зазоре: {CG.minWall} мм.
+          {(limits.connType ?? "dove") === "pins"
+            ? <>Щель между шипом и карманом, на сторону. <b>0,1 мм</b> — сидит с лёгким трением, <b>0,2 мм</b> — свободная посадка (по умолчанию), больше — совсем без усилия.</>
+            : <>Щель между рельсом «ласточкиного хвоста» и пазом соседа, на сторону (общий зазор вдвое больше). Для FDM: <b>0,1 мм</b> — жёсткая посадка, детали приходится вдавливать; <b>0,2 мм</b> — плотно, но собирается руками (по умолчанию); <b>0,3–0,4 мм</b> — свободно, для PETG и крупных деталей. Точное значение зависит от принтера — напечатайте пару контейнеров и проверьте.</>}
+          {" "}Минимальная внешняя стенка при этих настройках: {CG.minWall} мм. Замок ставится на стенку не ниже {CG.lockMin} мм — на более низкой зона не режется и стенка остаётся целой.
         </p>
 
         <div style={{ height: 12 }} />
