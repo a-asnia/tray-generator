@@ -76,7 +76,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("сообщение об успехе", await page.getByText("Проект сохранён в файл").count());
 
   // сбросить проект начисто
-  await page.locator("button", { hasText: /^Раскладка$/ }).click();
+  await page.locator("button", { hasText: /^Принтер$/ }).click();
   await page.locator("button", { hasText: /Сбросить проект/ }).click();
   await page.waitForTimeout(200);
   await page.locator("button", { hasText: /Точно сбросить/ }).click();

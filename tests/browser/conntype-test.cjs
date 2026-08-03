@@ -33,8 +33,7 @@ await page.waitForTimeout(300);
 await page.locator('button:text-is("+")').first().click();
 await page.waitForTimeout(600);
 
-// вкладка «Принтер»: переключатель типов
-await page.locator("button", { hasText: /^Принтер$/ }).first().click();
+// переключатель типов — на «Раскладке» (мы уже там)
 await page.waitForTimeout(300);
 ok("кнопки типов на месте",
   (await page.locator('button:text-is("Ласточкин хвост")').count()) === 1 &&
@@ -53,7 +52,9 @@ ok("пресет задал зазор 0.35", Math.abs((await lims()).connClr - 
 const clrInput = page.locator('div:has(> div > label:has-text("Зазор на сторону")) input[type="number"]').first();
 ok("поле зазора показывает пресет", Math.abs(parseFloat(await clrInput.inputValue()) - 0.35) < 0.001);
 
-// STL с «выступами» скачивается и валиден
+// STL с «выступами» скачивается и валиден (кнопка — на «Принтере»)
+await page.locator("button", { hasText: /^Принтер$/ }).first().click();
+await page.waitForTimeout(300);
 const [dl] = await Promise.all([
   page.waitForEvent("download", { timeout: 15000 }),
   page.locator("button", { hasText: /Скачать STL — контейнер №/ }).first().click(),
@@ -61,6 +62,27 @@ const [dl] = await Promise.all([
 const buf = readFileSync(await dl.path());
 const nTri = buf.readUInt32LE(80);
 ok(`STL с выступами валиден (${nTri} тр.)`, buf.length === 84 + nTri * 50 && nTri > 100);
+
+// режим «Тест соединителей»: вместо проекта — две тестовые детали
+await page.locator("button", { hasText: /^Раскладка$/ }).first().click();
+await page.waitForTimeout(300);
+const nBefore = await page.evaluate(() => JSON.parse(localStorage.getItem("trayGenState")).containers.length);
+await page.locator("button", { hasText: /Тест соединителей/ }).click();
+await page.waitForTimeout(900);
+ok("баннер тест-режима появился", (await page.getByText(/проект не тронут/).count()) > 0);
+ok("подсказка про обе посадки", (await page.getByText(/ласточкин хвост/i).count()) > 0 && (await page.getByText(/вплотную/).count()) > 0);
+const nAfter = await page.evaluate(() => JSON.parse(localStorage.getItem("trayGenState")).containers.length);
+ok(`проект не изменился (контейнеров: ${nBefore})`, nAfter === nBefore && nBefore >= 2);
+const [dlT] = await Promise.all([
+  page.waitForEvent("download", { timeout: 15000 }),
+  page.locator("button", { hasText: /Скачать деталь A/ }).click(),
+]);
+const bufT = readFileSync(await dlT.path());
+const nT = bufT.readUInt32LE(80);
+ok(`STL тест-детали валиден (${nT} тр.)`, bufT.length === 84 + nT * 50 && nT > 50);
+await page.locator("button", { hasText: /Вернуться к проекту/ }).click();
+await page.waitForTimeout(700);
+ok("возврат: баннер пропал", (await page.getByText(/проект не тронут/).count()) === 0);
 
 // настройка переживает перезагрузку
 await page.reload({ waitUntil: "load" });

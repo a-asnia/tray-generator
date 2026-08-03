@@ -408,9 +408,10 @@ function splitRange(a, b, zones) {
 // pins female: глухой карман в толщине стенки, открытый к соседу.
 // Внутренняя грань стенки не меняется — ячейки остаются ровно заданного
 // размера, а наружные плоскости соседей смыкаются вплотную по всей длине.
-function addConnUnits(solids, c, side, units) {
+function addConnUnits(solids, c, side, units, type) {
     const { W, D, H, wallOut } = c;
-    const CONN = connOf(c); // зазор и тип берутся из настроек контейнера
+    // зазор — из настроек контейнера; тип — оттуда же либо задан стороной
+    const CONN = connOf(type ? { ...c, connType: type } : c);
     if (!CONN.fits)
         return; // стенка слишком тонкая — замок не ставим
     const dg = CONN.dg;
@@ -1201,11 +1202,17 @@ function buildContainer(c, conn, opts = {}) {
         return low ? Math.max(0.4, Math.min(wc.dropH, wc.h)) : wc.h;
     };
     const CONN = connOf(c); // размеры соединителя с учётом зазора печати
+    // Тип замка обычно общий на контейнер (c.connType), но сторона может
+    // нести свой: conn[side].type — так строятся тест-детали, где на одном
+    // контейнере живут и «ласточкин хвост», и «выступы»
+    const connSide = (side) => conn[side] && conn[side].type && conn[side].type !== CONN.type
+        ? connOf({ ...c, connType: conn[side].type })
+        : CONN;
     // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
     // сегмента, на котором он стоит (зона может накрыть два сегмента —
     // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
     // и замок не ставится: стенка остаётся целой и ровной.
-    const zoneInfo = (side, vc) => {
+    const zoneInfo = (side, vc, g) => {
         const sideL = side.toLowerCase();
         const segs = [];
         if (sideL === "n" || sideL === "s") {
@@ -1217,7 +1224,7 @@ function buildContainer(c, conn, opts = {}) {
             for (let j = 0; j < L.nRows; j++)
                 segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
         }
-        const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+        const z0 = vc - g.bossW / 2, z1 = vc + g.bossW / 2;
         let h = Infinity, rnd = 0, best = -1e9;
         for (const sg of segs) {
             if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01)
@@ -1237,12 +1244,15 @@ function buildContainer(c, conn, opts = {}) {
         }
         return { vc, h, rnd };
     };
-    const unitsOf = (side) => conn[side] && CONN.fits
-        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
-        : [];
+    const unitsOf = (side) => {
+        const g = connSide(side);
+        return conn[side] && g.fits
+            ? conn[side].vs.map((vc) => zoneInfo(side, vc, g)).filter((u) => u.h >= lockMinH(g))
+            : [];
+    };
     const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
-    const zonesFrom = (units) => units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
-    const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
+    const zonesFrom = (units, side) => units.map((u) => [u.vc - connSide(side).bossW / 2, u.vc + connSide(side).bossW / 2]).sort((a, b) => a[0] - b[0]);
+    const zN = zonesFrom(uN, "N"), zS = zonesFrom(uS, "S"), zW = zonesFrom(uW, "W"), zE = zonesFrom(uE, "E");
     const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
         if (tilt < 0.5 || h <= yBase + 0.3)
             return;
@@ -2112,11 +2122,12 @@ function buildContainer(c, conn, opts = {}) {
     // профилем, той же высотой и скруглением, что стенка этой зоны, иначе
     // на месте замка получается ступенька по высоте или провал в кромке
     const zoneWall = (side, u) => {
+        const g = connSide(side.toUpperCase());
         const mapFn = side === "n" ? (o, y, x) => [x, y, -D / 2 + o]
             : side === "s" ? (o, y, x) => [x, y, D / 2 - o]
                 : side === "w" ? (o, y, z) => [-W / 2 + o, y, z]
                     : (o, y, z) => [W / 2 - o, y, z];
-        pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn, u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2, "conn");
+        pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn, u.vc - g.bossW / 2, u.vc + g.bossW / 2, "conn");
     };
     if (conn.S?.male)
         for (const u of uS)
@@ -2458,11 +2469,12 @@ function buildContainer(c, conn, opts = {}) {
             }
         }
     }
-    // соединители (высота и скругление кромки — от стенки своей зоны)
+    // соединители (высота и скругление кромки — от стенки своей зоны;
+    // тип может быть задан на стороне — для тест-деталей)
     const sideUnits = { N: uN, S: uS, W: uW, E: uE };
     for (const side of ["N", "S", "W", "E"])
         if (conn[side] && sideUnits[side].length)
-            addConnUnits(solids, c, side, sideUnits[side]);
+            addConnUnits(solids, c, side, sideUnits[side], conn[side].type);
     return solids;
 }
 // ── src/state/storage.js ──
@@ -3185,8 +3197,11 @@ function TrayGenerator() {
     const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
     // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
     const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
-    // размеры соединителя зависят от зазора печати (настройка «Принтер»)
+    // размеры соединителя зависят от зазора печати (настройка «Раскладка»)
     const CG = connGeom(limits.connClr, limits.connType);
+    // режим «Тест соединителей»: вместо контейнеров в сцене две маленькие
+    // тест-детали со всеми видами замков; проект при этом не трогается
+    const [connTest, setConnTest] = useState(SAVED?.connTest === true);
     const [tab, setTab] = useState("cont");
     // подвкладки внутри «Контейнеры»
     const [sub, setSub] = useState("cont");
@@ -3195,10 +3210,10 @@ function TrayGenerator() {
     // автосохранение при каждом изменении
     useEffect(() => {
         try {
-            window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs }));
+            window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs, connTest }));
         }
         catch (e) { }
-    }, [containers, limits, connect, magnet, openSecs]);
+    }, [containers, limits, connect, magnet, openSecs, connTest]);
     const cur = containers[sel];
     const updLimits = (patch) => {
         const nl = { ...limits, ...patch };
@@ -3372,6 +3387,7 @@ function TrayGenerator() {
         setSelection(null);
         setConnect(true);
         setMagnet(true);
+        setConnTest(false);
         setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
         setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
         // вкладка не переключается — остаёмся там, где нажали сброс
@@ -3581,6 +3597,33 @@ function TrayGenerator() {
     const geoCache = useRef(new WeakMap());
     // ── сборка: соединители по соседям + раскладка сеткой ──
     const built = useMemo(() => {
+        // «Тест соединителей»: вместо проекта — две маленькие детали со всеми
+        // видами замков. На стыке между ними «ласточкин хвост», на ближних
+        // сторонах — «выступы»: одна пара печатается и проверяется всё сразу.
+        if (connTest) {
+            const gD = connGeom(limits.connClr, "dove"), gP = connGeom(limits.connClr, "pins");
+            const t = {
+                W: 60, D: 60, H: 20, cols: 1, rows: 1, gridMode: "count",
+                wall: 1.6, wallOut: Math.max(gD.minWall, gP.minWall), floor: 1.6,
+                walls: {}, cells: {}, rowColWs: null, rowDs: null,
+                lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
+                connClr: limits.connClr,
+            };
+            const one = [0];
+            const items = [
+                {
+                    c: { ...t },
+                    solids: buildContainer({ ...t }, { E: { male: true, vs: one, type: "dove" }, S: { male: true, vs: one, type: "pins" }, N: null, W: null }),
+                    ox: -t.W / 2, oz: 0,
+                },
+                {
+                    c: { ...t },
+                    solids: buildContainer({ ...t }, { W: { male: false, vs: one, type: "dove" }, N: { male: false, vs: one, type: "pins" }, S: null, E: null }),
+                    ox: t.W / 2, oz: 0,
+                },
+            ];
+            return { items, totalW: 2 * t.W, totalD: t.D };
+        }
         const nb = (c, dx, dy) => {
             const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
             return i === undefined ? null : containers[i];
@@ -3632,9 +3675,9 @@ function TrayGenerator() {
             };
         });
         return { items, totalW, totalD };
-    }, [containers, connect, posMap, limits.connClr, limits.connType]);
+    }, [containers, connect, posMap, limits.connClr, limits.connType, connTest]);
     // ── three.js: сцена, камера, пикинг ──
-    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
+    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers: connTest ? [] : containers, selMode, setSel, setSelection: selectAndShow });
     const L = layout(cur);
     const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
     const INS = insertsOf(cur);
@@ -4041,6 +4084,12 @@ function TrayGenerator() {
                     border: tab === t ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
                     background: tab === t ? "#FFF3EB" : "#fff", color: tab === t ? ACCENT : "#3D4A5C",
                 } }, n)))),
+            connTest && (React.createElement("div", { style: {
+                    display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 10px",
+                    borderRadius: 8, background: "#DBEAFE", border: `1.5px solid ${SEL}`, fontSize: 12, color: "#1E3A8A",
+                } },
+                React.createElement("span", { style: { flex: 1 } }, "\uD83E\uDDEA \u0422\u0435\u0441\u0442 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439: \u0432 \u0441\u0446\u0435\u043D\u0435 \u0434\u0432\u0435 \u0442\u0435\u0441\u0442\u043E\u0432\u044B\u0435 \u0434\u0435\u0442\u0430\u043B\u0438, \u043F\u0440\u043E\u0435\u043A\u0442 \u043D\u0435 \u0442\u0440\u043E\u043D\u0443\u0442."),
+                React.createElement("button", { onClick: () => { setConnTest(false); setSel(0); }, style: { padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `1px solid ${SEL}`, background: "#fff", color: SEL } }, "\u0412\u0435\u0440\u043D\u0443\u0442\u044C"))),
             tab === "layout" && (React.createElement("div", null,
                 React.createElement(SectionTitle, null, "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430"),
                 React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
@@ -4069,30 +4118,6 @@ function TrayGenerator() {
                         React.createElement("input", { type: "checkbox", checked: magnet, onChange: (e) => setMagnet(e.target.checked), style: { accentColor: ACCENT } }),
                         "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439")),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439: \u0440\u0430\u0437\u043C\u0435\u0440 \u043F\u0440\u0438\u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0441\u0440\u0430\u0437\u0443 \u043A\u043E \u0432\u0441\u0435\u0439 \u043A\u043E\u043B\u043E\u043D\u043A\u0435 \u0438\u043B\u0438 \u0440\u044F\u0434\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 (\u0432 \u0441\u0435\u0442\u043A\u0435 \u043E\u043D\u0438 \u0434\u0435\u0440\u0436\u0430\u0442 \u043E\u0431\u0449\u0443\u044E \u0448\u0438\u0440\u0438\u043D\u0443/\u0433\u043B\u0443\u0431\u0438\u043D\u0443 \u2014 \u0438\u043D\u0430\u0447\u0435 \u0449\u0435\u043B\u0438), \u0441\u043E\u0441\u0435\u0434\u043D\u0438\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u043F\u0440\u0438\u043B\u0438\u043F\u0430\u044E\u0442 \u0438 \u0440\u0430\u0441\u0442\u0443\u0442 \u043D\u0430 \u043E\u0441\u0432\u043E\u0431\u043E\u0434\u0438\u0432\u0448\u0435\u0435\u0441\u044F \u043C\u0435\u0441\u0442\u043E (\u0438 \u043D\u0430\u043E\u0431\u043E\u0440\u043E\u0442). \u0421\u043E\u0441\u0435\u0434 \u0440\u0430\u0441\u0442\u0451\u0442 \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C \u0434\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430; \u0435\u0441\u043B\u0438 \u0440\u0430\u0441\u0442\u0438 \u0431\u043E\u043B\u044C\u0448\u0435 \u043D\u0435\u043A\u043E\u043C\u0443, \u043E\u0441\u0442\u0430\u0442\u043E\u043A (\u043E\u0442 30 \u043C\u043C) \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u043D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440. \u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0441 \u0437\u0430\u043C\u043A\u0430\u043C\u0438 \u043D\u0435 \u0442\u0440\u043E\u0433\u0430\u044E\u0442\u0441\u044F."),
-                React.createElement(SectionTitle, null, "\u041B\u0438\u043C\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438"),
-                React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E X", unit: "\u0441\u043C", value: limits.layW, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layW: Math.round(v) }) }),
-                React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E Y", unit: "\u0441\u043C", value: limits.layD, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layD: Math.round(v) }) }),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } },
-                    "\u041B\u0438\u043C\u0438\u0442 \u043B\u044E\u0431\u043E\u0439, \u0437\u0430\u0434\u0430\u0451\u0442\u0441\u044F \u0432 \u0441\u0430\u043D\u0442\u0438\u043C\u0435\u0442\u0440\u0430\u0445 \u0438 \u0432\u043C\u0435\u0449\u0430\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043F\u043E \u0432\u043D\u0435\u0448\u043D\u0435\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435. \u0421\u0431\u043E\u0440\u043A\u0430 \u0441\u0435\u0439\u0447\u0430\u0441: ",
-                    (built.totalW / 10).toFixed(1),
-                    "\u00D7",
-                    (built.totalD / 10).toFixed(1),
-                    " \u0441\u043C \u0438\u0437 ",
-                    limits.layW,
-                    "\u00D7",
-                    limits.layD,
-                    " \u0441\u043C."),
-                React.createElement("button", { onClick: doReset, style: {
-                        width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
-                        border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
-                        background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
-                    } }, resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"))),
-            tab === "printer" && (React.createElement("div", null,
-                React.createElement(SectionTitle, null, "\u041B\u0438\u043C\u0438\u0442\u044B \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430"),
-                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0448\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: limits.maxW, min: 50, max: 500, step: 1, onChange: (v) => updLimits({ maxW: v }) }),
-                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0433\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: limits.maxD, min: 50, max: 500, step: 1, onChange: (v) => updLimits({ maxD: v }) }),
-                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0432\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: limits.maxH, min: 30, max: 500, step: 1, onChange: (v) => updLimits({ maxH: v }) }),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } }, "\u041B\u0438\u043C\u0438\u0442\u044B \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044E\u0442 \u043D\u0430 \u041E\u0414\u0418\u041D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E \u0435\u0433\u043E \u0432\u043D\u0435\u0448\u043D\u0438\u043C \u0433\u0430\u0431\u0430\u0440\u0438\u0442\u0430\u043C (\u0438 \u043D\u0430 \u0432\u044B\u0441\u043E\u0442\u0443 \u0441\u0442\u0435\u043D\u043E\u043A). \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E \u2014 \u0447\u0443\u0442\u044C \u043C\u0435\u043D\u044C\u0448\u0435 \u0441\u0442\u043E\u043B\u0430 Bambu A1 mini (180\u00D7180\u00D7180 \u043C\u043C), \u0441 \u0437\u0430\u043F\u0430\u0441\u043E\u043C \u043F\u043E\u0434 \u044E\u0431\u043A\u0443. \u041D\u0443\u0436\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043C\u0435\u0441\u0442\u0430 \u2014 \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u0443\u0439 \u0435\u0449\u0451 \u043E\u0434\u0438\u043D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430\u00BB."),
                 React.createElement(SectionTitle, null, "\u0421\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0438"),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, [["dove", "Ласточкин хвост"], ["pins", "Выступы (лего)"]].map(([v, t]) => (React.createElement("button", { key: v, onClick: () => updLimits({ connType: v }), style: {
                         flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
@@ -4135,6 +4160,42 @@ function TrayGenerator() {
                     " \u043C\u043C. \u0417\u0430\u043C\u043E\u043A \u0441\u0442\u0430\u0432\u0438\u0442\u0441\u044F \u043D\u0430 \u0441\u0442\u0435\u043D\u043A\u0443 \u043D\u0435 \u043D\u0438\u0436\u0435 ",
                     CG.lockMin,
                     " \u043C\u043C \u2014 \u043D\u0430 \u0431\u043E\u043B\u0435\u0435 \u043D\u0438\u0437\u043A\u043E\u0439 \u0437\u043E\u043D\u0430 \u043D\u0435 \u0440\u0435\u0436\u0435\u0442\u0441\u044F \u0438 \u0441\u0442\u0435\u043D\u043A\u0430 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u0446\u0435\u043B\u043E\u0439."),
+                React.createElement("button", { onClick: () => { setConnTest(!connTest); setSel(0); setSelection(null); }, style: {
+                        width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+                        border: connTest ? `2px solid ${SEL}` : `1.5px solid ${ACCENT}`,
+                        background: connTest ? "#DBEAFE" : "#fff", color: connTest ? SEL : ACCENT,
+                    } }, connTest ? "↩ Вернуться к проекту" : "🧪 Тест соединителей"),
+                connTest ? (React.createElement(React.Fragment, null,
+                    React.createElement("p", { style: { fontSize: 11.5, color: "#3D4A5C", margin: "8px 0 0", lineHeight: 1.45 } },
+                        "\u0412 \u0441\u0446\u0435\u043D\u0435 \u2014 \u0434\u0432\u0435 \u0442\u0435\u0441\u0442\u043E\u0432\u044B\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 60\u00D760\u00D720 \u043C\u043C \u0432\u043C\u0435\u0441\u0442\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432 (\u043F\u0440\u043E\u0435\u043A\u0442 \u0446\u0435\u043B, \u0432\u0435\u0440\u043D\u0438\u0441\u044C \u043A\u043D\u043E\u043F\u043A\u043E\u0439). \u041D\u0430 \u0441\u0442\u044B\u043A\u0435 \u043C\u0435\u0436\u0434\u0443 \u043D\u0438\u043C\u0438 \u00AB\u043B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D \u0445\u0432\u043E\u0441\u0442\u00BB \u2014 \u0432\u0434\u0432\u0438\u043D\u044C \u043F\u0440\u0430\u0432\u0443\u044E \u0434\u0435\u0442\u0430\u043B\u044C \u0432 \u043B\u0435\u0432\u0443\u044E \u0441\u0432\u0435\u0440\u0445\u0443. \u041D\u0430 \u0431\u043B\u0438\u0436\u043D\u0438\u0445 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u0445 \u00AB\u0432\u044B\u0441\u0442\u0443\u043F\u044B\u00BB \u2014 \u043F\u0440\u0438\u0441\u0442\u0430\u0432\u044C \u0434\u0435\u0442\u0430\u043B\u0438 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u044D\u0442\u0438\u043C\u0438 \u0441\u0442\u043E\u0440\u043E\u043D\u0430\u043C\u0438. \u0417\u0430\u0437\u043E\u0440 \u2014 \u0442\u0435\u043A\u0443\u0449\u0438\u0439: ",
+                        (limits.connClr ?? DEFAULT_CLR).toLocaleString("ru"),
+                        " \u043C\u043C; \u043F\u043E\u043C\u0435\u043D\u044F\u0439 \u0435\u0433\u043E \u0432\u044B\u0448\u0435 \u0438 \u0441\u043A\u0430\u0447\u0430\u0439 \u0437\u0430\u043D\u043E\u0432\u043E."),
+                    React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 8 } }, [0, 1].map((i) => (React.createElement("button", { key: i, onClick: () => exportOne(i), style: {
+                            flex: 1, padding: "8px 0", background: ACCENT, color: "#fff", border: "none",
+                            borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                        } },
+                        "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0434\u0435\u0442\u0430\u043B\u044C ",
+                        i === 0 ? "A" : "B",
+                        " (STL)")))))) : (React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 } }, "\u041F\u0435\u0447\u0430\u0442\u0430\u044E\u0442\u0441\u044F \u0434\u0432\u0435 \u043C\u0430\u043B\u0435\u043D\u044C\u043A\u0438\u0435 \u0434\u0435\u0442\u0430\u043B\u0438 \u0441\u043E \u0432\u0441\u0435\u043C\u0438 \u0432\u0438\u0434\u0430\u043C\u0438 \u0441\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0435\u0439 \u0441\u0440\u0430\u0437\u0443 \u2014 \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C \u043F\u043E\u0441\u0430\u0434\u043A\u0443 \u0438 \u043F\u043E\u0434\u043E\u0431\u0440\u0430\u0442\u044C \u0437\u0430\u0437\u043E\u0440, \u043D\u0435 \u043F\u0435\u0447\u0430\u0442\u0430\u044F \u0431\u043E\u043B\u044C\u0448\u0438\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B.")),
+                React.createElement(SectionTitle, null, "\u041B\u0438\u043C\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438"),
+                React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E X", unit: "\u0441\u043C", value: limits.layW, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layW: Math.round(v) }) }),
+                React.createElement(Param, { label: "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u043F\u043E Y", unit: "\u0441\u043C", value: limits.layD, min: 5, max: 2000, step: 1, onChange: (v) => updLimits({ layD: Math.round(v) }) }),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } },
+                    "\u041B\u0438\u043C\u0438\u0442 \u043B\u044E\u0431\u043E\u0439, \u0437\u0430\u0434\u0430\u0451\u0442\u0441\u044F \u0432 \u0441\u0430\u043D\u0442\u0438\u043C\u0435\u0442\u0440\u0430\u0445 \u0438 \u0432\u043C\u0435\u0449\u0430\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043F\u043E \u0432\u043D\u0435\u0448\u043D\u0435\u0439 \u0441\u0442\u043E\u0440\u043E\u043D\u0435. \u0421\u0431\u043E\u0440\u043A\u0430 \u0441\u0435\u0439\u0447\u0430\u0441: ",
+                    (built.totalW / 10).toFixed(1),
+                    "\u00D7",
+                    (built.totalD / 10).toFixed(1),
+                    " \u0441\u043C \u0438\u0437 ",
+                    limits.layW,
+                    "\u00D7",
+                    limits.layD,
+                    " \u0441\u043C."))),
+            tab === "printer" && (React.createElement("div", null,
+                React.createElement(SectionTitle, null, "\u041B\u0438\u043C\u0438\u0442\u044B \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430"),
+                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0448\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: limits.maxW, min: 50, max: 500, step: 1, onChange: (v) => updLimits({ maxW: v }) }),
+                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0433\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: limits.maxD, min: 50, max: 500, step: 1, onChange: (v) => updLimits({ maxD: v }) }),
+                React.createElement(Param, { label: "\u041C\u0430\u043A\u0441. \u0432\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: limits.maxH, min: 30, max: 500, step: 1, onChange: (v) => updLimits({ maxH: v }) }),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 } }, "\u041B\u0438\u043C\u0438\u0442\u044B \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044E\u0442 \u043D\u0430 \u041E\u0414\u0418\u041D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u043E \u0435\u0433\u043E \u0432\u043D\u0435\u0448\u043D\u0438\u043C \u0433\u0430\u0431\u0430\u0440\u0438\u0442\u0430\u043C (\u0438 \u043D\u0430 \u0432\u044B\u0441\u043E\u0442\u0443 \u0441\u0442\u0435\u043D\u043E\u043A). \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E \u2014 \u0447\u0443\u0442\u044C \u043C\u0435\u043D\u044C\u0448\u0435 \u0441\u0442\u043E\u043B\u0430 Bambu A1 mini (180\u00D7180\u00D7180 \u043C\u043C), \u0441 \u0437\u0430\u043F\u0430\u0441\u043E\u043C \u043F\u043E\u0434 \u044E\u0431\u043A\u0443. \u041D\u0443\u0436\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043C\u0435\u0441\u0442\u0430 \u2014 \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u0443\u0439 \u0435\u0449\u0451 \u043E\u0434\u0438\u043D \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432\u043E \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430\u00BB."),
                 React.createElement("div", { style: { height: 12 } }),
                 React.createElement(Collapse, { title: "\u041F\u0440\u043E\u0435\u043A\u0442", open: openSecs.project, onToggle: () => toggleSec("project") },
                     React.createElement("button", { onClick: saveProject, style: {
@@ -4170,7 +4231,12 @@ function TrayGenerator() {
                         "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0432\u0441\u0435 (",
                         containers.length,
                         " \u0444\u0430\u0439\u043B\u0430)")),
-                    React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 } }, "\u041C\u0438\u043B\u043B\u0438\u043C\u0435\u0442\u0440\u044B, \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C \u2014 Z. \u041F\u0430\u0437\u044B \u0441\u043F\u0440\u044F\u0442\u0430\u043D\u044B \u0432\u043D\u0443\u0442\u0440\u0438 \u0442\u043E\u043B\u0449\u0438\u043D\u044B \u0441\u0442\u0435\u043D\u043A\u0438: \u044F\u0447\u0435\u0439\u043A\u0438 \u043D\u0435 \u0438\u0441\u043A\u0430\u0436\u0430\u044E\u0442\u0441\u044F, \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0441\u043C\u044B\u043A\u0430\u044E\u0442\u0441\u044F \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E. \u0421\u0431\u043E\u0440\u043A\u0430 \u2014 \u0432\u0434\u0432\u0438\u0433\u0430\u043D\u0438\u0435\u043C \u0441\u0432\u0435\u0440\u0445\u0443.")))),
+                    React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 } }, "\u041C\u0438\u043B\u043B\u0438\u043C\u0435\u0442\u0440\u044B, \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C \u2014 Z. \u041F\u0430\u0437\u044B \u0441\u043F\u0440\u044F\u0442\u0430\u043D\u044B \u0432\u043D\u0443\u0442\u0440\u0438 \u0442\u043E\u043B\u0449\u0438\u043D\u044B \u0441\u0442\u0435\u043D\u043A\u0438: \u044F\u0447\u0435\u0439\u043A\u0438 \u043D\u0435 \u0438\u0441\u043A\u0430\u0436\u0430\u044E\u0442\u0441\u044F, \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0441\u043C\u044B\u043A\u0430\u044E\u0442\u0441\u044F \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E. \u0421\u0431\u043E\u0440\u043A\u0430 \u2014 \u0432\u0434\u0432\u0438\u0433\u0430\u043D\u0438\u0435\u043C \u0441\u0432\u0435\u0440\u0445\u0443.")),
+                React.createElement("button", { onClick: doReset, style: {
+                        width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
+                        border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
+                        background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
+                    } }, resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"))),
             tab === "cont" && (React.createElement("div", null,
                 containers.length > 1 && (React.createElement("div", { style: { display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 } }, containers.map((_, i) => (React.createElement("button", { key: i, onClick: () => { setSel(i); setSelection(null); }, style: {
                         padding: "5px 11px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",

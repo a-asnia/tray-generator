@@ -44,12 +44,14 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   };
   const resetBtnCount = () => page.locator("button", { hasText: /Сбросить проект/ }).count();
 
-  // «Сбросить проект» нет на Модели и Принтере, есть на Раскладке
+  // «Сбросить проект» нет на Модели и Раскладке, есть на Принтере
   ok("нет сброса на вкладке Контейнеры", (await resetBtnCount()) === 0);
-  await page.locator("button", { hasText: /^Принтер$/ }).click();
-  ok("нет сброса на вкладке Принтер", (await resetBtnCount()) === 0);
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
-  ok("сброс есть на вкладке Раскладка", (await resetBtnCount()) === 1);
+  ok("нет сброса на вкладке Раскладка", (await resetBtnCount()) === 0);
+  ok("настройка соединителей на Раскладке", (await page.locator('button:text-is("Ласточкин хвост")').count()) === 1);
+  await page.locator("button", { hasText: /^Принтер$/ }).click();
+  ok("сброс есть на вкладке Принтер", (await resetBtnCount()) === 1);
+  ok("настройки соединителей на Принтере больше нет", (await page.locator('button:text-is("Ласточкин хвост")').count()) === 0);
 
   // настройки ячеек уехали в «Редактор стенок»
   await goCont();

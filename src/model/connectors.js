@@ -104,9 +104,10 @@ export function splitRange(a, b, zones) {
 // pins female: глухой карман в толщине стенки, открытый к соседу.
 // Внутренняя грань стенки не меняется — ячейки остаются ровно заданного
 // размера, а наружные плоскости соседей смыкаются вплотную по всей длине.
-export function addConnUnits(solids, c, side, units) {
+export function addConnUnits(solids, c, side, units, type) {
   const { W, D, H, wallOut } = c;
-  const CONN = connOf(c); // зазор и тип берутся из настроек контейнера
+  // зазор — из настроек контейнера; тип — оттуда же либо задан стороной
+  const CONN = connOf(type ? { ...c, connType: type } : c);
   if (!CONN.fits) return; // стенка слишком тонкая — замок не ставим
   const dg = CONN.dg;
   const axis = side === "E" || side === "W" ? "x" : "z";

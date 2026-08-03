@@ -48,13 +48,13 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.waitForTimeout(200);
   ok("поля размера в редакторе ячейки есть", await page.getByText("Ширина ячейки").count());
 
-  // сброс на вкладке Раскладка оставляет на Раскладке
-  await page.locator("button", { hasText: /^Раскладка$/ }).click();
+  // сброс на вкладке Принтер оставляет на Принтере
+  await page.locator("button", { hasText: /^Принтер$/ }).click();
   await page.locator("button", { hasText: /Сбросить проект/ }).click();
   await page.waitForTimeout(200);
   await page.locator("button", { hasText: /Точно сбросить/ }).click();
   await page.waitForTimeout(400);
-  ok("после сброса остались на Раскладке", await page.getByText("Лимит раскладки").count());
+  ok("после сброса остались на Принтере", await page.getByText("Лимиты принтера").count());
   const st1 = await state();
   ok("сброс сработал (1 контейнер, лимит 40×40)", st1.containers.length === 1 && st1.limits.layW === 40);
 

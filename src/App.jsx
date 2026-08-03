@@ -41,8 +41,11 @@ export default function TrayGenerator() {
   const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
-  // размеры соединителя зависят от зазора печати (настройка «Принтер»)
+  // размеры соединителя зависят от зазора печати (настройка «Раскладка»)
   const CG = connGeom(limits.connClr, limits.connType);
+  // режим «Тест соединителей»: вместо контейнеров в сцене две маленькие
+  // тест-детали со всеми видами замков; проект при этом не трогается
+  const [connTest, setConnTest] = useState(SAVED?.connTest === true);
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
@@ -52,9 +55,9 @@ export default function TrayGenerator() {
   // автосохранение при каждом изменении
   useEffect(() => {
     try {
-      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs }));
+      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs, connTest }));
     } catch (e) {}
-  }, [containers, limits, connect, magnet, openSecs]);
+  }, [containers, limits, connect, magnet, openSecs, connTest]);
 
   const cur = containers[sel];
 
@@ -234,6 +237,7 @@ export default function TrayGenerator() {
     setSelection(null);
     setConnect(true);
     setMagnet(true);
+    setConnTest(false);
     setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
     setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
@@ -427,6 +431,33 @@ export default function TrayGenerator() {
   const geoCache = useRef(new WeakMap());
   // ── сборка: соединители по соседям + раскладка сеткой ──
   const built = useMemo(() => {
+    // «Тест соединителей»: вместо проекта — две маленькие детали со всеми
+    // видами замков. На стыке между ними «ласточкин хвост», на ближних
+    // сторонах — «выступы»: одна пара печатается и проверяется всё сразу.
+    if (connTest) {
+      const gD = connGeom(limits.connClr, "dove"), gP = connGeom(limits.connClr, "pins");
+      const t = {
+        W: 60, D: 60, H: 20, cols: 1, rows: 1, gridMode: "count",
+        wall: 1.6, wallOut: Math.max(gD.minWall, gP.minWall), floor: 1.6,
+        walls: {}, cells: {}, rowColWs: null, rowDs: null,
+        lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
+        connClr: limits.connClr,
+      };
+      const one = [0];
+      const items = [
+        {
+          c: { ...t },
+          solids: buildContainer({ ...t }, { E: { male: true, vs: one, type: "dove" }, S: { male: true, vs: one, type: "pins" }, N: null, W: null }),
+          ox: -t.W / 2, oz: 0,
+        },
+        {
+          c: { ...t },
+          solids: buildContainer({ ...t }, { W: { male: false, vs: one, type: "dove" }, N: { male: false, vs: one, type: "pins" }, S: null, E: null }),
+          ox: t.W / 2, oz: 0,
+        },
+      ];
+      return { items, totalW: 2 * t.W, totalD: t.D };
+    }
     const nb = (c, dx, dy) => {
       const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
       return i === undefined ? null : containers[i];
@@ -473,10 +504,10 @@ export default function TrayGenerator() {
       };
     });
     return { items, totalW, totalD };
-  }, [containers, connect, posMap, limits.connClr, limits.connType]);
+  }, [containers, connect, posMap, limits.connClr, limits.connType, connTest]);
 
   // ── three.js: сцена, камера, пикинг ──
-  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
+  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers: connTest ? [] : containers, selMode, setSel, setSelection: selectAndShow });
 
   const L = layout(cur);
   const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
@@ -1045,6 +1076,21 @@ export default function TrayGenerator() {
           ))}
         </div>
 
+        {connTest && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 10px",
+            borderRadius: 8, background: "#DBEAFE", border: `1.5px solid ${SEL}`, fontSize: 12, color: "#1E3A8A",
+          }}>
+            <span style={{ flex: 1 }}>🧪 Тест соединителей: в сцене две тестовые детали, проект не тронут.</span>
+            <button
+              onClick={() => { setConnTest(false); setSel(0); }}
+              style={{ padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `1px solid ${SEL}`, background: "#fff", color: SEL }}
+            >
+              Вернуть
+            </button>
+          </div>
+        )}
+
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
@@ -1099,34 +1145,6 @@ export default function TrayGenerator() {
           Магнит соседей: размер применяется сразу ко всей колонке или ряду контейнера (в сетке они держат общую ширину/глубину — иначе щели), соседние колонки прилипают и растут на освободившееся место (и наоборот). Сосед растёт максимум до лимита принтера; если расти больше некому, остаток (от 30 мм) закрывает новый контейнер. Контейнеры с замками не трогаются.
         </p>
 
-        <SectionTitle>Лимит раскладки</SectionTitle>
-        <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />
-        <Param label="Раскладка по Y" unit="см" value={limits.layD} min={5} max={2000} step={1} onChange={(v) => updLimits({ layD: Math.round(v) })} />
-        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          Лимит любой, задаётся в сантиметрах и вмещает контейнеры по внешней стороне. Сборка сейчас: {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
-        </p>
-
-        <button
-          onClick={doReset}
-          style={{
-            width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
-            border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
-            background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
-          }}
-        >
-          {resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"}
-        </button>
-        </div>)}
-
-        {tab === "printer" && (<div>
-        <SectionTitle>Лимиты принтера</SectionTitle>
-        <Param label="Макс. ширина" unit="мм" value={limits.maxW} min={50} max={500} step={1} onChange={(v) => updLimits({ maxW: v })} />
-        <Param label="Макс. глубина" unit="мм" value={limits.maxD} min={50} max={500} step={1} onChange={(v) => updLimits({ maxD: v })} />
-        <Param label="Макс. высота" unit="мм" value={limits.maxH} min={30} max={500} step={1} onChange={(v) => updLimits({ maxH: v })} />
-        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
-        </p>
-
         <SectionTitle>Соединители</SectionTitle>
         <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
           {[["dove", "Ласточкин хвост"], ["pins", "Выступы (лего)"]].map(([v, t]) => (
@@ -1177,7 +1195,66 @@ export default function TrayGenerator() {
           {" "}Минимальная внешняя стенка при этих настройках: {CG.minWall} мм. Замок ставится на стенку не ниже {CG.lockMin} мм — на более низкой зона не режется и стенка остаётся целой.
         </p>
 
-        <div style={{ height: 12 }} />
+        <button
+          onClick={() => { setConnTest(!connTest); setSel(0); setSelection(null); }}
+          style={{
+            width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+            border: connTest ? `2px solid ${SEL}` : `1.5px solid ${ACCENT}`,
+            background: connTest ? "#DBEAFE" : "#fff", color: connTest ? SEL : ACCENT,
+          }}
+        >
+          {connTest ? "↩ Вернуться к проекту" : "🧪 Тест соединителей"}
+        </button>
+        {connTest ? (
+          <>
+            <p style={{ fontSize: 11.5, color: "#3D4A5C", margin: "8px 0 0", lineHeight: 1.45 }}>
+              В сцене — две тестовые детали 60×60×20 мм вместо контейнеров (проект цел, вернись кнопкой).
+              На стыке между ними «ласточкин хвост» — вдвинь правую деталь в левую сверху.
+              На ближних сторонах «выступы» — приставь детали вплотную этими сторонами.
+              Зазор — текущий: {(limits.connClr ?? DEFAULT_CLR).toLocaleString("ru")} мм; поменяй его выше и скачай заново.
+            </p>
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              {[0, 1].map((i) => (
+                <button
+                  key={i}
+                  onClick={() => exportOne(i)}
+                  style={{
+                    flex: 1, padding: "8px 0", background: ACCENT, color: "#fff", border: "none",
+                    borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                  }}
+                >
+                  Скачать деталь {i === 0 ? "A" : "B"} (STL)
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 }}>
+            Печатаются две маленькие детали со всеми видами соединителей сразу — проверить посадку
+            и подобрать зазор, не печатая большие контейнеры.
+          </p>
+        )}
+
+
+        <SectionTitle>Лимит раскладки</SectionTitle>
+        <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />
+        <Param label="Раскладка по Y" unit="см" value={limits.layD} min={5} max={2000} step={1} onChange={(v) => updLimits({ layD: Math.round(v) })} />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
+          Лимит любой, задаётся в сантиметрах и вмещает контейнеры по внешней стороне. Сборка сейчас: {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
+        </p>
+
+        </div>)}
+
+        {tab === "printer" && (<div>
+        <SectionTitle>Лимиты принтера</SectionTitle>
+        <Param label="Макс. ширина" unit="мм" value={limits.maxW} min={50} max={500} step={1} onChange={(v) => updLimits({ maxW: v })} />
+        <Param label="Макс. глубина" unit="мм" value={limits.maxD} min={50} max={500} step={1} onChange={(v) => updLimits({ maxD: v })} />
+        <Param label="Макс. высота" unit="мм" value={limits.maxH} min={30} max={500} step={1} onChange={(v) => updLimits({ maxH: v })} />
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
+          Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
+        </p>
+
+                <div style={{ height: 12 }} />
         <Collapse title="Проект" open={openSecs.project} onToggle={() => toggleSec("project")}>
         <button
           onClick={saveProject}
@@ -1247,6 +1324,17 @@ export default function TrayGenerator() {
           Миллиметры, вертикаль — Z. Пазы спрятаны внутри толщины стенки: ячейки не искажаются, контейнеры смыкаются вплотную. Сборка — вдвиганием сверху.
         </p>
         </Collapse>
+
+        <button
+          onClick={doReset}
+          style={{
+            width: "100%", marginTop: 14, padding: "8px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
+            border: resetArm ? "2px solid #C0392B" : "1px solid #F1C0C0",
+            background: resetArm ? "#FDECEA" : "#fff", color: "#C0392B", fontWeight: resetArm ? 700 : 400,
+          }}
+        >
+          {resetArm ? "Точно сбросить? Нажми ещё раз" : "Сбросить проект (значения по умолчанию)"}
+        </button>
         </div>)}
 
         {tab === "cont" && (<div>

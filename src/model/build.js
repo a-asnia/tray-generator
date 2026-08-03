@@ -96,11 +96,18 @@ export function buildContainer(c, conn, opts = {}) {
   };
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
+  // Тип замка обычно общий на контейнер (c.connType), но сторона может
+  // нести свой: conn[side].type — так строятся тест-детали, где на одном
+  // контейнере живут и «ласточкин хвост», и «выступы»
+  const connSide = (side) =>
+    conn[side] && conn[side].type && conn[side].type !== CONN.type
+      ? connOf({ ...c, connType: conn[side].type })
+      : CONN;
   // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
   // сегмента, на котором он стоит (зона может накрыть два сегмента —
   // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
   // и замок не ставится: стенка остаётся целой и ровной.
-  const zoneInfo = (side, vc) => {
+  const zoneInfo = (side, vc, g) => {
     const sideL = side.toLowerCase();
     const segs = [];
     if (sideL === "n" || sideL === "s") {
@@ -111,7 +118,7 @@ export function buildContainer(c, conn, opts = {}) {
       for (let j = 0; j < L.nRows; j++)
         segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
     }
-    const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+    const z0 = vc - g.bossW / 2, z1 = vc + g.bossW / 2;
     let h = Infinity, rnd = 0, best = -1e9;
     for (const sg of segs) {
       if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01) continue;
@@ -123,14 +130,16 @@ export function buildContainer(c, conn, opts = {}) {
     if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; rnd = wc.rnd; }
     return { vc, h, rnd };
   };
-  const unitsOf = (side) =>
-    conn[side] && CONN.fits
-      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
+  const unitsOf = (side) => {
+    const g = connSide(side);
+    return conn[side] && g.fits
+      ? conn[side].vs.map((vc) => zoneInfo(side, vc, g)).filter((u) => u.h >= lockMinH(g))
       : [];
+  };
   const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
-  const zonesFrom = (units) =>
-    units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
-  const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
+  const zonesFrom = (units, side) =>
+    units.map((u) => [u.vc - connSide(side).bossW / 2, u.vc + connSide(side).bossW / 2]).sort((a, b) => a[0] - b[0]);
+  const zN = zonesFrom(uN, "N"), zS = zonesFrom(uS, "S"), zW = zonesFrom(uW, "W"), zE = zonesFrom(uE, "E");
 
   const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
     if (tilt < 0.5 || h <= yBase + 0.3) return;
@@ -907,12 +916,13 @@ export function buildContainer(c, conn, opts = {}) {
   // профилем, той же высотой и скруглением, что стенка этой зоны, иначе
   // на месте замка получается ступенька по высоте или провал в кромке
   const zoneWall = (side, u) => {
+    const g = connSide(side.toUpperCase());
     const mapFn = side === "n" ? (o, y, x) => [x, y, -D / 2 + o]
       : side === "s" ? (o, y, x) => [x, y, D / 2 - o]
       : side === "w" ? (o, y, z) => [-W / 2 + o, y, z]
       : (o, y, z) => [W / 2 - o, y, z];
     pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn,
-      u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2, "conn");
+      u.vc - g.bossW / 2, u.vc + g.bossW / 2, "conn");
   };
   if (conn.S?.male) for (const u of uS) zoneWall("s", u);
   if (conn.N?.male) for (const u of uN) zoneWall("n", u);
@@ -1210,10 +1220,12 @@ export function buildContainer(c, conn, opts = {}) {
     }
   }
 
-  // соединители (высота и скругление кромки — от стенки своей зоны)
+  // соединители (высота и скругление кромки — от стенки своей зоны;
+  // тип может быть задан на стороне — для тест-деталей)
   const sideUnits = { N: uN, S: uS, W: uW, E: uE };
   for (const side of ["N", "S", "W", "E"])
-    if (conn[side] && sideUnits[side].length) addConnUnits(solids, c, side, sideUnits[side]);
+    if (conn[side] && sideUnits[side].length)
+      addConnUnits(solids, c, side, sideUnits[side], conn[side].type);
 
   return solids;
 }
