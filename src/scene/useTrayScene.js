@@ -31,10 +31,11 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
   const applyCamera = useCallback(() => {
     const cam = cameraRef.current, o = orbitRef.current;
     if (!cam) return;
+    const look = o.lookY ?? 12; // высота точки взгляда — подстраивается под сцену
     const y = o.radius * Math.cos(o.phi);
     const r = o.radius * Math.sin(o.phi);
-    cam.position.set(r * Math.sin(o.theta) + o.panX, y + 15 + o.panY, r * Math.cos(o.theta) + o.panZ);
-    cam.lookAt(o.panX, 12 + o.panY, o.panZ);
+    cam.position.set(r * Math.sin(o.theta) + o.panX, y + look + 3 + o.panY, r * Math.cos(o.theta) + o.panZ);
+    cam.lookAt(o.panX, look + o.panY, o.panZ);
     cam.updateMatrixWorld();
   }, []);
 
@@ -260,6 +261,27 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
         for (const m of e.meshes) { m.geometry.dispose(); group.remove(m); }
         cache.delete(idx);
       }
+
+    // авто-подгонка камеры под габариты сцены: высокий контейнер
+    // (буклетница, горка) не должен вылезать из кадра. Срабатывает только
+    // когда габариты сборки изменились — ручной зум и вращение не трогаем.
+    {
+      const o = orbitRef.current;
+      let maxH = 30;
+      for (const it of built.items) {
+        maxH = Math.max(maxH, it.c.H || 30);
+        for (const w of Object.values(it.c.walls || {})) if (w && w.h) maxH = Math.max(maxH, w.h);
+      }
+      const span = Math.max(built.totalW || 0, built.totalD || 0, 100);
+      const sig = `${Math.round(span)}|${Math.round(maxH)}`;
+      if (o.fitSig !== sig) {
+        o.fitSig = sig;
+        o.lookY = Math.max(12, maxH * 0.45);
+        const need = Math.max(240, (span / 2 + maxH) * 2.2);
+        if (o.radius < need) o.radius = Math.min(1200, need);
+        applyCamera();
+      }
+    }
 
     // рамка лимита раскладки на столе — видно, как сборка «липнет» к краям
     const bw = limits.layW * 10, bd = limits.layD * 10;

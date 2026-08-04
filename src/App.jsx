@@ -259,9 +259,16 @@ export default function TrayGenerator() {
   // ── Пресеты контейнеров ──
   // настройки «Горки»: ступенек, шаг уровня (мм), глубина ступени (мм)
   const [gorka, setGorka] = useState({ ...GORKA_DEF });
-  const applyPreset = (kind) => {
-    setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, gorka) : x)));
+  const applyPreset = (kind, g = gorka) => {
+    setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, g) : x)));
     setSelection(null);
+  };
+  // параметры горки применяются вживую, если выбранный контейнер — горка;
+  // другие пресеты (и обычные контейнеры) они не трогают
+  const updGorka = (patch) => {
+    const g = { ...gorka, ...patch };
+    setGorka(g);
+    if (cur?.preset === "stairs") applyPreset("stairs", g);
   };
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
@@ -1340,12 +1347,15 @@ export default function TrayGenerator() {
           ))}
         </div>
         <div style={{ marginTop: 10, padding: "8px 10px 2px", borderRadius: 8, border: "1px solid #E4E9EF", background: "#FAFBFC" }}>
+          <p style={{ fontSize: 12, fontWeight: 700, color: "#3D4A5C", margin: "0 0 6px" }}>
+            Горка {cur?.preset === "stairs" ? "— применена, параметры меняют её вживую" : ""}
+          </p>
           <Param label="Ступенек" unit="шт" value={gorka.steps} min={2} max={12} step={1}
-            onChange={(v) => setGorka((g) => ({ ...g, steps: Math.round(v) }))} />
+            onChange={(v) => updGorka({ steps: Math.round(v) })} />
           <Param label="Шаг уровня" unit="мм" value={gorka.stepH} min={3} max={60} step={1}
-            onChange={(v) => setGorka((g) => ({ ...g, stepH: v }))} />
+            onChange={(v) => updGorka({ stepH: v })} />
           <Param label="Глубина ступени" unit="мм" value={gorka.depth} min={10} max={120} step={1}
-            onChange={(v) => setGorka((g) => ({ ...g, depth: v }))} />
+            onChange={(v) => updGorka({ depth: v })} />
           <button
             onClick={() => applyPreset("stairs")}
             style={{
@@ -1356,10 +1366,11 @@ export default function TrayGenerator() {
             Горка — применить
           </button>
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-            Ступени поднимаются к задней стенке, задняя стенка — самая высокая (равна высоте
-            контейнера и меняется слайдером «Высота»). Ступенька — это ряд: передние держат
-            заданную глубину, задний забирает остаток. Поменял параметры — нажми ещё раз;
-            дальше всё правится как обычно: ряды, глубины рядов, уровни полов, стенки.
+            Эти три параметра относятся только к горке: пока она не применена, они ни на что
+            не влияют. Ступени поднимаются к задней стенке, задняя стенка — самая высокая
+            (равна высоте контейнера и меняется слайдером «Высота»). Ступенька — это ряд:
+            передние держат заданную глубину, задний забирает остаток. После применения
+            параметры меняют горку сразу; всё остальное правится обычными редакторами.
           </p>
         </div>
         </Collapse>

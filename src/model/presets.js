@@ -32,6 +32,7 @@ export function presetContainer(c, kind, limits, opts = {}) {
     walls: {}, cells: {}, rowColWs: null, rowDs: null,
     lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
     lockOuter: false, lockCell: false,
+    preset: kind, // метка: настройки горки применяются вживую только к горке
   };
 
   // низкий большой: один отсек на весь след, невысокие борта
