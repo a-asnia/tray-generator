@@ -103,6 +103,15 @@ await setNum("Шаг уровня", 60);
 c = await st();
 ok(`горка не выше лимита принтера (H ${c.H} ≤ 175)`, c.H <= 175.01);
 
+// бортик: высота всех сегментов над полом настраивается — глубокие ячейки
+await setNum("Ступенек", 3);
+await setNum("Бортик (глубина ячеек)", 35);
+c = await st();
+ok("бортик сохранился на контейнере", Math.abs(c.stairsLip - 35) < 0.05);
+ok(`все сегменты выше (перед ${c.walls["o:n:0"]?.h})`,
+  Math.abs(c.walls["o:n:0"].h - (c.floor + 35)) < 0.1 &&
+  Math.abs(c.walls["v:0:0"].h - (c.floor + 35)) < 0.1);
+
 // низкий и узкий
 await page.locator('button:text-is("Низкий большой")').click();
 await page.waitForTimeout(400);

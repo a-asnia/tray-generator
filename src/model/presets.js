@@ -9,10 +9,11 @@
 import { layout, getCellLvl } from "./layout.js";
 
 // настройки «Горки» по умолчанию: ступенек, шаг уровня, глубина ступени,
-// колонок (делят ступени на отсеки)
-export const GORKA_DEF = { steps: 3, stepH: 15, depth: 35, cols: 1 };
+// колонок (делят ступени на отсеки), бортик (высота стенок над полом —
+// большой бортик при низком поле даёт глубокие ячейки)
+export const GORKA_DEF = { steps: 3, stepH: 15, depth: 35, cols: 1, lip: 6 };
 
-// бортик над полом своей ступени
+// бортик над полом своей ступени по умолчанию
 const LIP = 6;
 
 // ── Горка — «живой» пресет ──
@@ -24,8 +25,9 @@ const LIP = 6;
 // Высоты всех стенок-сегментов горки по текущим уровням полов
 export function stairsWalls(c) {
   const L = layout(c);
+  const lip = c.stairsLip ?? LIP; // хранится на контейнере (параметр «Бортик»)
   const lvl = (i, j) => Math.min(getCellLvl(c, i, j), c.H - 4);
-  const h = (v) => r1(Math.min(c.H, v + c.floor + LIP));
+  const h = (v) => r1(Math.min(c.H, v + c.floor + lip));
   const walls = {};
   for (let i = 0; i < L.nColsAt(0); i++) walls["o:n:" + i] = { h: h(lvl(i, 0)) };
   for (let j = 0; j < L.nRows; j++) {
@@ -146,9 +148,12 @@ export function presetContainer(c, kind, limits, opts = {}) {
   if (kind === "stairs") {
     const n = Math.max(2, Math.min(12, Math.round(opts.steps ?? GORKA_DEF.steps)));
     const nCols = Math.max(1, Math.min(8, Math.round(opts.cols ?? GORKA_DEF.cols)));
+    const lip = Math.max(2, Math.min(120, opts.lip ?? GORKA_DEF.lip));
+    // спинка должна возвышаться и над верхней ступенью, и над её бортиком
+    const head = Math.max(20, lip + 2);
     // шаг уровня ужимается так, чтобы вся лесенка со спинкой влезла в
     // лимит принтера по высоте — слайдером её не задрать выше maxH
-    const maxStep = Math.max(3, (maxH - c.floor - 20) / Math.max(1, n - 1));
+    const maxStep = Math.max(3, (maxH - c.floor - head) / Math.max(1, n - 1));
     const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH, maxStep));
     const sum = innerD - (n - 1) * c.wall; // суммарная глубина рядов
     const depth = Math.max(10, Math.min(opts.depth ?? GORKA_DEF.depth, (sum - 10) / Math.max(1, n - 1)));
@@ -156,12 +161,12 @@ export function presetContainer(c, kind, limits, opts = {}) {
       r1(j < n - 1 ? depth : Math.max(10, sum - depth * (n - 1))));
     const lockedRows = {};
     for (let j = 0; j < n - 1; j++) lockedRows[j] = true;
-    // спинка выше верхней ступени минимум на 20 мм (или на шаг)
-    const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(20, stepH)));
+    // спинка выше верхней ступени минимум на 20 мм (либо на шаг/бортик)
+    const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(head, stepH)));
     const cells = {};
     for (let j = 1; j < n; j++)
       for (let i = 0; i < nCols; i++) cells[i + ":" + j] = { lvl: r1(j * stepH) };
-    const next = { ...base, H, rows: n, cols: nCols, rowDs, lockedRows, cells };
+    const next = { ...base, H, rows: n, cols: nCols, rowDs, lockedRows, cells, stairsLip: lip };
     next.walls = applyStairsWalls(next);
     return next;
   }

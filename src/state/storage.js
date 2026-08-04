@@ -123,8 +123,9 @@ const sanitizeContainer = (c0) => {
   // «ласточкин хвост» с фиксированным зазором
   delete c.connClr;
   delete c.connType;
-  // метка применённого пресета (для живых параметров горки)
+  // метка применённого пресета (для живых параметров горки) и её бортик
   if (c.preset !== undefined && typeof c.preset !== "string") delete c.preset;
+  if (c.stairsLip !== undefined) c.stairsLip = num(c.stairsLip, 6, 2, 200);
   return c;
 };
 

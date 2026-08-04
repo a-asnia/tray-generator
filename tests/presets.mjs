@@ -136,6 +136,24 @@ for (const [kind, title] of PRESETS) {
   ok("явный ноль не перетирается", fillStairsLevels(zeroed)["2:1"].lvl === 0);
 }
 
+// ── бортик настраивается: глубокие ячейки при низком поле ──
+{
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 10, depth: 40, cols: 2, lip: 40 });
+  ok("бортик хранится на контейнере", p.stairsLip === 40);
+  // передняя ячейка: пол на дне, стенки на 40 мм выше — глубокая
+  ok(`глубокая передняя ячейка (перед ${getWall(p, "o:n:0").h})`, near(getWall(p, "o:n:0").h, p.floor + 40));
+  ok("перегородка колонок тоже глубокая", near(getWall(p, "v:0:0").h, p.floor + 40));
+  ok("подступенок выше пола второй ступени на бортик", near(getWall(p, "h:0:0").h, 10 + p.floor + 40));
+  // спинка всё ещё выше всех бортиков
+  const hs = ["o:n:0", "v:0:0", "h:0:0", "h:1:0", "o:w:2"].map((k) => getWall(p, k).h);
+  ok(`спинка выше бортиков (H ${p.H})`, hs.every((h) => h <= p.H - 1));
+  ok("строится", buildContainer(p, noConn, {}).length > 100);
+  // живой пересчёт уважает бортик: опустили уровень — ячейка стала глубже
+  const edited = { ...p, cells: { ...p.cells, "0:1": { lvl: 0 } } };
+  const w2 = applyStairsWalls(edited);
+  ok("низкий пол + бортик = глубокая ячейка при пересчёте", near(w2["o:w:1"].h, p.floor + 40));
+}
+
 // ── шаг уровня ограничен лимитом принтера по высоте ──
 {
   const lim2 = { ...limits, maxH: 80 };
