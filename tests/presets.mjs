@@ -64,16 +64,16 @@ for (const [kind, title] of PRESETS) {
 
 // ── горка ──
 {
-  const opts = { steps: 4, stepH: 12, depth: 30 };
+  const opts = { steps: 4, stepH: 12 };
   const p = presetContainer(mk(), "stairs", limits, opts);
   const L = layout(p);
   ok("горка: ступенек столько, сколько задано", p.rows === 4 && L.nRows === 4);
   // уровни поднимаются к задней стенке с заданным шагом
   const lvls = [0, 1, 2, 3].map((j) => getCellLvl(p, 0, j));
   ok(`горка: уровни ${lvls.join(" → ")}`, lvls.every((v, j) => near(v, j * opts.stepH)));
-  // передние ряды держат заданную глубину, задний забирает остаток
-  ok(`горка: глубина передних ступеней ${L.rowDs[0].toFixed(1)}`,
-    [0, 1, 2].every((j) => near(L.rowDs[j], opts.depth)) && L.rowDs[3] > opts.depth);
+  // все ступени равной глубины — без «остатка» последнему ряду
+  ok(`горка: ступени равной глубины (${L.rowDs.map((d) => d.toFixed(1)).join("/")})`,
+    L.rowDs.every((d) => near(d, L.rowDs[0])));
   const sumD = L.rowDs.reduce((a, b) => a + b, 0) + (p.rows - 1) * p.wall;
   ok("горка: ступени занимают весь след по глубине", near(sumD, p.D - 2 * p.wallOut, 0.2));
   // задняя стенка самая высокая и равна высоте контейнера
@@ -89,18 +89,14 @@ for (const [kind, title] of PRESETS) {
   ok("горка: подступенки с бортиком", [0, 1, 2].every((j) =>
     getWall(p, "h:" + j + ":0").h > lvls[j + 1] + p.floor + 1));
 
-  // слишком глубокие ступени ужимаются, задний ряд не исчезает
-  const pd = presetContainer(mk(), "stairs", limits, { steps: 4, stepH: 12, depth: 500 });
-  const Ld = layout(pd);
-  ok("горка: чрезмерная глубина ступени ужимается", Ld.rowDs.every((d) => d >= 9.9));
   // много ступеней тоже строится
-  const pm = presetContainer(mk(), "stairs", limits, { steps: 8, stepH: 8, depth: 18 });
+  const pm = presetContainer(mk(), "stairs", limits, { steps: 8, stepH: 8 });
   ok("горка: 8 ступеней строятся", buildContainer(pm, noConn, {}).length > 100);
 }
 
 // ── горка с колонками ──
 {
-  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, depth: 40, cols: 3 });
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, cols: 3 });
   const L = layout(p);
   ok("колонки: сетка 3 колонки × 3 ступени", p.cols === 3 && L.nColsAt(0) === 3);
   ok("колонки: уровни у всех колонок", [0, 1, 2].every((i) => getCellLvl(p, i, 1) === 15 && getCellLvl(p, i, 2) === 30));
@@ -115,7 +111,7 @@ for (const [kind, title] of PRESETS) {
 
 // ── живая горка: бортики следуют уровням, новые колонки наследуют ряд ──
 {
-  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, depth: 40, cols: 2 });
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, cols: 2 });
   // пользователь поднял уровень одной ячейки — бортики вокруг неё выросли
   const edited = { ...p, cells: { ...p.cells, "1:1": { lvl: 40 } } };
   const w2 = applyStairsWalls(edited);
@@ -138,7 +134,7 @@ for (const [kind, title] of PRESETS) {
 
 // ── бортик настраивается: глубокие ячейки при низком поле ──
 {
-  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 10, depth: 40, cols: 2, lip: 40 });
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 10, cols: 2, lip: 40 });
   ok("бортик хранится на контейнере", p.stairsLip === 40);
   // передняя ячейка: пол на дне, стенки на 40 мм выше — глубокая
   ok(`глубокая передняя ячейка (перед ${getWall(p, "o:n:0").h})`, near(getWall(p, "o:n:0").h, p.floor + 40));
@@ -157,7 +153,7 @@ for (const [kind, title] of PRESETS) {
 // ── шаг уровня ограничен лимитом принтера по высоте ──
 {
   const lim2 = { ...limits, maxH: 80 };
-  const p = presetContainer(mk(), "stairs", lim2, { steps: 5, stepH: 60, depth: 25 });
+  const p = presetContainer(mk(), "stairs", lim2, { steps: 5, stepH: 60 });
   ok(`лесенка влезает в лимит (H ${p.H} ≤ 80)`, p.H <= 80);
   const topLvl = getCellLvl(p, 0, 4);
   ok(`верхняя ступень ниже спинки (${topLvl} ≤ ${p.H - 20})`, topLvl <= p.H - 19.9);

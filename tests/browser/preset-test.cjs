@@ -49,29 +49,25 @@ ok("буклетница: 3 кармана каскадом", c.rows === 3 && c.
 ok("буклетница: полы наклонены назад", c.cells["0:1"]?.tiltDir === "s");
 
 // параметры горки НЕ трогают буклетницу (она сейчас применена)
-await setNum("Глубина ступени", 50);
+await setNum("Шаг уровня", 20);
 c = await st();
-ok("глубина ступени не меняет буклетницу", c.rows === 3 && c.preset === "booklet");
+ok("шаг уровня не меняет буклетницу", c.rows === 3 && c.preset === "booklet");
 
 // горка с параметрами
 await setNum("Ступенек", 4);
 await setNum("Шаг уровня", 12);
-await setNum("Глубина ступени", 30);
 await page.locator('button:text-is("Горка — применить")').click();
 await page.waitForTimeout(600);
 c = await st();
-ok("горка: 4 ступени", c.rows === 4 && Array.isArray(c.rowDs) && c.rowDs.length === 4);
+ok("горка: 4 ступени", c.rows === 4);
 ok("горка: уровни с шагом 12", Math.abs((c.cells["0:2"]?.lvl ?? 0) - 24) < 0.05);
-ok("горка: глубина передних 30", Math.abs(c.rowDs[0] - 30) < 0.05 && c.lockedRows["0"] === true || c.lockedRows[0] === true);
+ok("горка: ряды равные (rowDs не заданы)", !c.rowDs && Object.keys(c.lockedRows || {}).length === 0);
 ok("горка: задняя стенка без переопределения (следует H)", c.walls["o:s:3"] === undefined);
 ok("горка: боковые ступеньками", c.walls["o:w:1"].h < c.walls["o:w:3"].h);
 ok("след после горки сохранён", c.W === c0.W && c.D === c0.D);
 
 // параметры применённой горки меняют её вживую, без кнопки
 ok("подпись «применена» видна", (await page.getByText(/применена, параметры меняют/).count()) > 0);
-await setNum("Глубина ступени", 45);
-c = await st();
-ok(`живое изменение глубины (${c.rowDs && c.rowDs[0]})`, Math.abs(c.rowDs[0] - 45) < 0.05);
 await setNum("Ступенек", 3);
 c = await st();
 ok("живое изменение числа ступенек", c.rows === 3);
@@ -103,14 +99,22 @@ await setNum("Шаг уровня", 60);
 c = await st();
 ok(`горка не выше лимита принтера (H ${c.H} ≤ 175)`, c.H <= 175.01);
 
-// бортик: высота всех сегментов над полом настраивается — глубокие ячейки
+// бортик: высота всех сегментов над полом настраивается — глубокие ячейки,
+// и ручной уровень пола при этом не сбрасывается
 await setNum("Ступенек", 3);
+await page.locator("button", { hasText: /^Ячейка$/ }).first().click();
+await page.waitForTimeout(250);
+await page.locator("svg g").first().click();
+await page.waitForTimeout(300);
+await setNum("Уровень пола", 22);
+await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+await page.waitForTimeout(250);
 await setNum("Бортик (глубина ячеек)", 35);
 c = await st();
 ok("бортик сохранился на контейнере", Math.abs(c.stairsLip - 35) < 0.05);
-ok(`все сегменты выше (перед ${c.walls["o:n:0"]?.h})`,
-  Math.abs(c.walls["o:n:0"].h - (c.floor + 35)) < 0.1 &&
-  Math.abs(c.walls["v:0:0"].h - (c.floor + 35)) < 0.1);
+ok("ручной уровень пола пережил смену бортика", Math.abs((c.cells["0:0"]?.lvl ?? 0) - 22) < 0.05);
+ok(`бортик считается от ручного уровня (${c.walls["o:n:0"]?.h})`,
+  Math.abs(c.walls["o:n:0"].h - (22 + c.floor + 35)) < 0.1);
 
 // низкий и узкий
 await page.locator('button:text-is("Низкий большой")').click();
