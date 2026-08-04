@@ -66,7 +66,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   let rc = await rowsOf();
   ok(`ширина контейнера не изменилась (${st.containers[0].W} = ${W0})`, near(st.containers[0].W, W0));
   ok(`ячейка стала 50 (${rc[0][0].toFixed(1)})`, near(rc[0][0], 50));
-  ok(`соседняя ячейка впитала разницу (${rc[0][1].toFixed(1)})`, near(rc[0][0] + rc[0][1], W0 - 2 * 2.75 - 1.6));
+  ok(`соседняя ячейка впитала разницу (${rc[0][1].toFixed(1)})`, near(rc[0][0] + rc[0][1], W0 - 2 * 2.9 - 1.6));
 
   // глубина ячейки — то же самое
   await setNum("Глубина ячейки", 60);

@@ -9,7 +9,7 @@ const near = (a, b, e = 0.01) => Math.abs(a - b) < e;
 
 // ── производные размеры от зазора
 const g1 = connGeom(0.1), g2 = connGeom(0.2), g4 = connGeom(0.4);
-ok(`по умолчанию 0,2 мм`, DEFAULT_CLR === 0.2);
+ok(`по умолчанию 0,35 мм (по итогам печатных тестов)`, DEFAULT_CLR === 0.35);
 ok(`глубина паза растёт с зазором (${g1.dg} < ${g2.dg} < ${g4.dg})`, g1.dg < g2.dg && g2.dg < g4.dg);
 ok(`минимальная стенка: 0,1 → ${g1.minWall}, 0,2 → ${g2.minWall}, 0,4 → ${g4.minWall}`,
   near(g1.minWall, 2.65) && near(g2.minWall, 2.75) && near(g4.minWall, 2.95));

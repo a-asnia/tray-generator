@@ -59,7 +59,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await setNum("Ширина ячейки", 60);
   let r = await rows();
   ok(`ячейка (1,1) стала 60 (${r[0].map((x) => x.toFixed(1)).join("/")})`, near(r[0][0], 60));
-  ok("сосед по ряду не тронут", near(r[0][1], 81.4));
+  ok("сосед по ряду не тронут", near(r[0][1], 81.3));
   ok(`ряд 2 равномерный и НЕ заблокирован (${r[1].map((x) => x.toFixed(1)).join("/")})`, near(r[1][0], r[1][1]));
   await page.locator("button", { hasText: /🔓 ширина \(эта ячейка\)/ }).click();
   await page.waitForTimeout(300);
@@ -70,8 +70,8 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await setNum("Ширина", 170);
   r = await rows();
   ok(`замок держит только свою ячейку (${r[0][0].toFixed(1)})`, near(r[0][0], 60));
-  ok(`сосед по ряду впитал рост (${r[0][1].toFixed(1)})`, near(r[0][1], 170 - 2 * 2.75 - 1.6 - 60, 0.15));
-  ok("ряд 2 равномерный — перегородки рядов не совпадают", near(r[1][0], r[1][1]) && near(r[1][0], 81.4));
+  ok(`сосед по ряду впитал рост (${r[0][1].toFixed(1)})`, near(r[0][1], 170 - 2 * 2.9 - 1.6 - 60, 0.15));
+  ok("ряд 2 равномерный — перегородки рядов не совпадают", near(r[1][0], r[1][1]) && near(r[1][0], 81.3));
 
   // во втором ряду — своя ширина: перегородки встанут не друг напротив друга
   await page.locator("svg g").nth(2).click(); // ячейка (1,2) — первый в ряду 2

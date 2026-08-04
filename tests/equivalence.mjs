@@ -131,8 +131,12 @@ const cfg = { ...base, cols: 3, rows: 2, gridMode: "count" };
 const eq = (x, y) => JSON.stringify(x) === JSON.stringify(y);
 const aux = [
   ["layout", (() => {
-    const pick = (L) => ({ innerW: L.innerW, innerD: L.innerD, colWs: L.colWs, rowDs: L.rowDs, nCols: L.nCols, nRows: L.nRows, cellW: L.cellW, cellD: L.cellD });
-    return eq(pick(ref.layout(cfg)), pick(layout(cfg))) && eq(pick(ref.layout({ ...cfg, gridMode: "size" })), pick(layout({ ...cfg, gridMode: "size" })));
+    // решатель считает те же размеры другой арифметикой — сравнение с
+    // допуском на последний знак float
+    const pick = (L) => [L.innerW, L.innerD, ...L.colWs, ...L.rowDs, L.nCols, L.nRows, L.cellW, L.cellD];
+    const close = (A, B) => A.length === B.length && A.every((v, i) => Math.abs(v - B[i]) < 1e-9);
+    return close(pick(ref.layout(cfg)), pick(layout(cfg))) &&
+      close(pick(ref.layout({ ...cfg, gridMode: "size" })), pick(layout({ ...cfg, gridMode: "size" })));
   })()],
   // дефолт скругления изменён намеренно (0 → 0.8), остальные поля те же
   ["getWall (кроме нового дефолта rnd)", (() => {

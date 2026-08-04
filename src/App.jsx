@@ -5,9 +5,8 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/stl.js";
-import { boxSolid } from "./geometry/solids.js";
 import { getManifold } from "./geometry/manifold.js";
-import { connectorVs, connGeom, DEFAULT_CLR, CLR_PRESETS } from "./model/connectors.js";
+import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
@@ -41,12 +40,9 @@ export default function TrayGenerator() {
   // магнит соседей: изменение размера контейнера компенсируется соседями
   const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
-  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
-  // размеры соединителя зависят от зазора печати (настройка «Раскладка»)
-  const CG = connGeom(limits.connClr, limits.connType);
-  // режим «Тест соединителей»: вместо контейнеров в сцене две маленькие
-  // тест-детали со всеми видами замков; проект при этом не трогается
-  const [connTest, setConnTest] = useState(SAVED?.connTest === true);
+  const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
+  // размеры соединителя — константы «ласточкиного хвоста» (зазор 0,35)
+  const CG = connGeom();
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
@@ -56,9 +52,9 @@ export default function TrayGenerator() {
   // автосохранение при каждом изменении
   useEffect(() => {
     try {
-      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs, connTest }));
+      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs }));
     } catch (e) {}
-  }, [containers, limits, connect, magnet, openSecs, connTest]);
+  }, [containers, limits, connect, magnet, openSecs]);
 
   const cur = containers[sel];
 
@@ -66,7 +62,7 @@ export default function TrayGenerator() {
     const nl = { ...limits, ...patch };
     // при росте зазора паз становится глубже и требует более толстой
     // стенки — иначе он прорезал бы её насквозь
-    const minW = connect ? connGeom(nl.connClr, nl.connType).minWall : 0;
+    const minW = connect ? CG.minWall : 0;
     // габариты и высоты стенок не могут превышать лимиты принтера
     setContainers((cs) =>
       cs.map((c) => ({
@@ -238,8 +234,7 @@ export default function TrayGenerator() {
     setSelection(null);
     setConnect(true);
     setMagnet(true);
-    setConnTest(false);
-    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40, connClr: DEFAULT_CLR, connType: "dove" });
+    setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
     setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
   };
@@ -432,54 +427,6 @@ export default function TrayGenerator() {
   const geoCache = useRef(new WeakMap());
   // ── сборка: соединители по соседям + раскладка сеткой ──
   const built = useMemo(() => {
-    // «Тест соединителей»: вместо проекта — три маленькие детали со ВСЕМИ
-    // шестью видами замков (2 типа × 3 пресета зазора). Пара «male —
-    // female» всегда на разных деталях; на дне у каждой стороны риски по
-    // числу пресета (| = 0,1, || = 0,2, ||| = 0,35) — пара ищется по
-    // совпадению типа и числа рисок. В сцене состыкованы пары со
-    // стандартным зазором.
-    if (connTest) {
-      const clrs = CLR_PRESETS.map(([, v]) => v);
-      const wallOut = Math.max(...clrs.flatMap((v) => [connGeom(v, "dove").minWall, connGeom(v, "pins").minWall]));
-      const t = {
-        W: 60, D: 60, H: 20, cols: 1, rows: 1, gridMode: "count",
-        wall: 1.6, wallOut, floor: 1.6,
-        walls: {}, cells: {}, rowColWs: null, rowDs: null,
-        lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
-      };
-      const u = (male, type, k) => ({ male, vs: [0], type, clr: clrs[k] });
-      // 6 пар на 12 сторонах, пары всегда между разными деталями:
-      // A—B: хвост 0,2 (стык в сцене) и хвост 0,1; B—C: выступы 0,2 (стык)
-      // и выступы 0,35; A—C: хвост 0,35 и выступы 0,1
-      const conns = [
-        { E: u(true, "dove", 1), N: u(true, "dove", 0), S: u(true, "pins", 0), W: u(true, "dove", 2) },
-        { W: u(false, "dove", 1), N: u(false, "dove", 0), E: u(true, "pins", 1), S: u(true, "pins", 2) },
-        { W: u(false, "pins", 1), N: u(false, "pins", 0), S: u(false, "dove", 2), E: u(false, "pins", 2) },
-      ];
-      // риски-метки на дне у стенки: столько штрихов, какой пресет зазора
-      const marks = (solids, conn2) => {
-        const inner = t.W / 2 - wallOut;
-        for (const [side, cu] of Object.entries(conn2)) {
-          if (!cu) continue;
-          const n = clrs.indexOf(cu.clr) + 1;
-          for (let k = 0; k < n; k++) {
-            const off = (k - (n - 1) / 2) * 3;
-            const near = inner - 4;
-            const [x, z, sx, sz] =
-              side === "N" ? [off, -near, 0.8, 4] : side === "S" ? [off, near, 0.8, 4]
-              : side === "W" ? [-near, off, 4, 0.8] : [near, off, 4, 0.8];
-            solids.push(boxSolid(x, t.floor + 0.3, z, sx, 0.6, sz, "conn"));
-          }
-        }
-        return solids;
-      };
-      const items = conns.map((conn2, i) => ({
-        c: { ...t },
-        solids: marks(buildContainer({ ...t }, { N: null, S: null, W: null, E: null, ...conn2 }), conn2),
-        ox: (i - 1) * t.W, oz: 0,
-      }));
-      return { items, totalW: 3 * t.W, totalD: t.D };
-    }
     const nb = (c, dx, dy) => {
       const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
       return i === undefined ? null : containers[i];
@@ -512,10 +459,10 @@ export default function TrayGenerator() {
             S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
             N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
           };
-      const ck = `${limits.connClr}|${limits.connType ?? "dove"}|${JSON.stringify(conn)}`;
+      const ck = JSON.stringify(conn);
       let hit = geoCache.current.get(c);
       if (!hit || hit.key !== ck) {
-        hit = { key: ck, solids: buildContainer({ ...c, connClr: limits.connClr, connType: limits.connType }, conn) };
+        hit = { key: ck, solids: buildContainer(c, conn) };
         geoCache.current.set(c, hit);
       }
       return {
@@ -526,10 +473,10 @@ export default function TrayGenerator() {
       };
     });
     return { items, totalW, totalD };
-  }, [containers, connect, posMap, limits.connClr, limits.connType, connTest]);
+  }, [containers, connect, posMap]);
 
   // ── three.js: сцена, камера, пикинг ──
-  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers: connTest ? [] : containers, selMode, setSel, setSelection: selectAndShow });
+  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
 
   const L = layout(cur);
   const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
@@ -543,9 +490,7 @@ export default function TrayGenerator() {
 
   const exportOne = (idx) => {
     const { solids, c } = built.items[idx];
-    exportSTL(solids, connTest
-      ? `conn_test_${"ABC"[idx] ?? idx + 1}.stl`
-      : `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
+    exportSTL(solids, `tray${idx + 1}_${c.W}x${c.D}x${c.H}_${c.cols}x${c.rows}.stl`);
   };
   const exportAll = () => built.items.forEach((_, idx) => setTimeout(() => exportOne(idx), idx * 500));
 
@@ -1100,21 +1045,6 @@ export default function TrayGenerator() {
           ))}
         </div>
 
-        {connTest && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 10px",
-            borderRadius: 8, background: "#DBEAFE", border: `1.5px solid ${SEL}`, fontSize: 12, color: "#1E3A8A",
-          }}>
-            <span style={{ flex: 1 }}>🧪 Тест соединителей: в сцене две тестовые детали, проект не тронут.</span>
-            <button
-              onClick={() => { setConnTest(false); setSel(0); }}
-              style={{ padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: `1px solid ${SEL}`, background: "#fff", color: SEL }}
-            >
-              Вернуть
-            </button>
-          </div>
-        )}
-
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
@@ -1170,97 +1100,13 @@ export default function TrayGenerator() {
         </p>
 
         <SectionTitle>Соединители</SectionTitle>
-        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-          {[["dove", "Ласточкин хвост"], ["pins", "Выступы (лего)"]].map(([v, t]) => (
-            <button
-              key={v}
-              onClick={() => updLimits({ connType: v })}
-              style={{
-                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                border: (limits.connType ?? "dove") === v ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                background: (limits.connType ?? "dove") === v ? "#FFF3EB" : "#fff",
-                color: (limits.connType ?? "dove") === v ? ACCENT : "#3D4A5C",
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          {(limits.connType ?? "dove") === "pins"
-            ? <>Шип-пирамидка на одной стороне входит в карман другой при прижатии вплотную — как лего: держит от сдвига вдоль стыка и по вертикали, но контейнеры так же легко разнимаются. Ничего вдвигать сверху не нужно.</>
-            : <>Рельс вдвигается в паз соседа сверху и держит контейнеры на отрыв намертво. Разъём — только подъёмом.</>}
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 0", lineHeight: 1.45 }}>
+          «Ласточкин хвост»: рельс вдвигается в паз соседа сверху и держит контейнеры
+          на отрыв намертво, разъём — только подъёмом. Зазор {DEFAULT_CLR.toLocaleString("ru")} мм
+          на сторону — собирается без усилия. Паз прячется внутри толщины внешней стенки,
+          поэтому её минимум {CG.minWall} мм. Замок ставится на стенку не ниже {CG.lockMin} мм —
+          на более низкой зона не режется и стенка остаётся целой.
         </p>
-        <Param
-          label="Зазор на сторону" unit="мм" value={limits.connClr ?? DEFAULT_CLR}
-          min={0.05} max={0.5} step={0.05}
-          onChange={(v) => updLimits({ connClr: Math.round(v * 100) / 100 })}
-        />
-        <div style={{ display: "flex", gap: 6, margin: "-2px 0 8px" }}>
-          {CLR_PRESETS.map(([t, v]) => (
-            <button
-              key={t}
-              onClick={() => updLimits({ connClr: v })}
-              style={{
-                flex: 1, padding: "5px 0", borderRadius: 8, fontSize: 11.5, cursor: "pointer",
-                border: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                background: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? "#FFF3EB" : "#fff",
-                color: Math.abs((limits.connClr ?? DEFAULT_CLR) - v) < 0.001 ? ACCENT : "#3D4A5C",
-              }}
-            >
-              {t} {v.toLocaleString("ru")}
-            </button>
-          ))}
-        </div>
-        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          {(limits.connType ?? "dove") === "pins"
-            ? <>Щель между шипом и карманом, на сторону. <b>0,1 мм</b> — сидит с лёгким трением, <b>0,2 мм</b> — свободная посадка (по умолчанию), больше — совсем без усилия.</>
-            : <>Щель между рельсом «ласточкиного хвоста» и пазом соседа, на сторону (общий зазор вдвое больше). Для FDM: <b>0,1 мм</b> — жёсткая посадка, детали приходится вдавливать; <b>0,2 мм</b> — плотно, но собирается руками (по умолчанию); <b>0,3–0,4 мм</b> — свободно, для PETG и крупных деталей. Точное значение зависит от принтера — напечатайте пару контейнеров и проверьте.</>}
-          {" "}Минимальная внешняя стенка при этих настройках: {CG.minWall} мм. Замок ставится на стенку не ниже {CG.lockMin} мм — на более низкой зона не режется и стенка остаётся целой.
-        </p>
-
-        <button
-          onClick={() => { setConnTest(!connTest); setSel(0); setSelection(null); }}
-          style={{
-            width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, fontSize: 13.5, fontWeight: 700, cursor: "pointer",
-            border: connTest ? `2px solid ${SEL}` : `1.5px solid ${ACCENT}`,
-            background: connTest ? "#DBEAFE" : "#fff", color: connTest ? SEL : ACCENT,
-          }}
-        >
-          {connTest ? "↩ Вернуться к проекту" : "🧪 Тест соединителей"}
-        </button>
-        {connTest ? (
-          <>
-            <p style={{ fontSize: 11.5, color: "#3D4A5C", margin: "8px 0 0", lineHeight: 1.45 }}>
-              В сцене — три тестовые детали 60×60×20 мм вместо контейнеров (проект цел, вернись
-              кнопкой). На них — все <b>шесть видов</b> соединителей: «ласточкин хвост» и «выступы»,
-              каждый с зазорами 0,1 / 0,2 / 0,35 мм. Пара «рельс—паз» или «шип—карман» всегда на
-              разных деталях; ищи её по рискам на дне у стенки: <b>ǀ</b> — 0,1, <b>ǀǀ</b> — 0,2,
-              <b> ǀǀǀ</b> — 0,35 (у пары совпадают тип и число рисок). В сцене состыкованы обе пары
-              со стандартным зазором 0,2.
-            </p>
-            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              {["A", "B", "C"].map((n, i) => (
-                <button
-                  key={n}
-                  onClick={() => exportOne(i)}
-                  style={{
-                    flex: 1, padding: "8px 0", background: ACCENT, color: "#fff", border: "none",
-                    borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-                  }}
-                >
-                  Деталь {n} (STL)
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.45 }}>
-            Печатаются три маленькие детали со всеми шестью видами соединителей сразу (оба типа,
-            все три зазора) — проверить посадку и выбрать зазор, не печатая большие контейнеры.
-          </p>
-        )}
-
 
         <SectionTitle>Лимит раскладки</SectionTitle>
         <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />

@@ -61,7 +61,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("редактор фиксированной ячейки открылся", await page.getByText("Фиксированная ячейка 1").count());
   let st = await state();
   const fc0 = st.containers[0].fixedCells[0];
-  ok(`бокс создан: ${fc0.w}×${fc0.d}, якорь ${fc0.anchor}`, near(fc0.w, 81.45, 0.1) && near(fc0.d, 81.45, 0.1) && fc0.anchor === "nw");
+  ok(`бокс создан: ${fc0.w}×${fc0.d}, якорь ${fc0.anchor}`, near(fc0.w, 81.3, 0.1) && near(fc0.d, 81.3, 0.1) && fc0.anchor === "nw");
   ok("ряд не заблокирован (замков нет)", Object.keys(st.containers[0].lockedRows || {}).length === 0);
   ok("сетка ряда отдала ячейку", st.containers[0].rowColWs && st.containers[0].rowColWs[0].length === 1);
 
@@ -69,8 +69,8 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await goCont();
   await setNum("Ширина", 140);
   let fx = await fixedRects();
-  ok(`бокс держит 81.4 мм при W=140 (${(fx[0].x1 - fx[0].x0).toFixed(1)})`, near(fx[0].x1 - fx[0].x0, 81.45, 0.1));
-  ok("бокс прижат к левой стенке", near(fx[0].x0, -(140 - 2 * 2.75) / 2));
+  ok(`бокс держит 81.3 мм при W=140 (${(fx[0].x1 - fx[0].x0).toFixed(1)})`, near(fx[0].x1 - fx[0].x0, 81.3, 0.1));
+  ok("бокс прижат к левой стенке", near(fx[0].x0, -(140 - 2 * 2.9) / 2));
 
   // сменить якорь на «→ стенка»: бокс скользит к правой стенке
   await page.locator("svg g").last().click(); // клик по боксу на схеме (рисуется последним)
@@ -78,8 +78,8 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.locator("button", { hasText: "→ стенка" }).click();
   await page.waitForTimeout(300);
   fx = await fixedRects();
-  ok("бокс переехал к правой стенке", near(fx[0].x1, (140 - 2 * 2.75) / 2));
-  ok("глубина не изменилась", near(fx[0].z1 - fx[0].z0, 81.45, 0.1));
+  ok("бокс переехал к правой стенке", near(fx[0].x1, (140 - 2 * 2.9) / 2));
+  ok("глубина не изменилась", near(fx[0].z1 - fx[0].z0, 81.3, 0.1));
 
   // уровень пола бокса
   await setNum("Уровень пола (лесенка)", 8);

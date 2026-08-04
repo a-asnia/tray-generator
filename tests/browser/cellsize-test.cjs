@@ -66,7 +66,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await setNum("Ширина ячейки", 100);
   const m2 = await model();
   ok(`ячейка 100: контейнер у лимита (W=${m2.W})`, near(m2.colWs[0], 100) && near(m2.W, 170));
-  ok(`свободная колонка отдала недостающее (${m2.colWs[1].toFixed(1)})`, near(m2.colWs[1], 170 - 2 * 2.75 - 1.6 - 100));
+  ok(`свободная колонка отдала недостающее (${m2.colWs[1].toFixed(1)})`, near(m2.colWs[1], 170 - 2 * 2.9 - 1.6 - 100));
 
   // зафиксировать размеры через замки сетки — поля блокируются, замок на схеме
   await page.locator("button", { hasText: /🔓 ширина \(эта ячейка\)/ }).click();
@@ -83,7 +83,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   const m3 = await model();
   ok(`W=150: зафиксированная держит 100 (${m3.colWs[0].toFixed(1)})`, near(m3.colWs[0], 100));
   await goSub("Ячейка");
-  ok(`свободная ужалась (${m3.colWs[1].toFixed(1)})`, near(m3.colWs[1], 150 - 2 * 2.75 - 1.6 - 100));
+  ok(`свободная ужалась (${m3.colWs[1].toFixed(1)})`, near(m3.colWs[1], 150 - 2 * 2.9 - 1.6 - 100));
 
   // снять замки — вписанные размеры сохраняются
   await page.locator("button", { hasText: /🔒 ширина \(эта ячейка\)/ }).click();

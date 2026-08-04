@@ -119,8 +119,10 @@ const sanitizeContainer = (c0) => {
   };
   c.rowColWs = sizes(c.rowColWs);
   c.rowDs = Array.isArray(c.rowDs) ? c.rowDs.map((x) => num(x, 10, 0.5, 2000)) : sizes(c.rowDs);
-  if (c.connClr !== undefined) c.connClr = num(c.connClr, 0.2, 0, 1);
-  if (c.connType !== undefined) c.connType = c.connType === "pins" ? "pins" : "dove";
+  // настройки соединителя больше не хранятся: остался один вид —
+  // «ласточкин хвост» с фиксированным зазором
+  delete c.connClr;
+  delete c.connType;
   return c;
 };
 
@@ -165,13 +167,11 @@ export function normalizeProject(d) {
       maxH: num(lim.maxH, 175, 5, 2000),
       layW: num(lim.layW, 40, 3, 500),
       layD: num(lim.layD, 40, 3, 500),
-      connClr: num(lim.connClr, 0.2, 0, 1),
-      connType: lim.connType === "pins" ? "pins" : "dove",
     };
     // габариты не могут превышать лимиты принтера — приложение держит этот
     // инвариант при смене лимитов, файл проекта тоже обязан ему подчиняться.
     // Стенка с замком не может быть тоньше паза: иначе паз прорезал бы её.
-    const minW = d.connect === false ? 0 : connGeom(d.limits.connClr, d.limits.connType).minWall;
+    const minW = d.connect === false ? 0 : connGeom().minWall;
     d.containers = d.containers.map((c) => ({
       ...c,
       wallOut: Math.max(c.wallOut, minW),

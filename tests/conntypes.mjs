@@ -1,15 +1,14 @@
-// Типы соединителей и высота замка.
+// Замок и высота стенки.
 // 1) Замок следует высоте СВОЕЙ стенки: понизили стенку — паз, задний
 //    слой, щёчки и рельс понизились вместе с ней, ступеньки по высоте нет.
 // 2) Слишком низкая стенка — зона не режется, замок не ставится.
-// 3) «Выступы» (pins): шип наружу на male-стороне, глухой карман на
-//    female-стороне; наружная плоскость female ровная, карман не сквозной.
+// 3) male/female берётся из описания стороны, а не из её имени.
 import { buildContainer } from "../src/model/build.js";
-import { connOf, connGeom, connectorVs, lockMinH, PIN } from "../src/model/connectors.js";
+import { connOf, connGeom, connectorVs } from "../src/model/connectors.js";
 
 const mk = (o = {}) => ({
   W: 120, D: 100, H: 30, cols: 1, rows: 1, gridMode: "count",
-  wall: 1.6, wallOut: 2.75, floor: 1.6,
+  wall: 1.6, wallOut: 3, floor: 1.6,
   walls: {}, cells: {}, rowColWs: null, rowDs: null,
   lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [], ...o,
 });
@@ -41,7 +40,7 @@ const inside = (b, p, eps = 1e-4) => {
 };
 const anyInside = (solids, p) => solids.some((b) => inside(b, p));
 
-// ── dove: замок следует высоте стенки ──
+// ── замок следует высоте стенки ──
 {
   const hLow = 16;
   const c = mk({ walls: { "o:n:0": { h: hLow } } });
@@ -75,7 +74,7 @@ const anyInside = (solids, p) => solids.some((b) => inside(b, p));
 
 // ── слишком низкая стенка: зона не режется, замок не ставится ──
 {
-  const g = connGeom(0.2);
+  const g = connGeom();
   const hTiny = g.lockMin - 1;
   const c = mk({ walls: { "o:n:0": { h: hTiny } } });
   const s = buildContainer(c, { ...noConn, N: { male: false, vs } }, { fillets: false });
@@ -90,75 +89,22 @@ const anyInside = (solids, p) => solids.some((b) => inside(b, p));
   ok("рельс на низкой стенке не ставится", !sm.some((b) => b.tag === "conn"));
 }
 
-// ── pins: шип и карман ──
+// ── male/female — из описания стороны, а не из её имени ──
 {
-  const cM = mk({ connType: "pins" });
-  const g = connOf(cM);
-  ok("pins: геометрия помещается в стенку 2.75", g.fits && g.type === "pins");
-  const sM = buildContainer(cM, { ...noConn, S: { male: true, vs } }, { fillets: false });
-  let maxZ = -1e9;
-  for (const b of sM) maxZ = Math.max(maxZ, bbox(b).hi[2]);
-  ok(`шип выступает наружу на ${g.pin.prot} (${(maxZ - cM.D / 2).toFixed(2)})`, near(maxZ - cM.D / 2, g.pin.prot));
-  // шип в своей вертикальной полосе
-  const bump = sM.filter((b) => bbox(b).hi[2] > cM.D / 2 + 0.05);
-  ok("шип один на замок", bump.length === 1);
-  const bb = bbox(bump[0]);
-  ok(`шип в полосе y ${g.pin.y0}..${g.pin.y0 + g.pin.h}`, near(bb.lo[1], g.pin.y0) && near(bb.hi[1], g.pin.y0 + g.pin.h));
-
-  const cF = mk({ connType: "pins" });
-  const sF = buildContainer(cF, { ...noConn, N: { male: false, vs } }, { fillets: false });
+  // паз на «мужской» по имени стороне E строится именно пазом
+  const c = mk();
+  const s = buildContainer(c, { ...noConn, E: { male: false, vs } }, { fillets: false });
+  let maxX = -1e9;
+  for (const b of s) maxX = Math.max(maxX, bbox(b).hi[0]);
+  ok("female на E: наружу ничего не торчит", maxX <= c.W / 2 + 0.001);
+  const g = connOf(c);
+  ok("female на E: паз открыт", !anyInside(s, [c.W / 2 - g.dg / 2, c.H / 2, 0]));
+  ok("female на E: задний слой на месте", anyInside(s, [c.W / 2 - g.dg - (c.wallOut - g.dg) / 2, c.H / 2, 0]));
+  // рельс на «женской» по имени стороне N строится именно рельсом
+  const sm = buildContainer(c, { ...noConn, N: { male: true, vs } }, { fillets: false });
   let minZ = 1e9;
-  for (const b of sF) minZ = Math.min(minZ, bbox(b).lo[2]);
-  ok("female: наружная плоскость ровная, ничего не торчит", minZ >= -cF.D / 2 - 0.001);
-  // карман: пустота на глубине шипа, дно кармана — материал
-  const yc = g.pin.y0 + g.pin.h / 2;
-  const zOut = -cF.D / 2;
-  ok("карман открыт к соседу", !anyInside(sF, [0, yc, zOut + g.dg / 2]));
-  ok("дно кармана на месте (не сквозной)", anyInside(sF, [0, yc, zOut + (g.dg + cF.wallOut) / 2]));
-  ok("над карманом стенка есть", anyInside(sF, [0, g.pin.y0 + g.pin.h + 2, zOut + g.dg / 2]));
-  ok("под карманом стенка есть", anyInside(sF, [0, 2, zOut + g.dg / 2]));
-  ok("сбоку от кармана стенка есть", anyInside(sF, [g.pin.w / 2 + g.clr + 1, yc, zOut + g.dg / 2]));
-  // карман шире шипа на зазор
-  ok("зазор кармана на сторону", !anyInside(sF, [g.pin.w / 2 + g.clr - 0.05, yc, zOut + g.dg / 2]));
-
-  // низкая стенка — pins не ставятся, стенка цела
-  const hTiny = g.lockMin - 1;
-  const sLow = buildContainer(mk({ connType: "pins", walls: { "o:n:0": { h: hTiny } } }), { ...noConn, N: { male: false, vs } }, { fillets: false });
-  ok("pins на низкой стенке не ставятся", !sLow.some((b) => b.tag === "conn"));
-
-  // тонкая стенка — шип ужимается, а совсем тонкая отключает замок
-  const gThin = connOf(mk({ connType: "pins", wallOut: 2.0 }));
-  ok(`тонкая стенка ужимает шип (${gThin.pin.prot})`, gThin.pin.prot < PIN.prot && gThin.fits);
-  const gNone = connOf(mk({ connType: "pins", wallOut: 1.6 }));
-  ok("совсем тонкая стенка отключает pins", !gNone.fits);
-  const sNone = buildContainer(mk({ connType: "pins", wallOut: 1.6 }), { ...noConn, N: { male: false, vs } }, { fillets: false });
-  ok("при отключённых pins стенка цела", !sNone.some((b) => b.tag === "conn"));
-}
-
-// ── сторона может переопределить тип и зазор (тест-детали) ──
-{
-  const c = mk({ wallOut: 3.5 });
-  // на одном контейнере: E — хвост с зазором 0.1, N — выступы с зазором 0.35
-  const s = buildContainer(c, {
-    ...noConn,
-    E: { male: false, vs, type: "dove", clr: 0.1 },
-    N: { male: false, vs, type: "pins", clr: 0.35 },
-  }, { fillets: false });
-  const conns = s.filter((b) => b.tag === "conn");
-  ok("обе стороны с замками построились", conns.length > 0);
-  // ширина зоны хвоста зависит от зазора: bossW = w2 + 2·clr + 2·flank
-  const gD = connGeom(0.1, "dove"), gP = connGeom(0.35, "pins");
-  let zMin = 1e9, zMax = -1e9; // протяжённость зоны на стороне E (вдоль Z)
-  for (const b of conns) {
-    const bb = bbox(b);
-    if (bb.hi[0] > c.W / 2 - c.wallOut + 0.01) { zMin = Math.min(zMin, bb.lo[2]); zMax = Math.max(zMax, bb.hi[2]); }
-  }
-  ok(`зона хвоста по зазору 0.1 (${(zMax - zMin).toFixed(1)} = ${gD.bossW})`, near(zMax - zMin, gD.bossW));
-  // карман pins на N шире шипа на свой зазор 0.35
-  const yc = gP.pin.y0 + gP.pin.h / 2, zN = -c.D / 2;
-  ok("pins: карман открыт", !anyInside(s, [0, yc, zN + gP.dg / 2]));
-  ok("pins: зазор 0.35 расширил карман", !anyInside(s, [gP.pin.w / 2 + 0.3, yc, zN + gP.dg / 2]));
-  ok("pins: за зазором — материал щёчки", anyInside(s, [gP.pin.w / 2 + gP.clr + 0.8, yc, zN + gP.dg / 2]));
+  for (const b of sm.filter((x) => x.tag === "conn")) minZ = Math.min(minZ, bbox(b).lo[2]);
+  ok(`male на N: рельс выступает наружу (${(-c.D / 2 - minZ).toFixed(2)} = ${g.depth})`, near(-c.D / 2 - minZ, g.depth));
 }
 
 // ── два замка на широкой стенке, разные высоты сегментов ──
@@ -178,5 +124,5 @@ const anyInside = (solids, p) => solids.some((b) => inside(b, p));
   ok(`правый замок по правой стенке (${topR.toFixed(1)} ≈ 30)`, near(topR, 30, 0.1));
 }
 
-console.log(fail === 0 ? "\nCONNECTOR TYPE TESTS PASSED" : `\n${fail} FAILURES`);
+console.log(fail === 0 ? "\nCONNECTOR TESTS PASSED" : `\n${fail} FAILURES`);
 process.exit(fail ? 1 : 0);
