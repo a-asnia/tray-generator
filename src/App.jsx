@@ -10,6 +10,8 @@ import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
+import { presetContainer, PRESETS, GORKA_DEF } from "./model/presets.js";
+import { snapLayout } from "./model/laymagnet.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
 import { MONO, ACCENT, SEL } from "./ui/theme.js";
@@ -39,6 +41,8 @@ export default function TrayGenerator() {
   const [connect, setConnect] = useState(SAVED ? SAVED.connect !== false : true);
   // магнит соседей: изменение размера контейнера компенсируется соседями
   const [magnet, setMagnet] = useState(SAVED ? SAVED.magnet !== false : true);
+  // магнит раскладки: сборка липнет к краю лимита раскладки
+  const [layMagnet, setLayMagnet] = useState(SAVED?.layMagnet === true);
   // по умолчанию — чуть меньше стола Bambu A1 mini (180×180×180), запас под юбку
   const [limits, setLimits] = useState(SAVED?.limits ?? { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
   // размеры соединителя — константы «ласточкиного хвоста» (зазор 0,35)
@@ -46,15 +50,27 @@ export default function TrayGenerator() {
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
-  const [openSecs, setOpenSecs] = useState(() => ({ outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  const [openSecs, setOpenSecs] = useState(() => ({ presets: true, outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
   useEffect(() => {
     try {
-      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, openSecs }));
+      window.localStorage.setItem("trayGenState", JSON.stringify({ containers, limits, connect, magnet, layMagnet, openSecs }));
     } catch (e) {}
-  }, [containers, limits, connect, magnet, openSecs]);
+  }, [containers, limits, connect, magnet, layMagnet, openSecs]);
+
+  // «магнит раскладки»: дотяжка сборки до края лимита. snapLayout
+  // идемпотентен (на результате возвращает null), поэтому эффект
+  // сходится за один повтор и не зацикливается
+  useEffect(() => {
+    if (!layMagnet) return;
+    const next = snapLayout(containers, limits);
+    if (next) {
+      setContainers(next);
+      setSelection(null);
+    }
+  }, [containers, limits, layMagnet]);
 
   const cur = containers[sel];
 
@@ -234,9 +250,18 @@ export default function TrayGenerator() {
     setSelection(null);
     setConnect(true);
     setMagnet(true);
+    setLayMagnet(false);
     setLimits({ maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 });
-    setOpenSecs({ outer: true, cells: true, grid: true, walls: true, project: true, export: true });
+    setOpenSecs({ presets: true, outer: true, cells: true, grid: true, walls: true, project: true, export: true });
     // вкладка не переключается — остаёмся там, где нажали сброс
+  };
+
+  // ── Пресеты контейнеров ──
+  // настройки «Горки»: ступенек, шаг уровня (мм), глубина ступени (мм)
+  const [gorka, setGorka] = useState({ ...GORKA_DEF });
+  const applyPreset = (kind) => {
+    setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, gorka) : x)));
+    setSelection(null);
   };
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
@@ -1094,9 +1119,22 @@ export default function TrayGenerator() {
             />
             Магнит соседей
           </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3D4A5C", cursor: "pointer" }}>
+            <input
+              type="checkbox" checked={layMagnet}
+              onChange={(e) => setLayMagnet(e.target.checked)}
+              style={{ accentColor: ACCENT }}
+            />
+            Магнит раскладки
+          </label>
         </div>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
           Магнит соседей: размер применяется сразу ко всей колонке или ряду контейнера (в сетке они держат общую ширину/глубину — иначе щели), соседние колонки прилипают и растут на освободившееся место (и наоборот). Сосед растёт максимум до лимита принтера; если расти больше некому, остаток (от 30 мм) закрывает новый контейнер. Контейнеры с замками не трогаются.
+        </p>
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
+          Магнит раскладки: сборка липнет к краю лимита раскладки. Крайние колонка и ряд дорастают
+          до края, если это возможно в пределах лимита принтера; большое пустое место (от 30 мм)
+          закрывается новыми контейнерами. Контейнеры с замками не растягиваются.
         </p>
 
         <SectionTitle>Соединители</SectionTitle>
@@ -1279,6 +1317,51 @@ export default function TrayGenerator() {
           </p>
         )}
 
+        </Collapse>
+
+        <Collapse title="Пресеты" open={openSecs.presets} onToggle={() => toggleSec("presets")}>
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+          Пресет настраивает контейнер №{sel + 1} под типовую задачу: сетку, высоты стенок и уровни
+          полов. След по нижней части ({cur.W}×{cur.D} мм) и место в раскладке не меняются.
+          Текущие ячейки, стенки и фиксации перезаписываются.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          {PRESETS.filter(([k]) => k !== "stairs").map(([k, t]) => (
+            <button
+              key={k}
+              onClick={() => applyPreset(k)}
+              style={{
+                padding: "8px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                border: "1px solid #D6DDE6", background: "#fff", color: "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 10, padding: "8px 10px 2px", borderRadius: 8, border: "1px solid #E4E9EF", background: "#FAFBFC" }}>
+          <Param label="Ступенек" unit="шт" value={gorka.steps} min={2} max={12} step={1}
+            onChange={(v) => setGorka((g) => ({ ...g, steps: Math.round(v) }))} />
+          <Param label="Шаг уровня" unit="мм" value={gorka.stepH} min={3} max={60} step={1}
+            onChange={(v) => setGorka((g) => ({ ...g, stepH: v }))} />
+          <Param label="Глубина ступени" unit="мм" value={gorka.depth} min={10} max={120} step={1}
+            onChange={(v) => setGorka((g) => ({ ...g, depth: v }))} />
+          <button
+            onClick={() => applyPreset("stairs")}
+            style={{
+              width: "100%", margin: "2px 0 8px", padding: "8px 0", borderRadius: 8, fontSize: 12.5,
+              fontWeight: 700, cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
+            }}
+          >
+            Горка — применить
+          </button>
+          <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
+            Ступени поднимаются к задней стенке, задняя стенка — самая высокая (равна высоте
+            контейнера и меняется слайдером «Высота»). Ступенька — это ряд: передние держат
+            заданную глубину, задний забирает остаток. Поменял параметры — нажми ещё раз;
+            дальше всё правится как обычно: ряды, глубины рядов, уровни полов, стенки.
+          </p>
+        </div>
         </Collapse>
 
         <Collapse title="Толщина стенок и дна" open={openSecs.cells} onToggle={() => toggleSec("cells")}>
