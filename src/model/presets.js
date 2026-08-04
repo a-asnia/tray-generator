@@ -6,8 +6,75 @@
 // ступеньки горки — это ряды, их ширина — глубина ряда, уровни — уровень
 // пола ячейки.
 
-// настройки «Горки» по умолчанию: ступенек, шаг уровня, глубина ступени
-export const GORKA_DEF = { steps: 3, stepH: 15, depth: 35 };
+import { layout, getCellLvl } from "./layout.js";
+
+// настройки «Горки» по умолчанию: ступенек, шаг уровня, глубина ступени,
+// колонок (делят ступени на отсеки)
+export const GORKA_DEF = { steps: 3, stepH: 15, depth: 35, cols: 1 };
+
+// бортик над полом своей ступени
+const LIP = 6;
+
+// ── Горка — «живой» пресет ──
+// Бортики горки не хранятся, а ПРОИЗВОДЯТСЯ от фактических уровней полов:
+// уровень любой ячейки и число колонок можно менять как угодно — стенки
+// пересчитываются и следуют лесенке. Задняя стенка (спинка) не задаётся
+// и остаётся высотой контейнера.
+
+// Высоты всех стенок-сегментов горки по текущим уровням полов
+export function stairsWalls(c) {
+  const L = layout(c);
+  const lvl = (i, j) => Math.min(getCellLvl(c, i, j), c.H - 4);
+  const h = (v) => r1(Math.min(c.H, v + c.floor + LIP));
+  const walls = {};
+  for (let i = 0; i < L.nColsAt(0); i++) walls["o:n:" + i] = { h: h(lvl(i, 0)) };
+  for (let j = 0; j < L.nRows; j++) {
+    walls["o:w:" + j] = { h: h(lvl(0, j)) };
+    walls["o:e:" + j] = { h: h(lvl(L.nColsAt(j) - 1, j)) };
+    // перегородки между колонками — бортик по более высокой соседке
+    for (let i = 0; i < L.nColsAt(j) - 1; i++)
+      walls["v:" + i + ":" + j] = { h: h(Math.max(lvl(i, j), lvl(i + 1, j))) };
+    // подступенки: бортик над полом верхней из смежных ступеней
+    if (j < L.nRows - 1)
+      for (let i = 0; i < L.nColsAt(j); i++) {
+        const x = L.cx0(i, j) + L.cw(i, j) / 2;
+        walls["h:" + j + ":" + i] = { h: h(Math.max(lvl(i, j), lvl(L.cellIndexAt(j + 1, x), j + 1))) };
+      }
+  }
+  return walls;
+}
+
+// Слияние производных высот с ручными настройками стенок: высота — от
+// лесенки, остальное (скругление, узор, наклон) — как настроил пользователь;
+// ключи вне лесенки (например спинка o:s) сохраняются как есть
+export function applyStairsWalls(c) {
+  const derived = stairsWalls(c);
+  const merged = {};
+  for (const [k, w] of Object.entries(derived)) merged[k] = { ...(c.walls && c.walls[k]) || {}, h: w.h };
+  for (const [k, w] of Object.entries(c.walls || {})) if (!merged[k]) merged[k] = w;
+  return merged;
+}
+
+// Недостающие уровни (новая колонка появилась без записей cells) наследуют
+// уровень своего ряда — лесенка не рвётся. Явно заданные уровни, включая
+// ноль, не трогаются.
+export function fillStairsLevels(c) {
+  const L = layout(c);
+  const cells = { ...(c.cells || {}) };
+  for (let j = 0; j < L.nRows; j++) {
+    let rowLvl = 0;
+    for (let i = 0; i < L.nColsAt(j); i++) {
+      const e = cells[i + ":" + j];
+      if (e && e.lvl !== undefined) rowLvl = Math.max(rowLvl, e.lvl);
+    }
+    if (rowLvl <= 0) continue;
+    for (let i = 0; i < L.nColsAt(j); i++) {
+      const k = i + ":" + j;
+      if (!cells[k] || cells[k].lvl === undefined) cells[k] = { ...(cells[k] || {}), lvl: rowLvl };
+    }
+  }
+  return cells;
+}
 
 export const PRESETS = [
   ["low", "Низкий большой"],
@@ -74,12 +141,15 @@ export function presetContainer(c, kind, limits, opts = {}) {
   // горка: ступени поднимаются к задней стенке, задняя стенка — самая
   // высокая (равна высоте контейнера и следует за ней). Ступенька — ряд:
   // передние ряды держат заданную глубину (замок ряда), задний забирает
-  // остаток. Боковые стенки повторяют лесенку, спереди и на ступенях —
-  // невысокий бортик, чтобы предметы не съезжали.
+  // остаток; колонки делят ступени на отсеки. Все бортики производятся
+  // от уровней полов (stairsWalls) и дальше следуют за любыми правками.
   if (kind === "stairs") {
     const n = Math.max(2, Math.min(12, Math.round(opts.steps ?? GORKA_DEF.steps)));
-    const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH));
-    const lip = 6; // бортик над полом своей ступени
+    const nCols = Math.max(1, Math.min(8, Math.round(opts.cols ?? GORKA_DEF.cols)));
+    // шаг уровня ужимается так, чтобы вся лесенка со спинкой влезла в
+    // лимит принтера по высоте — слайдером её не задрать выше maxH
+    const maxStep = Math.max(3, (maxH - c.floor - 20) / Math.max(1, n - 1));
+    const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH, maxStep));
     const sum = innerD - (n - 1) * c.wall; // суммарная глубина рядов
     const depth = Math.max(10, Math.min(opts.depth ?? GORKA_DEF.depth, (sum - 10) / Math.max(1, n - 1)));
     const rowDs = Array.from({ length: n }, (_, j) =>
@@ -88,16 +158,12 @@ export function presetContainer(c, kind, limits, opts = {}) {
     for (let j = 0; j < n - 1; j++) lockedRows[j] = true;
     // спинка выше верхней ступени минимум на 20 мм (или на шаг)
     const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(20, stepH)));
-    const walls = { "o:n:0": { h: r1(c.floor + lip) } };
     const cells = {};
-    for (let j = 0; j < n; j++) {
-      if (j > 0) cells["0:" + j] = { lvl: r1(j * stepH) };
-      const hSide = r1(j * stepH + c.floor + lip);
-      walls["o:w:" + j] = { h: hSide };
-      walls["o:e:" + j] = { h: hSide };
-      if (j < n - 1) walls["h:" + j + ":0"] = { h: r1((j + 1) * stepH + c.floor + lip) };
-    }
-    return { ...base, H, rows: n, rowDs, lockedRows, walls, cells };
+    for (let j = 1; j < n; j++)
+      for (let i = 0; i < nCols; i++) cells[i + ":" + j] = { lvl: r1(j * stepH) };
+    const next = { ...base, H, rows: n, cols: nCols, rowDs, lockedRows, cells };
+    next.walls = applyStairsWalls(next);
+    return next;
   }
 
   return base;

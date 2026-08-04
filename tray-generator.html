@@ -2404,8 +2404,75 @@ function buildContainer(c, conn, opts = {}) {
 // и фиксации перезаписываются. Дальше всё правится обычными редакторами:
 // ступеньки горки — это ряды, их ширина — глубина ряда, уровни — уровень
 // пола ячейки.
-// настройки «Горки» по умолчанию: ступенек, шаг уровня, глубина ступени
-const GORKA_DEF = { steps: 3, stepH: 15, depth: 35 };
+// настройки «Горки» по умолчанию: ступенек, шаг уровня, глубина ступени,
+// колонок (делят ступени на отсеки)
+const GORKA_DEF = { steps: 3, stepH: 15, depth: 35, cols: 1 };
+// бортик над полом своей ступени
+const LIP = 6;
+// ── Горка — «живой» пресет ──
+// Бортики горки не хранятся, а ПРОИЗВОДЯТСЯ от фактических уровней полов:
+// уровень любой ячейки и число колонок можно менять как угодно — стенки
+// пересчитываются и следуют лесенке. Задняя стенка (спинка) не задаётся
+// и остаётся высотой контейнера.
+// Высоты всех стенок-сегментов горки по текущим уровням полов
+function stairsWalls(c) {
+    const L = layout(c);
+    const lvl = (i, j) => Math.min(getCellLvl(c, i, j), c.H - 4);
+    const h = (v) => r1(Math.min(c.H, v + c.floor + LIP));
+    const walls = {};
+    for (let i = 0; i < L.nColsAt(0); i++)
+        walls["o:n:" + i] = { h: h(lvl(i, 0)) };
+    for (let j = 0; j < L.nRows; j++) {
+        walls["o:w:" + j] = { h: h(lvl(0, j)) };
+        walls["o:e:" + j] = { h: h(lvl(L.nColsAt(j) - 1, j)) };
+        // перегородки между колонками — бортик по более высокой соседке
+        for (let i = 0; i < L.nColsAt(j) - 1; i++)
+            walls["v:" + i + ":" + j] = { h: h(Math.max(lvl(i, j), lvl(i + 1, j))) };
+        // подступенки: бортик над полом верхней из смежных ступеней
+        if (j < L.nRows - 1)
+            for (let i = 0; i < L.nColsAt(j); i++) {
+                const x = L.cx0(i, j) + L.cw(i, j) / 2;
+                walls["h:" + j + ":" + i] = { h: h(Math.max(lvl(i, j), lvl(L.cellIndexAt(j + 1, x), j + 1))) };
+            }
+    }
+    return walls;
+}
+// Слияние производных высот с ручными настройками стенок: высота — от
+// лесенки, остальное (скругление, узор, наклон) — как настроил пользователь;
+// ключи вне лесенки (например спинка o:s) сохраняются как есть
+function applyStairsWalls(c) {
+    const derived = stairsWalls(c);
+    const merged = {};
+    for (const [k, w] of Object.entries(derived))
+        merged[k] = { ...(c.walls && c.walls[k]) || {}, h: w.h };
+    for (const [k, w] of Object.entries(c.walls || {}))
+        if (!merged[k])
+            merged[k] = w;
+    return merged;
+}
+// Недостающие уровни (новая колонка появилась без записей cells) наследуют
+// уровень своего ряда — лесенка не рвётся. Явно заданные уровни, включая
+// ноль, не трогаются.
+function fillStairsLevels(c) {
+    const L = layout(c);
+    const cells = { ...(c.cells || {}) };
+    for (let j = 0; j < L.nRows; j++) {
+        let rowLvl = 0;
+        for (let i = 0; i < L.nColsAt(j); i++) {
+            const e = cells[i + ":" + j];
+            if (e && e.lvl !== undefined)
+                rowLvl = Math.max(rowLvl, e.lvl);
+        }
+        if (rowLvl <= 0)
+            continue;
+        for (let i = 0; i < L.nColsAt(j); i++) {
+            const k = i + ":" + j;
+            if (!cells[k] || cells[k].lvl === undefined)
+                cells[k] = { ...(cells[k] || {}), lvl: rowLvl };
+        }
+    }
+    return cells;
+}
 const PRESETS = [
     ["low", "Низкий большой"],
     ["narrow", "Узкий с делениями"],
@@ -2465,12 +2532,15 @@ function presetContainer(c, kind, limits, opts = {}) {
     // горка: ступени поднимаются к задней стенке, задняя стенка — самая
     // высокая (равна высоте контейнера и следует за ней). Ступенька — ряд:
     // передние ряды держат заданную глубину (замок ряда), задний забирает
-    // остаток. Боковые стенки повторяют лесенку, спереди и на ступенях —
-    // невысокий бортик, чтобы предметы не съезжали.
+    // остаток; колонки делят ступени на отсеки. Все бортики производятся
+    // от уровней полов (stairsWalls) и дальше следуют за любыми правками.
     if (kind === "stairs") {
         const n = Math.max(2, Math.min(12, Math.round(opts.steps ?? GORKA_DEF.steps)));
-        const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH));
-        const lip = 6; // бортик над полом своей ступени
+        const nCols = Math.max(1, Math.min(8, Math.round(opts.cols ?? GORKA_DEF.cols)));
+        // шаг уровня ужимается так, чтобы вся лесенка со спинкой влезла в
+        // лимит принтера по высоте — слайдером её не задрать выше maxH
+        const maxStep = Math.max(3, (maxH - c.floor - 20) / Math.max(1, n - 1));
+        const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH, maxStep));
         const sum = innerD - (n - 1) * c.wall; // суммарная глубина рядов
         const depth = Math.max(10, Math.min(opts.depth ?? GORKA_DEF.depth, (sum - 10) / Math.max(1, n - 1)));
         const rowDs = Array.from({ length: n }, (_, j) => r1(j < n - 1 ? depth : Math.max(10, sum - depth * (n - 1))));
@@ -2479,18 +2549,13 @@ function presetContainer(c, kind, limits, opts = {}) {
             lockedRows[j] = true;
         // спинка выше верхней ступени минимум на 20 мм (или на шаг)
         const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(20, stepH)));
-        const walls = { "o:n:0": { h: r1(c.floor + lip) } };
         const cells = {};
-        for (let j = 0; j < n; j++) {
-            if (j > 0)
-                cells["0:" + j] = { lvl: r1(j * stepH) };
-            const hSide = r1(j * stepH + c.floor + lip);
-            walls["o:w:" + j] = { h: hSide };
-            walls["o:e:" + j] = { h: hSide };
-            if (j < n - 1)
-                walls["h:" + j + ":0"] = { h: r1((j + 1) * stepH + c.floor + lip) };
-        }
-        return { ...base, H, rows: n, rowDs, lockedRows, walls, cells };
+        for (let j = 1; j < n; j++)
+            for (let i = 0; i < nCols; i++)
+                cells[i + ":" + j] = { lvl: r1(j * stepH) };
+        const next = { ...base, H, rows: n, cols: nCols, rowDs, lockedRows, cells };
+        next.walls = applyStairsWalls(next);
+        return next;
     }
     return base;
 }
@@ -3540,6 +3605,18 @@ function TrayGenerator() {
         if (cur?.preset === "stairs")
             applyPreset("stairs", g);
     };
+    // горка — «живой» пресет: при любых правках (уровень пола ячейки, число
+    // колонок или рядов обычными редакторами) недостающие уровни наследуют
+    // ряд, а бортики пересчитываются от фактических уровней. Сходится за
+    // один повтор: на согласованном контейнере ничего не меняется.
+    useEffect(() => {
+        if (cur?.preset !== "stairs")
+            return;
+        const cells = fillStairsLevels(cur);
+        const walls = applyStairsWalls({ ...cur, cells });
+        if (JSON.stringify(cells) !== JSON.stringify(cur.cells) || JSON.stringify(walls) !== JSON.stringify(cur.walls))
+            updCur({ cells, walls });
+    }, [containers, sel]);
     const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
     // Замок ширины держит только ЭТУ ячейку: её ряд получает явные размеры
     // (rowColWs), перегородки других рядов независимы и не обязаны совпадать.
@@ -4361,13 +4438,14 @@ function TrayGenerator() {
                                 "\u0413\u043E\u0440\u043A\u0430 ",
                                 cur?.preset === "stairs" ? "— применена, параметры меняют её вживую" : ""),
                             React.createElement(Param, { label: "\u0421\u0442\u0443\u043F\u0435\u043D\u0435\u043A", unit: "\u0448\u0442", value: gorka.steps, min: 2, max: 12, step: 1, onChange: (v) => updGorka({ steps: Math.round(v) }) }),
-                            React.createElement(Param, { label: "\u0428\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F", unit: "\u043C\u043C", value: gorka.stepH, min: 3, max: 60, step: 1, onChange: (v) => updGorka({ stepH: v }) }),
+                            React.createElement(Param, { label: "\u0428\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F", unit: "\u043C\u043C", value: gorka.stepH, min: 3, max: Math.max(3, Math.min(60, Math.floor((limits.maxH - (cur?.floor ?? 1.6) - 20) / Math.max(1, gorka.steps - 1)))), step: 1, onChange: (v) => updGorka({ stepH: v }) }),
                             React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u0441\u0442\u0443\u043F\u0435\u043D\u0438", unit: "\u043C\u043C", value: gorka.depth, min: 10, max: 120, step: 1, onChange: (v) => updGorka({ depth: v }) }),
+                            React.createElement(Param, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", unit: "\u0448\u0442", value: gorka.cols ?? 1, min: 1, max: 8, step: 1, onChange: (v) => updGorka({ cols: Math.round(v) }) }),
                             React.createElement("button", { onClick: () => applyPreset("stairs"), style: {
                                     width: "100%", margin: "2px 0 8px", padding: "8px 0", borderRadius: 8, fontSize: 12.5,
                                     fontWeight: 700, cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
                                 } }, "\u0413\u043E\u0440\u043A\u0430 \u2014 \u043F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C"),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, "\u042D\u0442\u0438 \u0442\u0440\u0438 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u0430 \u043E\u0442\u043D\u043E\u0441\u044F\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A \u0433\u043E\u0440\u043A\u0435: \u043F\u043E\u043A\u0430 \u043E\u043D\u0430 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0430, \u043E\u043D\u0438 \u043D\u0438 \u043D\u0430 \u0447\u0442\u043E \u043D\u0435 \u0432\u043B\u0438\u044F\u044E\u0442. \u0421\u0442\u0443\u043F\u0435\u043D\u0438 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u044E\u0442\u0441\u044F \u043A \u0437\u0430\u0434\u043D\u0435\u0439 \u0441\u0442\u0435\u043D\u043A\u0435, \u0437\u0430\u0434\u043D\u044F\u044F \u0441\u0442\u0435\u043D\u043A\u0430 \u2014 \u0441\u0430\u043C\u0430\u044F \u0432\u044B\u0441\u043E\u043A\u0430\u044F (\u0440\u0430\u0432\u043D\u0430 \u0432\u044B\u0441\u043E\u0442\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u0438 \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0441\u043B\u0430\u0439\u0434\u0435\u0440\u043E\u043C \u00AB\u0412\u044B\u0441\u043E\u0442\u0430\u00BB). \u0421\u0442\u0443\u043F\u0435\u043D\u044C\u043A\u0430 \u2014 \u044D\u0442\u043E \u0440\u044F\u0434: \u043F\u0435\u0440\u0435\u0434\u043D\u0438\u0435 \u0434\u0435\u0440\u0436\u0430\u0442 \u0437\u0430\u0434\u0430\u043D\u043D\u0443\u044E \u0433\u043B\u0443\u0431\u0438\u043D\u0443, \u0437\u0430\u0434\u043D\u0438\u0439 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u043E\u0441\u0442\u0430\u0442\u043E\u043A. \u041F\u043E\u0441\u043B\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u043C\u0435\u043D\u044F\u044E\u0442 \u0433\u043E\u0440\u043A\u0443 \u0441\u0440\u0430\u0437\u0443; \u0432\u0441\u0451 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u043E\u0435 \u043F\u0440\u0430\u0432\u0438\u0442\u0441\u044F \u043E\u0431\u044B\u0447\u043D\u044B\u043C\u0438 \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430\u043C\u0438."))),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, "\u042D\u0442\u0438 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u043E\u0442\u043D\u043E\u0441\u044F\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A \u0433\u043E\u0440\u043A\u0435: \u043F\u043E\u043A\u0430 \u043E\u043D\u0430 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0430, \u043E\u043D\u0438 \u043D\u0438 \u043D\u0430 \u0447\u0442\u043E \u043D\u0435 \u0432\u043B\u0438\u044F\u044E\u0442, \u0430 \u0448\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u0432\u0441\u044F \u043B\u0435\u0441\u0435\u043D\u043A\u0430 \u0432\u043B\u0435\u0437\u0430\u043B\u0430 \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u043F\u043E \u0432\u044B\u0441\u043E\u0442\u0435. \u0421\u0442\u0443\u043F\u0435\u043D\u0438 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u044E\u0442\u0441\u044F \u043A \u0437\u0430\u0434\u043D\u0435\u0439 \u0441\u0442\u0435\u043D\u043A\u0435; \u0441\u043F\u0438\u043D\u043A\u0430 \u2014 \u0441\u0430\u043C\u0430\u044F \u0432\u044B\u0441\u043E\u043A\u0430\u044F (\u0441\u043B\u0430\u0439\u0434\u0435\u0440 \u00AB\u0412\u044B\u0441\u043E\u0442\u0430\u00BB). \u0421\u0442\u0443\u043F\u0435\u043D\u044C\u043A\u0430 \u2014 \u044D\u0442\u043E \u0440\u044F\u0434: \u043F\u0435\u0440\u0435\u0434\u043D\u0438\u0435 \u0434\u0435\u0440\u0436\u0430\u0442 \u0437\u0430\u0434\u0430\u043D\u043D\u0443\u044E \u0433\u043B\u0443\u0431\u0438\u043D\u0443, \u0437\u0430\u0434\u043D\u0438\u0439 \u0437\u0430\u0431\u0438\u0440\u0430\u0435\u0442 \u043E\u0441\u0442\u0430\u0442\u043E\u043A; \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u0434\u0435\u043B\u044F\u0442 \u0441\u0442\u0443\u043F\u0435\u043D\u0438 \u043D\u0430 \u043E\u0442\u0441\u0435\u043A\u0438. \u041F\u043E\u0441\u043B\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0433\u043E\u0440\u043A\u0430 \u0436\u0438\u0432\u0430\u044F: \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u043C\u0435\u043D\u044F\u044E\u0442 \u0435\u0451 \u0441\u0440\u0430\u0437\u0443, \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 \u043B\u044E\u0431\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u0438 \u0447\u0438\u0441\u043B\u043E \u043A\u043E\u043B\u043E\u043D\u043E\u043A \u043C\u043E\u0436\u043D\u043E \u043F\u0440\u0430\u0432\u0438\u0442\u044C \u043E\u0431\u044B\u0447\u043D\u044B\u043C\u0438 \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430\u043C\u0438 \u2014 \u0431\u043E\u0440\u0442\u0438\u043A\u0438 \u043F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u044E\u0442\u0441\u044F \u0441\u0430\u043C\u0438, \u0430 \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u043D\u0430\u0441\u043B\u0435\u0434\u0443\u044E\u0442 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0440\u044F\u0434\u0430."))),
                     React.createElement(Collapse, { title: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u0438 \u0434\u043D\u0430", open: openSecs.cells, onToggle: () => toggleSec("cells") },
                         React.createElement(Param, { label: "\u0412\u043D\u0435\u0448\u043D\u0438\u0435 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: cur.wallOut, min: connect ? CG.minWall : 0.8, max: 8, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wallOut: connect ? Math.max(v, CG.minWall) : v }) }),
                         connect && (cur.wallOut < CG.minWall - 0.001 ? (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "-6px 0 10px", lineHeight: 1.4 } },

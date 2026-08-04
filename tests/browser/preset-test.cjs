@@ -76,6 +76,33 @@ await setNum("Ступенек", 3);
 c = await st();
 ok("живое изменение числа ступенек", c.rows === 3);
 
+// колонки горки: перегородки между колонками — бортики, не спинки
+await setNum("Колонки", 3);
+c = await st();
+ok("колонки горки применились", c.cols === 3);
+ok("уровни у всех колонок", Math.abs((c.cells["2:1"]?.lvl ?? 0) - 12) < 0.05);
+ok("перегородки колонок — бортики", c.walls["v:0:1"] && c.walls["v:0:1"].h < c.H - 5);
+ok("передние сегменты всех колонок — бортики", c.walls["o:n:2"] && c.walls["o:n:2"].h < 12);
+
+// регулировка уровня пола ячейки тянет бортики за собой
+await page.locator("button", { hasText: /^Ячейка$/ }).first().click();
+await page.waitForTimeout(250);
+await page.locator("svg g").first().click();
+await page.waitForTimeout(300);
+await setNum("Уровень пола", 30);
+c = await st();
+ok("уровень ячейки задан", Math.abs((c.cells["0:0"]?.lvl ?? 0) - 30) < 0.05);
+ok(`бортик ячейки вырос за уровнем (${c.walls["o:n:0"]?.h})`,
+  Math.abs(c.walls["o:n:0"].h - (30 + c.floor + 6)) < 0.1);
+
+// шаг уровня ограничен лимитом принтера
+await page.locator("button", { hasText: /^Контейнер №/ }).first().click();
+await page.waitForTimeout(250);
+await setNum("Ступенек", 8);
+await setNum("Шаг уровня", 60);
+c = await st();
+ok(`горка не выше лимита принтера (H ${c.H} ≤ 175)`, c.H <= 175.01);
+
 // низкий и узкий
 await page.locator('button:text-is("Низкий большой")').click();
 await page.waitForTimeout(400);

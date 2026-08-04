@@ -10,7 +10,7 @@ import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
 import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
-import { presetContainer, PRESETS, GORKA_DEF } from "./model/presets.js";
+import { presetContainer, PRESETS, GORKA_DEF, applyStairsWalls, fillStairsLevels } from "./model/presets.js";
 import { snapLayout } from "./model/laymagnet.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -270,6 +270,17 @@ export default function TrayGenerator() {
     setGorka(g);
     if (cur?.preset === "stairs") applyPreset("stairs", g);
   };
+  // горка — «живой» пресет: при любых правках (уровень пола ячейки, число
+  // колонок или рядов обычными редакторами) недостающие уровни наследуют
+  // ряд, а бортики пересчитываются от фактических уровней. Сходится за
+  // один повтор: на согласованном контейнере ничего не меняется.
+  useEffect(() => {
+    if (cur?.preset !== "stairs") return;
+    const cells = fillStairsLevels(cur);
+    const walls = applyStairsWalls({ ...cur, cells });
+    if (JSON.stringify(cells) !== JSON.stringify(cur.cells) || JSON.stringify(walls) !== JSON.stringify(cur.walls))
+      updCur({ cells, walls });
+  }, [containers, sel]);
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
 
@@ -1352,10 +1363,14 @@ export default function TrayGenerator() {
           </p>
           <Param label="Ступенек" unit="шт" value={gorka.steps} min={2} max={12} step={1}
             onChange={(v) => updGorka({ steps: Math.round(v) })} />
-          <Param label="Шаг уровня" unit="мм" value={gorka.stepH} min={3} max={60} step={1}
-            onChange={(v) => updGorka({ stepH: v })} />
+          <Param
+            label="Шаг уровня" unit="мм" value={gorka.stepH} min={3}
+            max={Math.max(3, Math.min(60, Math.floor((limits.maxH - (cur?.floor ?? 1.6) - 20) / Math.max(1, gorka.steps - 1))))}
+            step={1} onChange={(v) => updGorka({ stepH: v })} />
           <Param label="Глубина ступени" unit="мм" value={gorka.depth} min={10} max={120} step={1}
             onChange={(v) => updGorka({ depth: v })} />
+          <Param label="Колонки" unit="шт" value={gorka.cols ?? 1} min={1} max={8} step={1}
+            onChange={(v) => updGorka({ cols: Math.round(v) })} />
           <button
             onClick={() => applyPreset("stairs")}
             style={{
@@ -1366,11 +1381,13 @@ export default function TrayGenerator() {
             Горка — применить
           </button>
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-            Эти три параметра относятся только к горке: пока она не применена, они ни на что
-            не влияют. Ступени поднимаются к задней стенке, задняя стенка — самая высокая
-            (равна высоте контейнера и меняется слайдером «Высота»). Ступенька — это ряд:
-            передние держат заданную глубину, задний забирает остаток. После применения
-            параметры меняют горку сразу; всё остальное правится обычными редакторами.
+            Эти параметры относятся только к горке: пока она не применена, они ни на что не
+            влияют, а шаг уровня ограничен так, чтобы вся лесенка влезала в лимит принтера по
+            высоте. Ступени поднимаются к задней стенке; спинка — самая высокая (слайдер
+            «Высота»). Ступенька — это ряд: передние держат заданную глубину, задний забирает
+            остаток; колонки делят ступени на отсеки. После применения горка живая: параметры
+            меняют её сразу, уровень пола любой ячейки и число колонок можно править обычными
+            редакторами — бортики пересчитаются сами, а новые колонки наследуют уровень ряда.
           </p>
         </div>
         </Collapse>

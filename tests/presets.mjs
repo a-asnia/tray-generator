@@ -1,7 +1,7 @@
 // Пресеты контейнеров: след и место сохраняются, сетка/стенки/уровни
 // перезаписываются; горка — ступени к задней стенке, задняя самая
 // высокая, глубина ступеней управляется; всё строится без ошибок.
-import { presetContainer, PRESETS, GORKA_DEF } from "../src/model/presets.js";
+import { presetContainer, PRESETS, GORKA_DEF, stairsWalls, applyStairsWalls, fillStairsLevels } from "../src/model/presets.js";
 import { buildContainer } from "../src/model/build.js";
 import { layout, getWall, getCellLvl } from "../src/model/layout.js";
 
@@ -96,6 +96,54 @@ for (const [kind, title] of PRESETS) {
   // много ступеней тоже строится
   const pm = presetContainer(mk(), "stairs", limits, { steps: 8, stepH: 8, depth: 18 });
   ok("горка: 8 ступеней строятся", buildContainer(pm, noConn, {}).length > 100);
+}
+
+// ── горка с колонками ──
+{
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, depth: 40, cols: 3 });
+  const L = layout(p);
+  ok("колонки: сетка 3 колонки × 3 ступени", p.cols === 3 && L.nColsAt(0) === 3);
+  ok("колонки: уровни у всех колонок", [0, 1, 2].every((i) => getCellLvl(p, i, 1) === 15 && getCellLvl(p, i, 2) === 30));
+  // перегородки между колонками — бортики, а не спинки
+  const vHs = [];
+  for (let j = 0; j < 3; j++) for (let i = 0; i < 2; i++) vHs.push(getWall(p, `v:${i}:${j}`).h);
+  ok(`колонки: перегородки-бортики (${vHs.join(", ")})`, vHs.every((h, k) => h < p.H - 5 && near(h, Math.floor(k / 2) * 15 + p.floor + 6)));
+  // передняя стенка — бортик у каждой колонки
+  ok("колонки: передние сегменты — бортики", [0, 1, 2].every((i) => getWall(p, `o:n:${i}`).h < 12));
+  ok("строится", buildContainer(p, noConn, {}).length > 100);
+}
+
+// ── живая горка: бортики следуют уровням, новые колонки наследуют ряд ──
+{
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, depth: 40, cols: 2 });
+  // пользователь поднял уровень одной ячейки — бортики вокруг неё выросли
+  const edited = { ...p, cells: { ...p.cells, "1:1": { lvl: 40 } } };
+  const w2 = applyStairsWalls(edited);
+  ok("уровень ячейки тянет её бортики", near(w2["v:0:1"].h, 40 + p.floor + 6) && near(w2["o:e:1"].h, 40 + p.floor + 6));
+  ok("чужие бортики не тронуты", near(w2["o:w:1"].h, 15 + p.floor + 6));
+  // ручное скругление стенки переживает пересчёт
+  const styled = { ...edited, walls: { ...edited.walls, "v:0:1": { ...edited.walls["v:0:1"], rnd: 2 } } };
+  ok("настройки стенки сохраняются при пересчёте", applyStairsWalls(styled)["v:0:1"].rnd === 2);
+  // спинку пересчёт не задаёт
+  ok("спинка не переопределяется", stairsWalls(p)["o:s:0"] === undefined);
+
+  // добавили колонку обычным редактором: уровней у неё нет — наследуются
+  const grown = { ...p, cols: 3 };
+  const filled = fillStairsLevels(grown);
+  ok("новая колонка наследует уровень ряда", filled["2:1"]?.lvl === 15 && filled["2:2"]?.lvl === 30);
+  // явный ноль уважается
+  const zeroed = { ...grown, cells: { ...grown.cells, "2:1": { lvl: 0 } } };
+  ok("явный ноль не перетирается", fillStairsLevels(zeroed)["2:1"].lvl === 0);
+}
+
+// ── шаг уровня ограничен лимитом принтера по высоте ──
+{
+  const lim2 = { ...limits, maxH: 80 };
+  const p = presetContainer(mk(), "stairs", lim2, { steps: 5, stepH: 60, depth: 25 });
+  ok(`лесенка влезает в лимит (H ${p.H} ≤ 80)`, p.H <= 80);
+  const topLvl = getCellLvl(p, 0, 4);
+  ok(`верхняя ступень ниже спинки (${topLvl} ≤ ${p.H - 20})`, topLvl <= p.H - 19.9);
+  ok("ступени остаются лесенкой", getCellLvl(p, 0, 1) < getCellLvl(p, 0, 2) && getCellLvl(p, 0, 2) < getCellLvl(p, 0, 3));
 }
 
 console.log(fail === 0 ? "\nPRESET TESTS PASSED" : `\n${fail} FAILURES`);
