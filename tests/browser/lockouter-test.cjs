@@ -55,7 +55,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.waitForTimeout(300);
   let st = await state();
   ok("замок включился", st.containers[0].lockOuter === true);
-  ok("подсказка про намертво показана", await page.getByText("Габарит зафиксирован намертво").count());
+  ok("подсказка про намертво показана", await page.getByText("Габарит не меняют ни ячейки").count());
   const W0 = st.containers[0].W, D0 = st.containers[0].D;
 
   // главный баг: меняем размер ячейки — контейнер НЕ должен меняться

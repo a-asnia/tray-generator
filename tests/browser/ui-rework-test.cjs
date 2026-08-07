@@ -48,10 +48,10 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   ok("нет сброса на вкладке Контейнеры", (await resetBtnCount()) === 0);
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   ok("нет сброса на вкладке Раскладка", (await resetBtnCount()) === 0);
-  ok("описание соединителя на Раскладке", (await page.getByText(/вдвигается в паз соседа/).count()) === 1);
+  ok("описание соединителя на Раскладке", (await page.getByText(/входит в паз соседа/).count()) === 1);
   await page.locator("button", { hasText: /^Принтер$/ }).click();
   ok("сброс есть на вкладке Принтер", (await resetBtnCount()) === 1);
-  ok("описания соединителей на Принтере нет", (await page.getByText(/вдвигается в паз соседа/).count()) === 0);
+  ok("описания соединителей на Принтере нет", (await page.getByText(/входит в паз соседа/).count()) === 0);
 
   // настройки ячеек уехали в «Редактор стенок»
   await goCont();

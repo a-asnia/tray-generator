@@ -76,22 +76,72 @@ const buf = readFileSync(await dl.path());
 const nT = buf.readUInt32LE(80);
 ok(`STL визитницы валиден (${nT} тр.)`, buf.length === 84 + nT * 50 && nT >= 84);
 
-// обмен контейнеров местами
+// перетаскивание контейнеров по карте раскладки: два контейнера разной
+// ширины в одном ряду (клетки должны удержать свои габариты)
+await page.evaluate(() => {
+  const s = JSON.parse(localStorage.getItem("trayGenState"));
+  const a = { ...s.containers[0], id: 1, gx: 0, gy: 0, W: 150, D: 120, cols: 1, rows: 1, cells: {}, walls: {} };
+  s.containers = [a, { ...a, id: 2, gx: 1, gy: 0, W: 90 }];
+  localStorage.setItem("trayGenState", JSON.stringify(s));
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector("canvas");
+await page.waitForTimeout(700);
 await page.locator("button", { hasText: /^Раскладка$/ }).click();
 await page.waitForTimeout(300);
-await page.locator('button:text-is("+")').first().click();
-await page.waitForTimeout(600);
-const before = (await st()).containers.map((x) => [x.gx, x.gy, x.id]);
-await page.locator("button", { hasText: /Поменять контейнеры местами/ }).click();
-await page.waitForTimeout(200);
-await page.locator('button:text-is("№1")').click();
-await page.waitForTimeout(200);
+
+const centerOf = async (label) => {
+  const b = await page.locator(`button:text-is("${label}")`).boundingBox();
+  return [b.x + b.width / 2, b.y + b.height / 2];
+};
+const dragCell = async (from, toXY) => {
+  const [x0, y0] = await centerOf(from);
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x0 + 10, y0 + 4, { steps: 3 });
+  await page.mouse.move(toXY[0], toXY[1], { steps: 8 });
+  await page.waitForTimeout(120);
+  await page.mouse.up();
+  await page.waitForTimeout(450);
+};
+await dragCell("№1", await centerOf("№2"));
+let cs = (await st()).containers;
+const after = cs.map((x) => [x.gx, x.gy, x.id]);
+ok("перетаскивание поменяло контейнеры местами",
+  cs[0].gx === 1 && cs[0].gy === 0 && cs[1].gx === 0 && cs[1].gy === 0,
+  ` → ${cs.map((c) => `${c.gx},${c.gy}`).join(" | ")}`);
+ok("контейнеры приняли габарит своей клетки",
+  Math.abs(cs[0].W - 90) < 0.05 && Math.abs(cs[1].W - 150) < 0.05,
+  ` → ${cs.map((c) => c.W).join(" | ")}`);
+ok("габариты остались за клетками (сборка плотная)",
+  cs.every((c) => {
+    const colW = Math.max(...cs.filter((o) => o.gx === c.gx).map((o) => o.W));
+    const rowD = Math.max(...cs.filter((o) => o.gy === c.gy).map((o) => o.D));
+    return Math.abs(c.W - colW) < 0.05 && Math.abs(c.D - rowD) < 0.05;
+  }),
+  ` → ${cs.map((c) => `${c.gx},${c.gy}:${c.W}×${c.D}`).join(" | ")}`);
+
+// перенос на пустую клетку: контейнер переезжает во второй ряд
+const cellXY = await page.evaluate((k) => {
+  const el = document.querySelector(`[data-cell="${k}"]`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return [r.x + r.width / 2, r.y + r.height / 2];
+}, `${after[1][0]},${after[1][1] + 1}`);
+ok("пустая клетка — тоже мишень для переноса", !!cellXY);
+if (cellXY) {
+  await dragCell("№2", cellXY);
+  cs = (await st()).containers;
+  ok("контейнер переехал в свободный ряд", cs[1].gy === 1 && cs[0].gy === 0,
+    ` → ${cs.map((c) => `${c.gx},${c.gy}`).join(" | ")}`);
+  ok("сетка осталась без дыр в начале координат",
+    Math.min(...cs.map((c) => c.gx)) === 0 && Math.min(...cs.map((c) => c.gy)) === 0);
+}
+
+// клик без сдвига по-прежнему просто выбирает контейнер
 await page.locator('button:text-is("№2")').click();
-await page.waitForTimeout(400);
-const after = (await st()).containers.map((x) => [x.gx, x.gy, x.id]);
-ok("контейнеры поменялись местами",
-  after[0][0] === before[1][0] && after[0][1] === before[1][1] &&
-  after[1][0] === before[0][0] && after[1][1] === before[0][1]);
+await page.waitForTimeout(250);
+ok("одиночный клик выбирает контейнер", (await page.locator('button:text-is("удалить №2")').count()) === 1);
 
 // «+» доступен даже когда раскладка заполнена (лимит меньше сборки)
 await setNum("Раскладка по X", 5);

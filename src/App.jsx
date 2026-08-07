@@ -12,6 +12,7 @@ import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wall
 import { buildContainer } from "./model/build.js";
 import { presetContainer, PRESETS, GORKA_DEF, applyStairsWalls, fillStairsLevels } from "./model/presets.js";
 import { snapLayout } from "./model/laymagnet.js";
+import { moveContainer, fitAssembly } from "./model/laymove.js";
 import { cardHolderSolids, CARDH } from "./model/cardholder.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -51,7 +52,8 @@ export default function TrayGenerator() {
   const [tab, setTab] = useState("cont");
   // подвкладки внутри «Контейнеры»
   const [sub, setSub] = useState("cont");
-  const [openSecs, setOpenSecs] = useState(() => ({ presets: true, outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, project: true, export: true, ...(SAVED?.openSecs ?? {}) }));
+  // секции всегда открыты при запуске: свернул — только на этот сеанс
+  const [openSecs, setOpenSecs] = useState(() => ({ presets: true, outer: true, cells: true, grid: true, walls: true, cellPick: true, inserts: true, project: true, export: true }));
   const toggleSec = (k) => setOpenSecs((o) => ({ ...o, [k]: !o[k] }));
 
   // автосохранение при каждом изменении
@@ -72,6 +74,58 @@ export default function TrayGenerator() {
       setSelection(null);
     }
   }, [containers, limits, layMagnet]);
+
+  // лимит раскладки — жёсткая рамка: за него сборка не выходит никогда
+  // (добавили контейнер в заполненную раскладку или ужали сам лимит —
+  // колонки и ряды подрезаются). fitAssembly тоже идемпотентен
+  useEffect(() => {
+    const next = fitAssembly(containers, limits);
+    if (next) setContainers(next);
+  }, [containers, limits]);
+
+  // ── шаг назад ──
+  // История правок контейнеров и лимитов. Быстрые правки одного и того же
+  // (тяжка ползунка, доводка эффектами) склеиваются в один шаг: иначе
+  // «Назад» отменяло бы движение слайдера по миллиметру.
+  const hist = useRef([]);
+  const histPrev = useRef({ containers, limits });
+  const histAt = useRef(0);
+  const undoing = useRef(false);
+  const [histLen, setHistLen] = useState(0);
+  useEffect(() => {
+    const prev = histPrev.current;
+    if (prev.containers === containers && prev.limits === limits) return;
+    histPrev.current = { containers, limits };
+    if (undoing.current) { undoing.current = false; setHistLen(hist.current.length); return; }
+    // пересборка списка с теми же значениями (доводка эффектами, повторный
+    // ввод того же числа) — не шаг: иначе «назад» отменял бы пустоту
+    if (JSON.stringify(prev.containers) === JSON.stringify(containers) && prev.limits === limits) return;
+    const now = Date.now();
+    if (now - histAt.current > 400) {
+      hist.current.push(prev);
+      if (hist.current.length > 60) hist.current.shift();
+    }
+    histAt.current = now;
+    setHistLen(hist.current.length);
+  }, [containers, limits]);
+  const undo = () => {
+    const prev = hist.current.pop();
+    if (!prev) return;
+    undoing.current = true;
+    histAt.current = 0;
+    setContainers(prev.containers);
+    setLimits(prev.limits);
+    setSel((s) => Math.min(s, prev.containers.length - 1));
+    setSelection(null);
+    setHistLen(hist.current.length);
+  };
+  useEffect(() => {
+    const key = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "я")) { e.preventDefault(); undo(); }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, []);
 
   const cur = containers[sel];
 
@@ -162,6 +216,15 @@ export default function TrayGenerator() {
     const maxAxis = isW ? limits.maxW : limits.maxD;
     // не даём ужать контейнер ниже суммы его зафиксированных колонок/рядов
     patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
+    // и не даём вылезти за лимит раскладки: с магнитом соседей сборка и так
+    // держит общий габарит, а без него потолок — лимит минус другие колонки
+    if (!magnet) {
+      const gK = isW ? "gx" : "gy";
+      const others = [...new Set(containers.filter((c) => c[gK] !== cur[gK]).map((c) => c[gK]))]
+        .reduce((s, g) => s + Math.max(30, ...containers.filter((c) => c[gK] === g).map((c) => c[axis])), 0);
+      const room = (isW ? limits.layW : limits.layD) * 10 - others;
+      if (room >= 30) patch = { [axis]: Math.min(patch[axis], Math.round(room * 10) / 10) };
+    }
     const myG = cur[gKey];
     const myId = cur.id;
     const magnetOn = magnet;
@@ -266,9 +329,10 @@ export default function TrayGenerator() {
   // ── Пресеты контейнеров ──
   // настройки «Горки»: ступенек, шаг уровня (мм), глубина ступени (мм)
   const [gorka, setGorka] = useState({ ...GORKA_DEF });
-  // обмен контейнеров местами в раскладке: null — выкл, -1 — ждём первый
-  // клик, ≥0 — индекс выбранного первым
-  const [swapArm, setSwapArm] = useState(null);
+  // перетаскивание контейнеров по карте раскладки
+  const [drag, setDrag] = useState(null); // {idx, over:{gx,gy}, x, y}
+  const dragRef = useRef(null);
+  const dragBlockClick = useRef(false);
   const applyPreset = (kind, g = gorka) => {
     setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, g) : x)));
     setSelection(null);
@@ -469,6 +533,23 @@ export default function TrayGenerator() {
     applyOuterDim({ D: D2 });
   };
 
+  // Отверстия под визитницу: у них есть требования к стенке (высота от
+  // CARDH.minH, длина сегмента от CARDH.minW). Включили галку — стенка и её
+  // сегмент сразу подгоняются под эти требования, а не молча остаются
+  // без окон.
+  const setCardHooks = (key, on) => {
+    updWall(key, { cardHooks: on });
+    if (!on) return;
+    const [, side, ns] = key.split(":");
+    const n = +ns;
+    const Lc = layout(cur);
+    if (getWall(cur, key).h < CARDH.minH) updWall(key, { h: Math.min(limits.maxH, CARDH.minH) });
+    if (side === "n" || side === "s") {
+      const j = side === "n" ? 0 : Lc.nRows - 1;
+      if (Lc.cw(n, j) < CARDH.minW) setCellWidth(n, j, CARDH.minW);
+    } else if (Lc.cd(n) < CARDH.minW) setRowDepth(n, CARDH.minW);
+  };
+
   const updCell = (i, j, patch) => {
     setContainers((cs) =>
       cs.map((cc, idx) => {
@@ -515,7 +596,9 @@ export default function TrayGenerator() {
     const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
     const gx0 = Math.min(...gxs), gx1 = Math.max(...gxs);
     const gy0 = Math.min(...gys), gy1 = Math.max(...gys);
-    const gap = connect ? 0 : 6;
+    // контейнеры всегда стоят вплотную; галка «Соединители» решает только,
+    // резать ли на стыках «ласточкин хвост»
+    const gap = 0;
     const colW = {}, rowD = {};
     for (let g = gx0; g <= gx1; g++)
       colW[g] = Math.max(30, ...containers.filter((c) => c.gx === g).map((c) => c.W));
@@ -741,41 +824,80 @@ export default function TrayGenerator() {
     }
     return { W: Math.round(W * 10) / 10, D: Math.round(D * 10) / 10, splitX, splitY };
   };
+  // ── перетаскивание контейнеров по карте ──
+  // Тянем мышью или пальцем: клетка под курсором подсвечивается, отпускание
+  // переносит контейнер (на занятую клетку — меняет их местами). Нажатие без
+  // сдвига остаётся обычным выбором контейнера.
+  const cellUnder = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    const cell = el && el.closest && el.closest("[data-cell]");
+    if (!cell) return null;
+    const [gx, gy] = cell.getAttribute("data-cell").split(",").map(Number);
+    return Number.isFinite(gx) && Number.isFinite(gy) ? { gx, gy } : null;
+  };
+  const dragStart = (e, idx, gx, gy) => {
+    if (e.button) return;
+    // захват указателя: тянуть можно и за пределами исходной кнопки
+    if (e.currentTarget.setPointerCapture) e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { idx, gx, gy, x0: e.clientX, y0: e.clientY, moved: false };
+  };
+  const dragMove = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    // порог в 5 px: дрожание руки не должно превращать клик в перенос
+    if (!d.moved && Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0) < 5) return;
+    d.moved = true;
+    setDrag({ idx: d.idx, over: cellUnder(e.clientX, e.clientY), x: e.clientX, y: e.clientY });
+  };
+  const dragEnd = (e) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setDrag(null);
+    if (!d) return;
+    if (!d.moved) { setSel(d.idx); setSelection(null); return; }
+    // мышь отпущена после переноса: следующий click (если браузер его
+    // всё-таки родит) не должен добавлять контейнер на клетке «+»
+    dragBlockClick.current = true;
+    setTimeout(() => { dragBlockClick.current = false; }, 0);
+    const to = cellUnder(e.clientX, e.clientY);
+    if (!to) return;
+    setContainers((cs) => moveContainer(cs, d.idx, to.gx, to.gy));
+    setSel(d.idx); // порядок в списке не меняется — номер остаётся прежним
+    setSelection(null);
+  };
+  const dragCancel = () => { dragRef.current = null; setDrag(null); };
+  useEffect(() => {
+    if (!drag) return;
+    const esc = (e) => { if (e.key === "Escape") dragCancel(); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [drag]);
+
   // «+» доступен всегда: лимит раскладки — ориентир (рамка на столе),
   // а не запрет; вылезающую за него сборку видно сразу
   const gridCells = [];
   for (let gy = gy0; gy <= gy1; gy++)
     for (let gx = gx0; gx <= gx1; gx++) {
       const idx = posMap.get(`${gx},${gy}`);
+      const isOver = drag && drag.over && drag.over.gx === gx && drag.over.gy === gy && drag.idx !== idx;
       if (idx !== undefined) {
-        const swapPick = swapArm !== null;
-        const isFirst = swapArm === idx;
+        const isDragged = drag?.idx === idx;
         gridCells.push(
           <button
             key={`${gx},${gy}`}
-            onClick={() => {
-              if (swapPick) {
-                // режим обмена: первый клик запоминает контейнер, второй
-                // меняет их местами в сетке (размеры и настройки при них)
-                if (swapArm === -1) setSwapArm(idx);
-                else if (swapArm === idx) setSwapArm(-1);
-                else {
-                  setContainers((cs) => cs.map((c, i) =>
-                    i === swapArm ? { ...c, gx: cs[idx].gx, gy: cs[idx].gy }
-                    : i === idx ? { ...c, gx: cs[swapArm].gx, gy: cs[swapArm].gy }
-                    : c));
-                  setSwapArm(null);
-                  setSelection(null);
-                }
-                return;
-              }
-              setSel(idx); setSelection(null);
-            }}
+            data-cell={`${gx},${gy}`}
+            title={`Контейнер №${idx + 1}: ${containers[idx].W}×${containers[idx].D} мм. Перетащи, чтобы переставить`}
+            onPointerDown={(e) => dragStart(e, idx, gx, gy)}
+            onPointerMove={dragMove}
+            onPointerUp={dragEnd}
+            onPointerCancel={dragCancel}
             style={{
-              width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-              border: isFirst ? `2px solid ${SEL}` : idx === sel ? `2px solid ${ACCENT}` : swapPick ? "1px dashed #93B4E8" : "1px solid #D6DDE6",
-              background: isFirst ? "#DBEAFE" : idx === sel ? "#FFF3EB" : "#fff",
-              color: isFirst ? SEL : idx === sel ? ACCENT : "#3D4A5C",
+              width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700,
+              cursor: drag ? "grabbing" : "grab", touchAction: "none",
+              border: isOver ? `2px dashed ${SEL}` : idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+              background: isOver ? "#DBEAFE" : idx === sel ? "#FFF3EB" : "#fff",
+              color: isOver ? SEL : idx === sel ? ACCENT : "#3D4A5C",
+              opacity: isDragged ? 0.35 : 1,
             }}
           >
             №{idx + 1}
@@ -789,7 +911,9 @@ export default function TrayGenerator() {
           adjacent ? (
             <button
               key={`${gx},${gy}`}
+              data-cell={`${gx},${gy}`}
               onClick={() => {
+                if (dragBlockClick.current) return; // клик-эхо после переноса
                 const pd = plannedDims(gx, gy);
                 const fresh = [{ ...makeContainer(null, gx, gy), W: pd.W, D: pd.D }];
                 if (pd.splitX) {
@@ -803,12 +927,25 @@ export default function TrayGenerator() {
                 setSel(containers.length);
                 setSelection(null);
               }}
-              style={{ width: 38, height: 34, borderRadius: 8, fontSize: 15, cursor: "pointer", border: "1px dashed #A9B4C2", background: "transparent", color: "#8A97A8" }}
+              style={{
+                width: 38, height: 34, borderRadius: 8, fontSize: 15, cursor: "pointer", touchAction: "none",
+                border: isOver ? `2px dashed ${SEL}` : "1px dashed #A9B4C2",
+                background: isOver ? "#DBEAFE" : "transparent", color: isOver ? SEL : "#8A97A8",
+              }}
             >
               +
             </button>
           ) : (
-            <div key={`${gx},${gy}`} style={{ width: 38, height: 34 }} />
+            // пустая клетка — тоже мишень для переноса
+            <div
+              key={`${gx},${gy}`}
+              data-cell={`${gx},${gy}`}
+              style={{
+                width: 38, height: 34, borderRadius: 8,
+                border: isOver ? `2px dashed ${SEL}` : "1px solid transparent",
+                background: isOver ? "#DBEAFE" : "transparent",
+              }}
+            />
           )
         );
       }
@@ -834,16 +971,14 @@ export default function TrayGenerator() {
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#3D4A5C", cursor: "pointer", margin: "2px 0 4px" }}>
               <input
                 type="checkbox" checked={!!w.cardHooks}
-                onChange={(e) => updWall(key, { cardHooks: e.target.checked })}
+                onChange={(e) => setCardHooks(key, e.target.checked)}
                 style={{ accentColor: SEL }}
               />
               Отверстия под визитницу
             </label>
             {w.cardHooks && (
               <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.4 }}>
-                Пара сквозных окон {CARDH.hw}×{CARDH.hh} мм у верха стенки — съёмная визитница цепляется
-                за них крюками. Нужна стенка от {CARDH.minH} мм высотой и сегмент от {CARDH.minW} мм.
-                Скачать деталь — на вкладке «Принтер».
+                Окна {CARDH.hw}×{CARDH.hh} мм под крюки. Стенка и её сегмент подогнаны под них автоматически; деталь — на вкладке «Принтер».
               </p>
             )}
           </>
@@ -898,7 +1033,7 @@ export default function TrayGenerator() {
           </button>
         )}
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
-          Скругление катает верхнюю плоскость радиусом, толщина стенки не меняется. Соты работают без спуска кромки (спуск строит стенку сплошной); наклонная плоскость при сотах тоже становится сотовой панелью. Высота 0 объединяет ячейки; выше {cur.H} мм — стенка поднимется над контейнером. У внешних стенок скругляется только внутренний угол — наружная плоскость остаётся ровной для стыковки.
+          Высота 0 объединяет ячейки, выше {cur.H} мм — башенка. Соты и спуск кромки вместе не работают.
         </p>
       </div>
     );
@@ -1028,7 +1163,7 @@ export default function TrayGenerator() {
           />
         )}
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 8px", lineHeight: 1.4 }}>
-          «Зафиксировать эту ячейку» превращает её в контейнер внутри контейнера: жёсткий размер и якорь к ближайшему углу или стенке (без координат — при изменениях бокс скользит вместе со стенкой, сетка обтекает его; ряд и колонка не блокируются). Мелкие замки ниже — для настройки сетки: замок ширины держит только эту ячейку в её ряду, замок глубины — весь ряд (глубина у ряда общая, это полоса). «Доля» — вес при делении свободного места: ячейка с долей 2 получает вдвое больше соседки с долей 1.
+          «Зафиксировать» — жёсткий бокс с якорем к стенке, сетка его обтекает. Замок ширины держит ячейку в ряду, замок глубины — весь ряд. «Доля» — вес при делении свободного места.
         </p>
         <Param
           label="Высота стенок ячейки" unit="мм" value={firstH} min={0} max={limits.maxH} step={0.5}
@@ -1094,7 +1229,7 @@ export default function TrayGenerator() {
           />
         ))}
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "4px 0 0", lineHeight: 1.4 }}>
-          Высота выше {cur.H} мм делает ячейку-башенку. Под поднятым полом — редкая сетка рёбер (шаг ~12 мм): она печатается со стола и служит опорой, поддержки не нужны.
+          Выше {cur.H} мм — ячейка-башенка. Под поднятым полом печатается сетка рёбер, поддержки не нужны.
         </p>
       </div>
     );
@@ -1147,8 +1282,7 @@ export default function TrayGenerator() {
           </button>
         </div>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0 0", lineHeight: 1.4 }}>
-          Это контейнер внутри контейнера: размер жёсткий, позиция — только якорь (угол или стенка), без координат. При изменении размеров контейнера бокс скользит вместе со своей стенкой, а сетка ячеек обтекает его — ряды и колонки не блокируются. Стенки бокса настраиваются кликом по ним в 3D (высота, наклон внутрь, соты/линии).
-          <br /><b>Снять фиксацию</b> — ячейка остаётся на месте и становится обычной ячейкой сетки (размер сохраняется, но дальше может меняться). <b>Растворить в сетке</b> — ячейка исчезает, её место забирают соседние.
+          Жёсткий бокс с якорем к стенке: сетка его обтекает, стенки настраиваются кликом в 3D.<br /><b>Снять фиксацию</b> — станет обычной ячейкой на своём месте. <b>Растворить</b> — исчезнет, место заберут соседи.
         </p>
       </div>
     );
@@ -1166,6 +1300,18 @@ export default function TrayGenerator() {
         <h1 style={{ fontSize: 19, fontWeight: 700, margin: "3px 0 0" }}>Система контейнеров</h1>
 
         <div style={{ display: "flex", gap: 6, margin: "12px 0 16px" }}>
+          <button
+            onClick={undo}
+            disabled={!histLen}
+            title="Отменить последнее изменение (Ctrl+Z)"
+            style={{
+              flex: "0 0 auto", width: 34, padding: "7px 0", borderRadius: 8, fontSize: 14, fontWeight: 700,
+              cursor: histLen ? "pointer" : "default", border: "1px solid #D6DDE6",
+              background: histLen ? "#fff" : "#F1F5F9", color: histLen ? "#3D4A5C" : "#B6C0CC",
+            }}
+          >
+            ↶
+          </button>
           {[["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (
             <button
               key={t}
@@ -1184,23 +1330,23 @@ export default function TrayGenerator() {
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          Нажми <b>+</b> — пристыкуется стандартный контейнер (размером с лимит принтера по ширине и глубине); когда места в лимите остаётся меньше, чем на два стандартных, новый растягивается и заполняет остаток (а если остаток больше лимита принтера — вставятся сразу два, пополам). В существующем ряду/колонке размер подстраивается под соседей.
+          <b>+</b> пристыковывает контейнер: размер подстраивается под соседей и под свободное место в лимите раскладки.
         </p>
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" }}>
           {gridCells}
         </div>
-        <button
-          onClick={() => { setSwapArm(swapArm === null ? -1 : null); }}
-          style={{
-            width: "100%", marginTop: 8, padding: "7px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
-            cursor: "pointer", border: swapArm !== null ? `2px solid ${SEL}` : "1px solid #D6DDE6",
-            background: swapArm !== null ? "#DBEAFE" : "#fff", color: swapArm !== null ? SEL : "#3D4A5C",
-          }}
-        >
-          {swapArm === null ? "⇄ Поменять контейнеры местами"
-            : swapArm === -1 ? "Нажми первый контейнер… (или сюда — отмена)"
-            : `№${swapArm + 1} выбран — нажми второй (или сюда — отмена)`}
-        </button>
+        {drag && (
+          <div style={{
+            position: "fixed", left: drag.x + 12, top: drag.y + 8, zIndex: 50, pointerEvents: "none",
+            padding: "3px 8px", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
+            background: SEL, color: "#fff", boxShadow: "0 4px 12px rgba(20,40,70,0.25)",
+          }}>
+            №{drag.idx + 1}
+          </div>
+        )}
+        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
+          Контейнеры <b>таскаются мышью</b>: на пустую клетку — переезд, на занятую — обмен местами (Esc отменяет). Контейнер принимает габарит клетки, в которую встал.
+        </p>
         <button
           onClick={fillLayout}
           style={{
@@ -1211,7 +1357,7 @@ export default function TrayGenerator() {
           Заполнить раскладку
         </button>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 }}>
-          Достроит сетку контейнерами максимально доступного размера (лимит принтера), пока они влезают в лимит раскладки. Существующие контейнеры не меняются.
+          Достроит сетку контейнерами до лимита раскладки; существующие не трогает.
         </p>
         <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
           {containers.length > 1 && (
@@ -1252,28 +1398,22 @@ export default function TrayGenerator() {
           </label>
         </div>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
-          Магнит соседей: размер применяется сразу ко всей колонке или ряду контейнера (в сетке они держат общую ширину/глубину — иначе щели), соседние колонки прилипают и растут на освободившееся место (и наоборот). Сосед растёт максимум до лимита принтера; если расти больше некому, остаток (от 30 мм) закрывает новый контейнер. Контейнеры с замками не трогаются.
+          Магнит соседей: размер применяется ко всей колонке или ряду, соседи забирают освободившееся место (или уступают своё).
         </p>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
-          Магнит раскладки: сборка липнет к краю лимита раскладки. Крайние колонка и ряд дорастают
-          до края, если это возможно в пределах лимита принтера; большое пустое место (от 30 мм)
-          закрывается новыми контейнерами. Контейнеры с замками не растягиваются.
+          Магнит раскладки: крайние колонка и ряд дотягиваются до края лимита, пустое место от 30 мм закрывают новые контейнеры.
         </p>
 
         <SectionTitle>Соединители</SectionTitle>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 0", lineHeight: 1.45 }}>
-          «Ласточкин хвост»: рельс вдвигается в паз соседа сверху и держит контейнеры
-          на отрыв намертво, разъём — только подъёмом. Зазор {DEFAULT_CLR.toLocaleString("ru")} мм
-          на сторону — собирается без усилия. Паз прячется внутри толщины внешней стенки,
-          поэтому её минимум {CG.minWall} мм. Замок ставится на стенку не ниже {CG.lockMin} мм —
-          на более низкой зона не режется и стенка остаётся целой.
+          «Ласточкин хвост»: рельс входит в паз соседа сверху. Зазор {DEFAULT_CLR.toLocaleString("ru")} мм, стенка от {CG.minWall} мм, замок — на стенке от {CG.lockMin} мм.
         </p>
 
         <SectionTitle>Лимит раскладки</SectionTitle>
         <Param label="Раскладка по X" unit="см" value={limits.layW} min={5} max={2000} step={1} onChange={(v) => updLimits({ layW: Math.round(v) })} />
         <Param label="Раскладка по Y" unit="см" value={limits.layD} min={5} max={2000} step={1} onChange={(v) => updLimits({ layD: Math.round(v) })} />
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          Лимит любой, задаётся в сантиметрах и вмещает контейнеры по внешней стороне. Сборка сейчас: {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
+          Жёсткая рамка стола: сборка за неё не выходит. Сейчас {(built.totalW / 10).toFixed(1)}×{(built.totalD / 10).toFixed(1)} см из {limits.layW}×{limits.layD} см.
         </p>
 
         </div>)}
@@ -1284,7 +1424,7 @@ export default function TrayGenerator() {
         <Param label="Макс. глубина" unit="мм" value={limits.maxD} min={50} max={500} step={1} onChange={(v) => updLimits({ maxD: v })} />
         <Param label="Макс. высота" unit="мм" value={limits.maxH} min={30} max={500} step={1} onChange={(v) => updLimits({ maxH: v })} />
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-2px 0 0", lineHeight: 1.45 }}>
-          Лимиты действуют на ОДИН контейнер по его внешним габаритам (и на высоту стенок). По умолчанию — чуть меньше стола Bambu A1 mini (180×180×180 мм), с запасом под юбку. Нужно больше места — пристыкуй ещё один контейнер во вкладке «Раскладка».
+          Лимиты на ОДИН контейнер по внешним габаритам. По умолчанию — стол Bambu A1 mini с запасом.
         </p>
 
                 <div style={{ height: 12 }} />
@@ -1312,7 +1452,7 @@ export default function TrayGenerator() {
           <p style={{ fontSize: 12, color: ACCENT, margin: "8px 0 0", fontWeight: 600 }}>{ioMsg}</p>
         )}
         <p style={{ fontSize: 12, color: "#8A97A8", marginTop: 8, lineHeight: 1.5 }}>
-          Сохраняется вся работа: контейнеры, раскладка, ячейки, стенки, фиксации и лимиты — одним файлом .json. Его можно перенести на другой компьютер или хранить как версию; «Открыть проект» заменяет текущую работу содержимым файла.
+          Вся работа одним файлом .json. «Открыть проект» заменяет текущую.
         </p>
         </Collapse>
 
@@ -1436,25 +1576,23 @@ export default function TrayGenerator() {
         </button>
         {cur.lockOuter && (
           <p style={{ fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 }}>
-            Габарит зафиксирован намертво: он не меняется ни от размеров ячеек (они перераспределяются внутри), ни магнитом соседей. Ячейки, перегородки и сетку внутри менять можно.
-          </p>
+          Габарит не меняют ни ячейки, ни магнит. Внутри менять можно всё.
+        </p>
         )}
         <Param label="Ширина" unit="мм" value={cur.W} min={30} max={limits.maxW} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ W: v })} />
         <Param label="Глубина" unit="мм" value={cur.D} min={30} max={limits.maxD} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ D: v })} />
         <Param label="Высота" unit="мм" value={cur.H} min={10} max={limits.maxH} step={1} disabled={cur.lockOuter} onChange={(v) => updCur({ H: v })} />
         {cur.lockCell && (
           <p style={{ fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 }}>
-            Ячейка зафиксирована по внутренним размерам: при изменении сетки и стенок контейнер подстраивается сам. Если новый размер не влезает в лимит принтера — изменение не применится.
-          </p>
+          Ячейка держит внутренний размер, контейнер подстраивается сам (в пределах лимита принтера).
+        </p>
         )}
 
         </Collapse>
 
         <Collapse title="Пресеты" open={openSecs.presets} onToggle={() => toggleSec("presets")}>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          Пресет настраивает контейнер №{sel + 1} под типовую задачу: сетку, высоты стенок и уровни
-          полов. След по нижней части ({cur.W}×{cur.D} мм) и место в раскладке не меняются.
-          Текущие ячейки, стенки и фиксации перезаписываются.
+          Пресет перенастраивает контейнер №{sel + 1}: сетку, стенки, полы. След {cur.W}×{cur.D} мм и место в раскладке остаются.
         </p>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
           {PRESETS.filter(([k]) => k !== "stairs").map(([k, t]) => (
@@ -1496,17 +1634,8 @@ export default function TrayGenerator() {
             Горка — применить
           </button>
           <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-            Эти параметры относятся только к горке: пока она не применена, они ни на что не
-            влияют, а шаг уровня ограничен так, чтобы вся лесенка влезала в лимит принтера по
-            высоте. Ступени поднимаются к задней стенке; спинка — самая высокая (слайдер
-            «Высота»). Все ступени равной глубины, колонки равной ширины. Бортик — высота
-            стенок над полом своей ступени: большой бортик при низком уровне пола даёт
-            глубокие ячейки; он меняет только стенки, уровни полов не трогает. Общий уровень
-            пола приподнимает всю лесенку разом (ручные правки уровней сохраняются). После
-            применения горка живая: уровень пола любой ячейки и число колонок правятся
-            обычными редакторами — бортики пересчитаются сами, новые колонки наследуют
-            уровень ряда. «Ступенек» и «Шаг уровня» пересобирают лесенку целиком.
-          </p>
+          Только для горки. Ступени растут к задней стенке, все равной глубины и ширины. Бортик — высота стенок над полом своей ступени, общий уровень поднимает лесенку целиком. «Ступенек» и «Шаг уровня» пересобирают её заново.
+        </p>
         </div>
         </Collapse>
 
@@ -1520,8 +1649,8 @@ export default function TrayGenerator() {
         {connect && (
           cur.wallOut < CG.minWall - 0.001 ? (
             <p style={{ fontSize: 11.5, color: "#B45309", margin: "-6px 0 10px", lineHeight: 1.4 }}>
-              ⚠ Для замка нужна стенка от {CG.minWall} мм — сейчас {cur.wallOut} мм. Паз ужат, а если и так не помещается, замок на этом контейнере не ставится: стенка важнее.
-            </p>
+          ⚠ Для замка нужна стенка от {CG.minWall} мм — сейчас {cur.wallOut} мм: паз ужат или замок не ставится.
+        </p>
           ) : (
             <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
               Минимум {CG.minWall} мм — паз соединителя прячется внутри стенки.
@@ -1536,7 +1665,7 @@ export default function TrayGenerator() {
           onChange={(v) => updCur({ cornerR: v })}
         />
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 }}>
-          Наружные вертикальные углы. Должно быть заметно больше скругления кромки, иначе у самого верха радиус угла обнуляется и угол вырождается в остриё.
+          Наружные вертикальные углы: радиус заметно больше скругления кромки.
         </p>
 
         </Collapse>
@@ -1593,7 +1722,7 @@ export default function TrayGenerator() {
 
         <Collapse title="Вставные перегородки" open={openSecs.inserts} onToggle={() => toggleSec("inserts")}>
         <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 10px", lineHeight: 1.45 }}>
-          На внутренних гранях печатаются направляющие, а сами перегородки печатаются отдельной деталью и вдвигаются сверху — их можно переставлять и убирать. Зазор по умолчанию 0,2 мм на сторону.
+          Направляющие печатаются на стенках, перегородки — отдельной деталью, вдвигаются сверху. Зазор 0,2 мм.
         </p>
         <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
           {[["none", "Нет"], ["x", "Поперёк"], ["z", "Вдоль"]].map(([v, t]) => (
@@ -1645,10 +1774,8 @@ export default function TrayGenerator() {
               )}
               {blockedTall > 0 && (
                 <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
-                  ⚠ Мест пропущено: {blockedTall}. Поперечная печатная стенка почти в высоту
-                  контейнера — над вырезом должно оставаться не меньше {MIN_WEB} мм сплошной
-                  полосы. Понизьте поперечную стенку, и место вернётся.
-                </p>
+          ⚠ Мест пропущено: {blockedTall}. Над вырезом нужно не меньше {MIN_WEB} мм сплошной полосы — понизьте поперечную стенку.
+        </p>
               )}
               {slots.length === 0 && blockedTall === 0 && (
                 <p style={{ fontSize: 11.5, color: "#B45309", margin: "8px 0 0", lineHeight: 1.45 }}>
