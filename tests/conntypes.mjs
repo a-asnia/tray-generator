@@ -107,6 +107,25 @@ const anyInside = (solids, p) => solids.some((b) => inside(b, p));
   ok(`male на N: рельс выступает наружу (${(-c.D / 2 - minZ).toFixed(2)} = ${g.depth})`, near(-c.D / 2 - minZ, g.depth));
 }
 
+// ── зона на стыке сегментов разной высоты: замок не ставится ──
+{
+  // W=120 → один замок по центру, ровно на границе двух колонок с разными
+  // высотами передних сегментов: вырезать зону — разломать ступеньку
+  const c = mk({ cols: 2, walls: { "o:n:0": { h: 14 } } });
+  const s = buildContainer(c, { ...noConn, N: { male: false, vs } }, { fillets: false });
+  ok("ступенчатая зона: замок пропущен", !s.some((b) => b.tag === "conn"));
+  // стенка цела: низкий сегмент 14, высокий 30, обе сплошные
+  const holesL = [], holesR = [];
+  for (let y = 0.4; y < 13.5; y += 0.5)
+    if (!anyInside(s, [-15, y, -c.D / 2 + c.wallOut / 2])) holesL.push(y);
+  for (let y = 0.4; y < 29.5; y += 0.5)
+    if (!anyInside(s, [15, y, -c.D / 2 + c.wallOut / 2])) holesR.push(y);
+  ok("оба сегмента целы", holesL.length === 0 && holesR.length === 0);
+  // одинаковые высоты сегментов — замок ставится как раньше
+  const s2 = buildContainer(mk({ cols: 2 }), { ...noConn, N: { male: false, vs } }, { fillets: false });
+  ok("ровные сегменты: замок на месте", s2.some((b) => b.tag === "conn"));
+}
+
 // ── два замка на широкой стенке, разные высоты сегментов ──
 {
   // 2 колонки: левый сегмент понижен — левый замок следует ему,

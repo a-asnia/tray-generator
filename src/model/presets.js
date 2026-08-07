@@ -12,7 +12,7 @@ import { layout, getCellLvl } from "./layout.js";
 // ступени на отсеки), бортик (высота стенок над полом — большой бортик
 // при низком поле даёт глубокие ячейки). Ступени равной глубины, колонки
 // равной ширины — никакого «остатка» последнему ряду.
-export const GORKA_DEF = { steps: 3, stepH: 15, cols: 1, lip: 6 };
+export const GORKA_DEF = { steps: 3, stepH: 15, cols: 1, lip: 6, base: 0 };
 
 // бортик над полом своей ступени по умолчанию
 const LIP = 6;
@@ -149,17 +149,20 @@ export function presetContainer(c, kind, limits, opts = {}) {
     const n = Math.max(2, Math.min(12, Math.round(opts.steps ?? GORKA_DEF.steps)));
     const nCols = Math.max(1, Math.min(8, Math.round(opts.cols ?? GORKA_DEF.cols)));
     const lip = Math.max(2, Math.min(120, opts.lip ?? GORKA_DEF.lip));
+    // общий уровень пола: вся лесенка приподнята на эту высоту
+    const lvl0 = Math.max(0, Math.min(200, opts.base ?? GORKA_DEF.base));
     // спинка должна возвышаться и над верхней ступенью, и над её бортиком
     const head = Math.max(20, lip + 2);
     // шаг уровня ужимается так, чтобы вся лесенка со спинкой влезла в
     // лимит принтера по высоте — слайдером её не задрать выше maxH
-    const maxStep = Math.max(3, (maxH - c.floor - head) / Math.max(1, n - 1));
+    const maxStep = Math.max(3, (maxH - c.floor - head - lvl0) / Math.max(1, n - 1));
     const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH, maxStep));
-    const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(head, stepH)));
+    const H = Math.min(maxH, r1(lvl0 + (n - 1) * stepH + c.floor + Math.max(head, stepH)));
     const cells = {};
-    for (let j = 1; j < n; j++)
-      for (let i = 0; i < nCols; i++) cells[i + ":" + j] = { lvl: r1(j * stepH) };
-    const next = { ...base, H, rows: n, cols: nCols, cells, stairsLip: lip };
+    for (let j = 0; j < n; j++)
+      for (let i = 0; i < nCols; i++)
+        if (lvl0 + j * stepH > 0) cells[i + ":" + j] = { lvl: r1(lvl0 + j * stepH) };
+    const next = { ...base, H, rows: n, cols: nCols, cells, stairsLip: lip, stairsBase: lvl0 };
     next.walls = applyStairsWalls(next);
     return next;
   }

@@ -138,9 +138,10 @@ const aux = [
     return close(pick(ref.layout(cfg)), pick(layout(cfg))) &&
       close(pick(ref.layout({ ...cfg, gridMode: "size" })), pick(layout({ ...cfg, gridMode: "size" })));
   })()],
-  // дефолт скругления изменён намеренно (0 → 0.8), остальные поля те же
-  ["getWall (кроме нового дефолта rnd)", (() => {
-    const drop = (w) => { const { rnd, ...rest } = w; return rest; };
+  // дефолт скругления изменён намеренно (0 → 0.8), поле cardHooks
+  // (отверстия под визитницу) добавлено намеренно — остальные поля те же
+  ["getWall (кроме новых rnd и cardHooks)", (() => {
+    const drop = (w) => { const { rnd, cardHooks, ...rest } = w; return rest; };
     const cfg2 = { ...cfg, walls: { "v:0:0": { h: 5, face: "hex" } } };
     return eq(drop(ref.getWall(cfg, "v:0:0")), drop(getWall(cfg, "v:0:0"))) &&
       eq(drop(ref.getWall(cfg2, "v:0:0")), drop(getWall(cfg2, "v:0:0"))) &&

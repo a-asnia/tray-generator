@@ -39,6 +39,7 @@ const MODULES = [
   "src/model/solver.js",
   "src/model/inserts.js",
   "src/model/layout.js",
+  "src/model/cardholder.js",
   "src/model/build.js",
   "src/model/presets.js",
   "src/state/storage.js",

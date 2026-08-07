@@ -183,12 +183,31 @@ export const DEFAULT_RND = 0.8;
 // больше скругления кромки: иначе у самой кромки радиус угла обнуляется
 // и угол вырождается в остриё.
 export const DEFAULT_CORNER_R = 2;
-export const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
+export const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1, cardHooks: false });
 export function getWall(c, key) {
   const w = c.walls[key];
   if (!w) return defWall(c);
   // высота может превышать H контейнера (башенка-ячейка); потолок — лимит принтера
-  return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? DEFAULT_RND, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1 };
+  return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? DEFAULT_RND, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1, cardHooks: !!w.cardHooks };
+}
+
+// Перенос настроек ячеек (уровень, наклон) на новую сетку по географии:
+// новая ячейка наследует настройки старой ячейки, накрывавшей её центр —
+// поднятый пол переживает деление на колонки и ряды
+export function remapCells(oldC, newC) {
+  if (!oldC.cells || !Object.keys(oldC.cells).length) return {};
+  const Lo = layout(oldC), Ln = layout(newC);
+  const cells = {};
+  for (let j = 0; j < Ln.nRows; j++)
+    for (let i = 0; i < Ln.nColsAt(j); i++) {
+      const xc = Ln.cx0(i, j) + Ln.cw(i, j) / 2;
+      const zc = Ln.cz0(j) + Ln.cd(j) / 2;
+      let jo = 0;
+      for (let jj = 0; jj < Lo.nRows; jj++) if (zc >= Lo.cz0(jj) - oldC.wall) jo = jj;
+      const src = oldC.cells[Lo.cellIndexAt(jo, xc) + ":" + jo];
+      if (src && Object.keys(src).length) cells[i + ":" + j] = { ...src };
+    }
+  return cells;
 }
 
 // уровень пола ячейки (лесенка), мм от дна контейнера

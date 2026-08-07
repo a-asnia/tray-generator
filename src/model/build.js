@@ -10,6 +10,7 @@ import { hashStr, mulberry32, ribbonQuads } from "../geometry/random.js";
 import { connOf, splitRange, addConnUnits, lockMinH } from "./connectors.js";
 import { layout, getWall, getCellLvl, DEFAULT_CORNER_R } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
+import { CARDH } from "./cardholder.js";
 
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
@@ -112,25 +113,53 @@ export function buildContainer(c, conn, opts = {}) {
         segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
     }
     const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
-    let h = Infinity, rnd = 0, best = -1e9;
+    let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
     for (const sg of segs) {
       if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01) continue;
       const wc = getWall(c, sg.key);
       h = Math.min(h, wc.h);
+      hMax = Math.max(hMax, wc.h);
       const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
       if (ov > best) { best = ov; rnd = wc.rnd; }
     }
-    if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; rnd = wc.rnd; }
-    return { vc, h, rnd };
+    if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; hMax = wc.h; rnd = wc.rnd; }
+    // even: все сегменты под зоной одной высоты. На ступенчатой стенке
+    // (горка) замок не ставится: вырезать зону из сегментов разной высоты
+    // и вернуть плоскую — значит разломать лесенку на куски
+    return { vc, h, rnd, even: hMax - h < 0.01 };
   };
   const unitsOf = (side) =>
     conn[side] && CONN.fits
-      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
+      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.even && u.h >= lockMinH(CONN))
       : [];
   const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
   const zonesFrom = (units) =>
     units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
   const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
+
+  // ── Окна под съёмную визитницу ──
+  // Пара сквозных окон у верха внешней стенки (галка в редакторе стенки).
+  // Окно режет стенку зоной на всю высоту, обратно ставятся низ (на всю
+  // толщину) и верх со скруглённой кромкой — между ними сквозной проём.
+  const cardHoleVs = (wc, a, b, zones) => {
+    if (!wc.cardHooks || wc.h < CARDH.minH || b - a < CARDH.minW) return [];
+    const mid = (a + b) / 2;
+    return [mid - CARDH.sp / 2, mid + CARDH.sp / 2].filter((vc) =>
+      zones.every(([za, zb]) => vc + CARDH.hw / 2 <= za + 0.01 || vc - CARDH.hw / 2 >= zb - 0.01));
+  };
+  const withCardZones = (zones, holes) =>
+    [...zones, ...holes.map((vc) => [vc - CARDH.hw / 2, vc + CARDH.hw / 2])].sort((p, q) => p[0] - q[0]);
+  const pushCardHolePieces = (key, wc, sym, vc, mapFn) => {
+    const y1 = wc.h - CARDH.top, y0 = y1 - CARDH.hh;
+    const a = vc - CARDH.hw / 2, b = vc + CARDH.hw / 2;
+    const q = sym
+      ? [[-wallOut / 2, 0], [wallOut / 2, 0], [wallOut / 2, y0], [-wallOut / 2, y0]]
+      : [[0, 0], [wallOut, 0], [wallOut, y0], [0, y0]];
+    pushProfiled([q], mapFn, a, b, key); // низ проёма
+    const parts = wallProfile(wallOut, wc.h, wc.rnd, sym).map((quad, qi) =>
+      qi === 0 ? quad.map(([o, y]) => [o, y === 0 ? y1 : y]) : quad);
+    pushProfiled(parts, mapFn, a, b, key); // верх проёма с кромкой
+  };
 
   const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
     if (tilt < 0.5 || h <= yBase + 0.3) return;
@@ -842,11 +871,13 @@ export function buildContainer(c, conn, opts = {}) {
           : (o, y, x) => [x, y, D / 2 - off - o];
         // в углах корпуса торец подрезается под скругление W/E-стенки
         const rL = side === "n" ? cutNW_ns : cutSW_ns, rR = side === "n" ? cutNE_ns : cutSE_ns;
-        for (const [a, b] of splitRange(bx0, bx1, zones))
+        const cardVs = cardHoleVs(wc, bx0, bx1, zones);
+        for (const [a, b] of splitRange(bx0, bx1, withCardZones(zones, cardVs)))
             pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
               a: a <= -W / 2 + 0.01 ? rL : 0,
               b: b >= W / 2 - 0.01 ? rR : 0,
             });
+        for (const vc of cardVs) pushCardHolePieces(key, wc, sym, vc, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         // пандус не должен войти в полость прижатого к стенке бокса
         for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
@@ -868,11 +899,13 @@ export function buildContainer(c, conn, opts = {}) {
           ? (o, y, z) => [-W / 2 + off + o, y, z]
           : (o, y, z) => [W / 2 - off - o, y, z];
         const rT = side === "w" ? cutNW_we : cutNE_we, rB = side === "w" ? cutSW_we : cutSE_we;
-        for (const [a, b] of splitRange(bz0, bz1, zones))
+        const cardVs = cardHoleVs(wc, bz0, bz1, zones);
+        for (const [a, b] of splitRange(bz0, bz1, withCardZones(zones, cardVs)))
             pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
               a: a <= -D / 2 + 0.01 ? rT : 0,
               b: b >= D / 2 - 0.01 ? rB : 0,
             });
+        for (const vc of cardVs) pushCardHolePieces(key, wc, sym, vc, mapFn);
         const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
         for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
           addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);

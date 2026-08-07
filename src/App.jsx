@@ -8,10 +8,11 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, DEFAULT_CORNER_R } from "./model/layout.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, remapCells, DEFAULT_CORNER_R } from "./model/layout.js";
 import { buildContainer } from "./model/build.js";
 import { presetContainer, PRESETS, GORKA_DEF, applyStairsWalls, fillStairsLevels } from "./model/presets.js";
 import { snapLayout } from "./model/laymagnet.js";
+import { cardHolderSolids, CARDH } from "./model/cardholder.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
 import { MONO, ACCENT, SEL } from "./ui/theme.js";
@@ -128,15 +129,21 @@ export default function TrayGenerator() {
   const applyParam = (patch) => {
     const lockO = cur.lockOuter, lockC = cur.lockCell;
     if (lockC && lockO) return; // оба замка: структура заблокирована
+    // при изменении сетки настройки ячеек (уровень, наклон) переезжают на
+    // новую сетку по географии — поднятый пол переживает деление
+    const withRemap = (extra = {}) => {
+      if (!("cols" in patch) && !("rows" in patch)) return { ...patch, ...extra };
+      return { ...patch, ...extra, cells: remapCells(cur, { ...cur, ...patch, ...extra }) };
+    };
     if (lockC && cur.gridMode !== "size") {
       const m = { ...cur, ...patch };
       const W2 = 2 * m.wallOut + m.cols * cur.cellW0 + (m.cols - 1) * m.wall;
       const D2 = 2 * m.wallOut + m.rows * cur.cellD0 + (m.rows - 1) * m.wall;
       if (W2 > limits.maxW + 0.01 || D2 > limits.maxD + 0.01 || W2 < 30 || D2 < 30) return; // не влезает в принтер
-      updCur({ ...patch, W: Math.round(W2 * 10) / 10, D: Math.round(D2 * 10) / 10 });
+      updCur(withRemap({ W: Math.round(W2 * 10) / 10, D: Math.round(D2 * 10) / 10 }));
       return;
     }
-    updCur(patch);
+    updCur(withRemap());
   };
 
   // Магнит соседей (переключатель на вкладке «Раскладка»): сборка
@@ -259,6 +266,9 @@ export default function TrayGenerator() {
   // ── Пресеты контейнеров ──
   // настройки «Горки»: ступенек, шаг уровня (мм), глубина ступени (мм)
   const [gorka, setGorka] = useState({ ...GORKA_DEF });
+  // обмен контейнеров местами в раскладке: null — выкл, -1 — ждём первый
+  // клик, ≥0 — индекс выбранного первым
+  const [swapArm, setSwapArm] = useState(null);
   const applyPreset = (kind, g = gorka) => {
     setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, g) : x)));
     setSelection(null);
@@ -275,6 +285,26 @@ export default function TrayGenerator() {
     // параметров, которые сами задают уровни: ступенек и шага.
     if ("lip" in patch) updCur({ stairsLip: Math.max(2, Math.min(120, g.lip)) });
     else if ("cols" in patch) updCur({ cols: Math.max(1, Math.min(8, Math.round(g.cols))) });
+    else if ("base" in patch) {
+      // общий уровень пола: сдвигаем ВСЕ уровни на разницу — ручные
+      // правки уровней сохраняются, спинка едет вместе с лесенкой
+      const nb = Math.max(0, Math.min(200, g.base));
+      const delta = Math.round((nb - (cur.stairsBase ?? 0)) * 10) / 10;
+      if (Math.abs(delta) < 0.001) return;
+      const L2 = layout(cur);
+      const cells = { ...(cur.cells || {}) };
+      for (let j = 0; j < L2.nRows; j++)
+        for (let i = 0; i < L2.nColsAt(j); i++) {
+          const k = i + ":" + j;
+          const e = cells[k] || {};
+          cells[k] = { ...e, lvl: Math.max(0, Math.round(((e.lvl ?? 0) + delta) * 10) / 10) };
+        }
+      updCur({
+        stairsBase: nb,
+        cells,
+        H: Math.min(limits.maxH, Math.max(20, Math.round((cur.H + delta) * 10) / 10)),
+      });
+    }
     else applyPreset("stairs", g);
   };
   // горка — «живой» пресет: при любых правках (уровень пола ячейки, число
@@ -499,15 +529,22 @@ export default function TrayGenerator() {
     for (let g = gy0; g <= gy1; g++) { rowZ[g] = acc + rowD[g] / 2; acc += rowD[g] + gap; }
     const totalD = acc - gap;
 
+    // Кто в паре несёт рельс (наружный выступ), а кто паз. По умолчанию —
+    // западный/северный. Но горка всегда несёт рельс: паз в её ступенчатых
+    // стенках не помещается, а рельс встаёт на ровный участок лесенки.
+    const railCarrier = (a, b) => {
+      const aS = a.preset === "stairs", bS = b.preset === "stairs";
+      return aS === bS ? true : aS;
+    };
     const items = containers.map((c) => {
       const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
       const conn = !connect
         ? { N: null, S: null, W: null, E: null }
         : {
-            E: E ? { male: true, vs: connectorVs(Math.min(c.D, E.D)) } : null,
-            W: Wn ? { male: false, vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
-            S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
-            N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
+            E: E ? { male: railCarrier(c, E), vs: connectorVs(Math.min(c.D, E.D)) } : null,
+            W: Wn ? { male: !railCarrier(Wn, c), vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
+            S: S ? { male: railCarrier(c, S), vs: connectorVs(Math.min(c.W, S.W)) } : null,
+            N: N ? { male: !railCarrier(N, c), vs: connectorVs(Math.min(c.W, N.W)) } : null,
           };
       const ck = JSON.stringify(conn);
       let hit = geoCache.current.get(c);
@@ -704,29 +741,41 @@ export default function TrayGenerator() {
     }
     return { W: Math.round(W * 10) / 10, D: Math.round(D * 10) / 10, splitX, splitY };
   };
-  const canPlace = (gx, gy) => {
-    const pd = plannedDims(gx, gy);
-    let wSum = pd.splitX ? pd.splitX[1] : 0;
-    for (let g = Math.min(rGx0, gx); g <= Math.max(rGx1, gx); g++)
-      wSum += g === gx ? Math.max(colWidthAt(g), pd.W) : colWidthAt(g) || 30;
-    let dSum = pd.splitY ? pd.splitY[1] : 0;
-    for (let g = Math.min(rGy0, gy); g <= Math.max(rGy1, gy); g++)
-      dSum += g === gy ? Math.max(rowDepthAt(g), pd.D) : rowDepthAt(g) || 30;
-    return wSum <= limits.layW * 10 + 0.5 && dSum <= limits.layD * 10 + 0.5;
-  };
+  // «+» доступен всегда: лимит раскладки — ориентир (рамка на столе),
+  // а не запрет; вылезающую за него сборку видно сразу
   const gridCells = [];
   for (let gy = gy0; gy <= gy1; gy++)
     for (let gx = gx0; gx <= gx1; gx++) {
       const idx = posMap.get(`${gx},${gy}`);
       if (idx !== undefined) {
+        const swapPick = swapArm !== null;
+        const isFirst = swapArm === idx;
         gridCells.push(
           <button
             key={`${gx},${gy}`}
-            onClick={() => { setSel(idx); setSelection(null); }}
+            onClick={() => {
+              if (swapPick) {
+                // режим обмена: первый клик запоминает контейнер, второй
+                // меняет их местами в сетке (размеры и настройки при них)
+                if (swapArm === -1) setSwapArm(idx);
+                else if (swapArm === idx) setSwapArm(-1);
+                else {
+                  setContainers((cs) => cs.map((c, i) =>
+                    i === swapArm ? { ...c, gx: cs[idx].gx, gy: cs[idx].gy }
+                    : i === idx ? { ...c, gx: cs[swapArm].gx, gy: cs[swapArm].gy }
+                    : c));
+                  setSwapArm(null);
+                  setSelection(null);
+                }
+                return;
+              }
+              setSel(idx); setSelection(null);
+            }}
             style={{
               width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-              border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-              background: idx === sel ? "#FFF3EB" : "#fff", color: idx === sel ? ACCENT : "#3D4A5C",
+              border: isFirst ? `2px solid ${SEL}` : idx === sel ? `2px solid ${ACCENT}` : swapPick ? "1px dashed #93B4E8" : "1px solid #D6DDE6",
+              background: isFirst ? "#DBEAFE" : idx === sel ? "#FFF3EB" : "#fff",
+              color: isFirst ? SEL : idx === sel ? ACCENT : "#3D4A5C",
             }}
           >
             №{idx + 1}
@@ -737,7 +786,7 @@ export default function TrayGenerator() {
           posMap.has(`${gx + 1},${gy}`) || posMap.has(`${gx - 1},${gy}`) ||
           posMap.has(`${gx},${gy + 1}`) || posMap.has(`${gx},${gy - 1}`);
         gridCells.push(
-          adjacent && canPlace(gx, gy) ? (
+          adjacent ? (
             <button
               key={`${gx},${gy}`}
               onClick={() => {
@@ -780,6 +829,25 @@ export default function TrayGenerator() {
           <Param label="Наклон в другую сторону" unit="°" value={w.t2} min={0} max={50} step={1} onChange={(v) => updWall(key, { t2: v })} />
         )}
         <Param label="Скругление кромки" unit="мм" value={w.rnd} min={0} max={8} step={0.25} onChange={(v) => updWall(key, { rnd: v })} />
+        {isOuter && (
+          <>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#3D4A5C", cursor: "pointer", margin: "2px 0 4px" }}>
+              <input
+                type="checkbox" checked={!!w.cardHooks}
+                onChange={(e) => updWall(key, { cardHooks: e.target.checked })}
+                style={{ accentColor: SEL }}
+              />
+              Отверстия под визитницу
+            </label>
+            {w.cardHooks && (
+              <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.4 }}>
+                Пара сквозных окон {CARDH.hw}×{CARDH.hh} мм у верха стенки — съёмная визитница цепляется
+                за них крюками. Нужна стенка от {CARDH.minH} мм высотой и сегмент от {CARDH.minW} мм.
+                Скачать деталь — на вкладке «Принтер».
+              </p>
+            )}
+          </>
+        )}
         <div style={{ fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" }}>Спуск кромки дугой</div>
         <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" }}>
           {[["none", "Нет"], ["a", endLabels(key)[0]], ["b", endLabels(key)[1]]].map(([d, t]) => (
@@ -996,6 +1064,24 @@ export default function TrayGenerator() {
                 <Param label="Угол наклона пола" unit="°" value={cc.tiltA || 5} min={1} max={30} step={0.5}
                   onChange={(v) => updCell(selection.i, selection.j, { tiltA: v })} />
               )}
+              <button
+                onClick={() => {
+                  // уровень и наклон этой ячейки — во все ячейки контейнера:
+                  // так задаётся общий уровень пола и общий наклон
+                  const src = { ...cc };
+                  const L3 = layout(cur);
+                  const cells = {};
+                  for (let j = 0; j < L3.nRows; j++)
+                    for (let i = 0; i < L3.nColsAt(j); i++) cells[i + ":" + j] = { ...src };
+                  updCur({ cells });
+                }}
+                style={{
+                  width: "100%", margin: "2px 0 6px", padding: "7px 0", borderRadius: 8, fontSize: 12,
+                  fontWeight: 600, cursor: "pointer", border: `1px solid ${SEL}`, background: "#fff", color: SEL,
+                }}
+              >
+                Применить уровень и наклон ко всем ячейкам
+              </button>
             </div>
           );
         })()}
@@ -1103,6 +1189,18 @@ export default function TrayGenerator() {
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" }}>
           {gridCells}
         </div>
+        <button
+          onClick={() => { setSwapArm(swapArm === null ? -1 : null); }}
+          style={{
+            width: "100%", marginTop: 8, padding: "7px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
+            cursor: "pointer", border: swapArm !== null ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+            background: swapArm !== null ? "#DBEAFE" : "#fff", color: swapArm !== null ? SEL : "#3D4A5C",
+          }}
+        >
+          {swapArm === null ? "⇄ Поменять контейнеры местами"
+            : swapArm === -1 ? "Нажми первый контейнер… (или сюда — отмена)"
+            : `№${swapArm + 1} выбран — нажми второй (или сюда — отмена)`}
+        </button>
         <button
           onClick={fillLayout}
           style={{
@@ -1247,6 +1345,14 @@ export default function TrayGenerator() {
             Скачать вставную перегородку — {insertSize(cur, INS.dir).len} × {insertSize(cur, INS.dir).hgt} мм
           </button>
         )}
+        {Object.values(cur.walls || {}).some((w2) => w2 && w2.cardHooks) && (
+          <button
+            onClick={() => exportSTL(cardHolderSolids(cur), "card_holder.stl")}
+            style={{ width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+          >
+            Скачать визитницу — под отверстия в стенке
+          </button>
+        )}
         {containers.length > 1 && (
           <button
             onClick={exportAll}
@@ -1378,6 +1484,8 @@ export default function TrayGenerator() {
             onChange={(v) => updGorka({ cols: Math.round(v) })} />
           <Param label="Бортик (глубина ячеек)" unit="мм" value={gorka.lip ?? 6} min={2} max={80} step={1}
             onChange={(v) => updGorka({ lip: v })} />
+          <Param label="Общий уровень пола" unit="мм" value={gorka.base ?? 0} min={0} max={120} step={1}
+            onChange={(v) => updGorka({ base: v })} />
           <button
             onClick={() => applyPreset("stairs")}
             style={{
@@ -1393,7 +1501,8 @@ export default function TrayGenerator() {
             высоте. Ступени поднимаются к задней стенке; спинка — самая высокая (слайдер
             «Высота»). Все ступени равной глубины, колонки равной ширины. Бортик — высота
             стенок над полом своей ступени: большой бортик при низком уровне пола даёт
-            глубокие ячейки; он меняет только стенки, уровни полов не трогает. После
+            глубокие ячейки; он меняет только стенки, уровни полов не трогает. Общий уровень
+            пола приподнимает всю лесенку разом (ручные правки уровней сохраняются). После
             применения горка живая: уровень пола любой ячейки и число колонок правятся
             обычными редакторами — бортики пересчитаются сами, новые колонки наследуют
             уровень ряда. «Ступенек» и «Шаг уровня» пересобирают лесенку целиком.

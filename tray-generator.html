@@ -911,13 +911,35 @@ const DEFAULT_RND = 0.8;
 // больше скругления кромки: иначе у самой кромки радиус угла обнуляется
 // и угол вырождается в остриё.
 const DEFAULT_CORNER_R = 2;
-const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1 });
+const defWall = (c) => ({ h: c.H, t1: 0, t2: 0, rnd: DEFAULT_RND, drop: "none", dropH: 3, face: "solid", hexSize: 8, lineStep: 14, seed: 1, cardHooks: false });
 function getWall(c, key) {
     const w = c.walls[key];
     if (!w)
         return defWall(c);
     // высота может превышать H контейнера (башенка-ячейка); потолок — лимит принтера
-    return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? DEFAULT_RND, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1 };
+    return { h: w.h ?? c.H, t1: w.t1 ?? 0, t2: w.t2 ?? 0, rnd: w.rnd ?? DEFAULT_RND, drop: w.drop ?? "none", dropH: w.dropH ?? 3, face: w.face ?? "solid", hexSize: w.hexSize ?? 8, lineStep: w.lineStep ?? 14, seed: w.seed ?? 1, cardHooks: !!w.cardHooks };
+}
+// Перенос настроек ячеек (уровень, наклон) на новую сетку по географии:
+// новая ячейка наследует настройки старой ячейки, накрывавшей её центр —
+// поднятый пол переживает деление на колонки и ряды
+function remapCells(oldC, newC) {
+    if (!oldC.cells || !Object.keys(oldC.cells).length)
+        return {};
+    const Lo = layout(oldC), Ln = layout(newC);
+    const cells = {};
+    for (let j = 0; j < Ln.nRows; j++)
+        for (let i = 0; i < Ln.nColsAt(j); i++) {
+            const xc = Ln.cx0(i, j) + Ln.cw(i, j) / 2;
+            const zc = Ln.cz0(j) + Ln.cd(j) / 2;
+            let jo = 0;
+            for (let jj = 0; jj < Lo.nRows; jj++)
+                if (zc >= Lo.cz0(jj) - oldC.wall)
+                    jo = jj;
+            const src = oldC.cells[Lo.cellIndexAt(jo, xc) + ":" + jo];
+            if (src && Object.keys(src).length)
+                cells[i + ":" + j] = { ...src };
+        }
+    return cells;
 }
 // уровень пола ячейки (лесенка), мм от дна контейнера
 const getCellLvl = (c, i, j) => (c.cells && c.cells[i + ":" + j] && c.cells[i + ":" + j].lvl) || 0;
@@ -1034,6 +1056,47 @@ function layoutIssues(c) {
     }
     return issues;
 }
+// ── src/model/cardholder.js ──
+// ── Съёмная визитница ──
+// Карман для визиток, который цепляется крюками за пару сквозных окон у
+// верха внешней стенки (галка «Отверстия под визитницу» в редакторе
+// стенки). Сам карман — отдельная печатная деталь: спинка прижимается к
+// наружной плоскости стенки, крюки проходят сквозь окна и свисают по
+// внутренней стороне — визитница снимается движением вверх.
+//
+// Печатается лёжа на боку (в STL так и лежит): каждый слой — профиль
+// кармана, поддержки не нужны, под крюками лишь короткое нависание.
+// Окна в стенке: hw×hh, пара с шагом sp, верх окна на top ниже кромки.
+// Стенка должна быть не ниже minH, сегмент — не уже minW.
+const CARDH = { hw: 12, hh: 6, sp: 40, top: 4, minW: 60, minH: 22 };
+// Съёмный карман: спинка + дно + передний борт + два крюка.
+// wallOut контейнера задаёт длину плеча крюка (сквозь стенку).
+function cardHolderSolids(c) {
+    const wallOut = c && Number.isFinite(c.wallOut) ? c.wallOut : 2.9;
+    const W = 70, Hb = 55, T = 2.4; // спинка: ширина, высота, толщина
+    const depth = 14, frontH = 30; // карман: глубина и высота борта
+    const hookW = CARDH.hw - 2; // крюк уже окна на зазор по 1 мм
+    const armT = CARDH.hh - 2.5; // плечо ниже окна — люфт для навешивания
+    const armL = wallOut + 0.6; // плечо проходит стенку насквозь
+    const lipDrop = 10; // носик свисает за внутренней стороной
+    const solids = [];
+    const add = (x0, x1, y0, y1, z0, z1) => solids.push(boxSolid((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, x1 - x0, y1 - y0, z1 - z0, "card"));
+    // натуральная ориентация: x — ширина, y — высота, z — глубина (карман в −z)
+    add(-W / 2, W / 2, 0, Hb, 0, T); // спинка
+    add(-W / 2, W / 2, 0, T, -depth, 0); // дно кармана
+    add(-W / 2, W / 2, 0, frontH, -depth, -depth + T); // передний борт
+    for (const s of [-1, 1]) {
+        const x0 = (s * CARDH.sp) / 2 - hookW / 2, x1 = (s * CARDH.sp) / 2 + hookW / 2;
+        add(x0, x1, Hb - armT, Hb, T, T + armL); // плечо
+        add(x0, x1, Hb - armT - lipDrop, Hb, T + armL, T + armL + T); // носик
+    }
+    // повернуть на бок (вокруг Z, определитель +1 — нормали целы) и
+    // поставить на стол: вертикаль печати — вдоль ширины детали
+    return solids.map((b) => ({
+        tag: "card",
+        tris: b.tris.map((t) => t.map(([x, y, z]) => [y, W / 2 - x, z + depth])),
+    }));
+}
 // ── src/model/build.js ──
 // ══════════════════════════════════════════════════════════════
 // Полная сборка контейнера в набор выпуклых тел (solids).
@@ -1149,12 +1212,13 @@ function buildContainer(c, conn, opts = {}) {
                 segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
         }
         const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
-        let h = Infinity, rnd = 0, best = -1e9;
+        let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
         for (const sg of segs) {
             if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01)
                 continue;
             const wc = getWall(c, sg.key);
             h = Math.min(h, wc.h);
+            hMax = Math.max(hMax, wc.h);
             const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
             if (ov > best) {
                 best = ov;
@@ -1164,16 +1228,41 @@ function buildContainer(c, conn, opts = {}) {
         if (!Number.isFinite(h)) {
             const wc = getWall(c, `o:${sideL}:0`);
             h = wc.h;
+            hMax = wc.h;
             rnd = wc.rnd;
         }
-        return { vc, h, rnd };
+        // even: все сегменты под зоной одной высоты. На ступенчатой стенке
+        // (горка) замок не ставится: вырезать зону из сегментов разной высоты
+        // и вернуть плоскую — значит разломать лесенку на куски
+        return { vc, h, rnd, even: hMax - h < 0.01 };
     };
     const unitsOf = (side) => conn[side] && CONN.fits
-        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.h >= lockMinH(CONN))
+        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.even && u.h >= lockMinH(CONN))
         : [];
     const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
     const zonesFrom = (units) => units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
     const zN = zonesFrom(uN), zS = zonesFrom(uS), zW = zonesFrom(uW), zE = zonesFrom(uE);
+    // ── Окна под съёмную визитницу ──
+    // Пара сквозных окон у верха внешней стенки (галка в редакторе стенки).
+    // Окно режет стенку зоной на всю высоту, обратно ставятся низ (на всю
+    // толщину) и верх со скруглённой кромкой — между ними сквозной проём.
+    const cardHoleVs = (wc, a, b, zones) => {
+        if (!wc.cardHooks || wc.h < CARDH.minH || b - a < CARDH.minW)
+            return [];
+        const mid = (a + b) / 2;
+        return [mid - CARDH.sp / 2, mid + CARDH.sp / 2].filter((vc) => zones.every(([za, zb]) => vc + CARDH.hw / 2 <= za + 0.01 || vc - CARDH.hw / 2 >= zb - 0.01));
+    };
+    const withCardZones = (zones, holes) => [...zones, ...holes.map((vc) => [vc - CARDH.hw / 2, vc + CARDH.hw / 2])].sort((p, q) => p[0] - q[0]);
+    const pushCardHolePieces = (key, wc, sym, vc, mapFn) => {
+        const y1 = wc.h - CARDH.top, y0 = y1 - CARDH.hh;
+        const a = vc - CARDH.hw / 2, b = vc + CARDH.hw / 2;
+        const q = sym
+            ? [[-wallOut / 2, 0], [wallOut / 2, 0], [wallOut / 2, y0], [-wallOut / 2, y0]]
+            : [[0, 0], [wallOut, 0], [wallOut, y0], [0, y0]];
+        pushProfiled([q], mapFn, a, b, key); // низ проёма
+        const parts = wallProfile(wallOut, wc.h, wc.rnd, sym).map((quad, qi) => qi === 0 ? quad.map(([o, y]) => [o, y === 0 ? y1 : y]) : quad);
+        pushProfiled(parts, mapFn, a, b, key); // верх проёма с кромкой
+    };
     const addRamp = (orient, facePos, dir, s0, s1, h, tilt, cellSize, embed, thk, wc, yBase, tag) => {
         if (tilt < 0.5 || h <= yBase + 0.3)
             return;
@@ -1977,11 +2066,14 @@ function buildContainer(c, conn, opts = {}) {
                     : (o, y, x) => [x, y, D / 2 - off - o];
                 // в углах корпуса торец подрезается под скругление W/E-стенки
                 const rL = side === "n" ? cutNW_ns : cutSW_ns, rR = side === "n" ? cutNE_ns : cutSE_ns;
-                for (const [a, b] of splitRange(bx0, bx1, zones))
+                const cardVs = cardHoleVs(wc, bx0, bx1, zones);
+                for (const [a, b] of splitRange(bx0, bx1, withCardZones(zones, cardVs)))
                     pushWallAuto(key, wc, wallOut, sym, a, b, bx0, bx1, mapFn, {
                         a: a <= -W / 2 + 0.01 ? rL : 0,
                         b: b >= W / 2 - 0.01 ? rR : 0,
                     });
+                for (const vc of cardVs)
+                    pushCardHolePieces(key, wc, sym, vc, mapFn);
                 const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
                 // пандус не должен войти в полость прижатого к стенке бокса
                 for (const [ra, rb] of splitRange(x0, x1, boxZonesAtWall(side)))
@@ -2003,11 +2095,14 @@ function buildContainer(c, conn, opts = {}) {
                     ? (o, y, z) => [-W / 2 + off + o, y, z]
                     : (o, y, z) => [W / 2 - off - o, y, z];
                 const rT = side === "w" ? cutNW_we : cutNE_we, rB = side === "w" ? cutSW_we : cutSE_we;
-                for (const [a, b] of splitRange(bz0, bz1, zones))
+                const cardVs = cardHoleVs(wc, bz0, bz1, zones);
+                for (const [a, b] of splitRange(bz0, bz1, withCardZones(zones, cardVs)))
                     pushWallAuto(key, wc, wallOut, sym, a, b, bz0, bz1, mapFn, {
                         a: a <= -D / 2 + 0.01 ? rT : 0,
                         b: b >= D / 2 - 0.01 ? rB : 0,
                     });
+                for (const vc of cardVs)
+                    pushCardHolePieces(key, wc, sym, vc, mapFn);
                 const hRamp = wc.drop !== "none" ? Math.min(wc.h, wc.dropH) : wc.h;
                 for (const [ra, rb] of splitRange(z0, z1, boxZonesAtWall(side)))
                     addRamp("x", side === "w" ? -W / 2 + wallOut : W / 2 - wallOut, side === "w" ? 1 : -1, ra, rb, hRamp, wc.t1, L.cw(side === "w" ? 0 : L.nColsAt(j) - 1, j), wallOut - 0.4, wallOut, wc, floor + cellLvl(side === "w" ? 0 : L.nColsAt(j) - 1, j), key);
@@ -2408,7 +2503,7 @@ function buildContainer(c, conn, opts = {}) {
 // ступени на отсеки), бортик (высота стенок над полом — большой бортик
 // при низком поле даёт глубокие ячейки). Ступени равной глубины, колонки
 // равной ширины — никакого «остатка» последнему ряду.
-const GORKA_DEF = { steps: 3, stepH: 15, cols: 1, lip: 6 };
+const GORKA_DEF = { steps: 3, stepH: 15, cols: 1, lip: 6, base: 0 };
 // бортик над полом своей ступени по умолчанию
 const LIP = 6;
 // ── Горка — «живой» пресет ──
@@ -2540,18 +2635,21 @@ function presetContainer(c, kind, limits, opts = {}) {
         const n = Math.max(2, Math.min(12, Math.round(opts.steps ?? GORKA_DEF.steps)));
         const nCols = Math.max(1, Math.min(8, Math.round(opts.cols ?? GORKA_DEF.cols)));
         const lip = Math.max(2, Math.min(120, opts.lip ?? GORKA_DEF.lip));
+        // общий уровень пола: вся лесенка приподнята на эту высоту
+        const lvl0 = Math.max(0, Math.min(200, opts.base ?? GORKA_DEF.base));
         // спинка должна возвышаться и над верхней ступенью, и над её бортиком
         const head = Math.max(20, lip + 2);
         // шаг уровня ужимается так, чтобы вся лесенка со спинкой влезла в
         // лимит принтера по высоте — слайдером её не задрать выше maxH
-        const maxStep = Math.max(3, (maxH - c.floor - head) / Math.max(1, n - 1));
+        const maxStep = Math.max(3, (maxH - c.floor - head - lvl0) / Math.max(1, n - 1));
         const stepH = Math.max(3, Math.min(60, opts.stepH ?? GORKA_DEF.stepH, maxStep));
-        const H = Math.min(maxH, r1((n - 1) * stepH + c.floor + Math.max(head, stepH)));
+        const H = Math.min(maxH, r1(lvl0 + (n - 1) * stepH + c.floor + Math.max(head, stepH)));
         const cells = {};
-        for (let j = 1; j < n; j++)
+        for (let j = 0; j < n; j++)
             for (let i = 0; i < nCols; i++)
-                cells[i + ":" + j] = { lvl: r1(j * stepH) };
-        const next = { ...base, H, rows: n, cols: nCols, cells, stairsLip: lip };
+                if (lvl0 + j * stepH > 0)
+                    cells[i + ":" + j] = { lvl: r1(lvl0 + j * stepH) };
+        const next = { ...base, H, rows: n, cols: nCols, cells, stairsLip: lip, stairsBase: lvl0 };
         next.walls = applyStairsWalls(next);
         return next;
     }
@@ -2618,6 +2716,8 @@ const sanitizeWall = (w) => {
         out.drop = o.drop;
     if (["solid", "hex", "lines"].includes(o.face))
         out.face = o.face;
+    if (o.cardHooks)
+        out.cardHooks = true;
     return out;
 };
 const sanitizeContainer = (c0) => {
@@ -2691,6 +2791,8 @@ const sanitizeContainer = (c0) => {
         delete c.preset;
     if (c.stairsLip !== undefined)
         c.stairsLip = num(c.stairsLip, 6, 2, 200);
+    if (c.stairsBase !== undefined)
+        c.stairsBase = num(c.stairsBase, 0, 0, 500);
     return c;
 };
 // Приведение сохранённого/импортированного проекта к текущей модели:
@@ -3462,16 +3564,23 @@ function TrayGenerator() {
         const lockO = cur.lockOuter, lockC = cur.lockCell;
         if (lockC && lockO)
             return; // оба замка: структура заблокирована
+        // при изменении сетки настройки ячеек (уровень, наклон) переезжают на
+        // новую сетку по географии — поднятый пол переживает деление
+        const withRemap = (extra = {}) => {
+            if (!("cols" in patch) && !("rows" in patch))
+                return { ...patch, ...extra };
+            return { ...patch, ...extra, cells: remapCells(cur, { ...cur, ...patch, ...extra }) };
+        };
         if (lockC && cur.gridMode !== "size") {
             const m = { ...cur, ...patch };
             const W2 = 2 * m.wallOut + m.cols * cur.cellW0 + (m.cols - 1) * m.wall;
             const D2 = 2 * m.wallOut + m.rows * cur.cellD0 + (m.rows - 1) * m.wall;
             if (W2 > limits.maxW + 0.01 || D2 > limits.maxD + 0.01 || W2 < 30 || D2 < 30)
                 return; // не влезает в принтер
-            updCur({ ...patch, W: Math.round(W2 * 10) / 10, D: Math.round(D2 * 10) / 10 });
+            updCur(withRemap({ W: Math.round(W2 * 10) / 10, D: Math.round(D2 * 10) / 10 }));
             return;
         }
-        updCur(patch);
+        updCur(withRemap());
     };
     // Магнит соседей (переключатель на вкладке «Раскладка»): сборка
     // сохраняет общий габарит. Ужал контейнер — соседние колонки/ряды
@@ -3593,6 +3702,9 @@ function TrayGenerator() {
     // ── Пресеты контейнеров ──
     // настройки «Горки»: ступенек, шаг уровня (мм), глубина ступени (мм)
     const [gorka, setGorka] = useState({ ...GORKA_DEF });
+    // обмен контейнеров местами в раскладке: null — выкл, -1 — ждём первый
+    // клик, ≥0 — индекс выбранного первым
+    const [swapArm, setSwapArm] = useState(null);
     const applyPreset = (kind, g = gorka) => {
         setContainers((cs) => cs.map((x, i) => (i === sel ? presetContainer(x, kind, limits, g) : x)));
         setSelection(null);
@@ -3612,6 +3724,27 @@ function TrayGenerator() {
             updCur({ stairsLip: Math.max(2, Math.min(120, g.lip)) });
         else if ("cols" in patch)
             updCur({ cols: Math.max(1, Math.min(8, Math.round(g.cols))) });
+        else if ("base" in patch) {
+            // общий уровень пола: сдвигаем ВСЕ уровни на разницу — ручные
+            // правки уровней сохраняются, спинка едет вместе с лесенкой
+            const nb = Math.max(0, Math.min(200, g.base));
+            const delta = Math.round((nb - (cur.stairsBase ?? 0)) * 10) / 10;
+            if (Math.abs(delta) < 0.001)
+                return;
+            const L2 = layout(cur);
+            const cells = { ...(cur.cells || {}) };
+            for (let j = 0; j < L2.nRows; j++)
+                for (let i = 0; i < L2.nColsAt(j); i++) {
+                    const k = i + ":" + j;
+                    const e = cells[k] || {};
+                    cells[k] = { ...e, lvl: Math.max(0, Math.round(((e.lvl ?? 0) + delta) * 10) / 10) };
+                }
+            updCur({
+                stairsBase: nb,
+                cells,
+                H: Math.min(limits.maxH, Math.max(20, Math.round((cur.H + delta) * 10) / 10)),
+            });
+        }
         else
             applyPreset("stairs", g);
     };
@@ -3859,15 +3992,22 @@ function TrayGenerator() {
             acc += rowD[g] + gap;
         }
         const totalD = acc - gap;
+        // Кто в паре несёт рельс (наружный выступ), а кто паз. По умолчанию —
+        // западный/северный. Но горка всегда несёт рельс: паз в её ступенчатых
+        // стенках не помещается, а рельс встаёт на ровный участок лесенки.
+        const railCarrier = (a, b) => {
+            const aS = a.preset === "stairs", bS = b.preset === "stairs";
+            return aS === bS ? true : aS;
+        };
         const items = containers.map((c) => {
             const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
             const conn = !connect
                 ? { N: null, S: null, W: null, E: null }
                 : {
-                    E: E ? { male: true, vs: connectorVs(Math.min(c.D, E.D)) } : null,
-                    W: Wn ? { male: false, vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
-                    S: S ? { male: true, vs: connectorVs(Math.min(c.W, S.W)) } : null,
-                    N: N ? { male: false, vs: connectorVs(Math.min(c.W, N.W)) } : null,
+                    E: E ? { male: railCarrier(c, E), vs: connectorVs(Math.min(c.D, E.D)) } : null,
+                    W: Wn ? { male: !railCarrier(Wn, c), vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
+                    S: S ? { male: railCarrier(c, S), vs: connectorVs(Math.min(c.W, S.W)) } : null,
+                    N: N ? { male: !railCarrier(N, c), vs: connectorVs(Math.min(c.W, N.W)) } : null,
                 };
             const ck = JSON.stringify(conn);
             let hit = geoCache.current.get(c);
@@ -4082,25 +4222,39 @@ function TrayGenerator() {
         }
         return { W: Math.round(W * 10) / 10, D: Math.round(D * 10) / 10, splitX, splitY };
     };
-    const canPlace = (gx, gy) => {
-        const pd = plannedDims(gx, gy);
-        let wSum = pd.splitX ? pd.splitX[1] : 0;
-        for (let g = Math.min(rGx0, gx); g <= Math.max(rGx1, gx); g++)
-            wSum += g === gx ? Math.max(colWidthAt(g), pd.W) : colWidthAt(g) || 30;
-        let dSum = pd.splitY ? pd.splitY[1] : 0;
-        for (let g = Math.min(rGy0, gy); g <= Math.max(rGy1, gy); g++)
-            dSum += g === gy ? Math.max(rowDepthAt(g), pd.D) : rowDepthAt(g) || 30;
-        return wSum <= limits.layW * 10 + 0.5 && dSum <= limits.layD * 10 + 0.5;
-    };
+    // «+» доступен всегда: лимит раскладки — ориентир (рамка на столе),
+    // а не запрет; вылезающую за него сборку видно сразу
     const gridCells = [];
     for (let gy = gy0; gy <= gy1; gy++)
         for (let gx = gx0; gx <= gx1; gx++) {
             const idx = posMap.get(`${gx},${gy}`);
             if (idx !== undefined) {
-                gridCells.push(React.createElement("button", { key: `${gx},${gy}`, onClick: () => { setSel(idx); setSelection(null); }, style: {
+                const swapPick = swapArm !== null;
+                const isFirst = swapArm === idx;
+                gridCells.push(React.createElement("button", { key: `${gx},${gy}`, onClick: () => {
+                        if (swapPick) {
+                            // режим обмена: первый клик запоминает контейнер, второй
+                            // меняет их местами в сетке (размеры и настройки при них)
+                            if (swapArm === -1)
+                                setSwapArm(idx);
+                            else if (swapArm === idx)
+                                setSwapArm(-1);
+                            else {
+                                setContainers((cs) => cs.map((c, i) => i === swapArm ? { ...c, gx: cs[idx].gx, gy: cs[idx].gy }
+                                    : i === idx ? { ...c, gx: cs[swapArm].gx, gy: cs[swapArm].gy }
+                                        : c));
+                                setSwapArm(null);
+                                setSelection(null);
+                            }
+                            return;
+                        }
+                        setSel(idx);
+                        setSelection(null);
+                    }, style: {
                         width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-                        border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                        background: idx === sel ? "#FFF3EB" : "#fff", color: idx === sel ? ACCENT : "#3D4A5C",
+                        border: isFirst ? `2px solid ${SEL}` : idx === sel ? `2px solid ${ACCENT}` : swapPick ? "1px dashed #93B4E8" : "1px solid #D6DDE6",
+                        background: isFirst ? "#DBEAFE" : idx === sel ? "#FFF3EB" : "#fff",
+                        color: isFirst ? SEL : idx === sel ? ACCENT : "#3D4A5C",
                     } },
                     "\u2116",
                     idx + 1));
@@ -4108,7 +4262,7 @@ function TrayGenerator() {
             else {
                 const adjacent = posMap.has(`${gx + 1},${gy}`) || posMap.has(`${gx - 1},${gy}`) ||
                     posMap.has(`${gx},${gy + 1}`) || posMap.has(`${gx},${gy - 1}`);
-                gridCells.push(adjacent && canPlace(gx, gy) ? (React.createElement("button", { key: `${gx},${gy}`, onClick: () => {
+                gridCells.push(adjacent ? (React.createElement("button", { key: `${gx},${gy}`, onClick: () => {
                         const pd = plannedDims(gx, gy);
                         const fresh = [{ ...makeContainer(null, gx, gy), W: pd.W, D: pd.D }];
                         if (pd.splitX) {
@@ -4137,6 +4291,20 @@ function TrayGenerator() {
             React.createElement(Param, { label: isOuter ? "Наклон внутрь" : "Наклон в одну сторону", unit: "\u00B0", value: w.t1, min: 0, max: 50, step: 1, onChange: (v) => updWall(key, { t1: v }) }),
             !isOuter && (React.createElement(Param, { label: "\u041D\u0430\u043A\u043B\u043E\u043D \u0432 \u0434\u0440\u0443\u0433\u0443\u044E \u0441\u0442\u043E\u0440\u043E\u043D\u0443", unit: "\u00B0", value: w.t2, min: 0, max: 50, step: 1, onChange: (v) => updWall(key, { t2: v }) })),
             React.createElement(Param, { label: "\u0421\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u0435 \u043A\u0440\u043E\u043C\u043A\u0438", unit: "\u043C\u043C", value: w.rnd, min: 0, max: 8, step: 0.25, onChange: (v) => updWall(key, { rnd: v }) }),
+            isOuter && (React.createElement(React.Fragment, null,
+                React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#3D4A5C", cursor: "pointer", margin: "2px 0 4px" } },
+                    React.createElement("input", { type: "checkbox", checked: !!w.cardHooks, onChange: (e) => updWall(key, { cardHooks: e.target.checked }), style: { accentColor: SEL } }),
+                    "\u041E\u0442\u0432\u0435\u0440\u0441\u0442\u0438\u044F \u043F\u043E\u0434 \u0432\u0438\u0437\u0438\u0442\u043D\u0438\u0446\u0443"),
+                w.cardHooks && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.4 } },
+                    "\u041F\u0430\u0440\u0430 \u0441\u043A\u0432\u043E\u0437\u043D\u044B\u0445 \u043E\u043A\u043E\u043D ",
+                    CARDH.hw,
+                    "\u00D7",
+                    CARDH.hh,
+                    " \u043C\u043C \u0443 \u0432\u0435\u0440\u0445\u0430 \u0441\u0442\u0435\u043D\u043A\u0438 \u2014 \u0441\u044A\u0451\u043C\u043D\u0430\u044F \u0432\u0438\u0437\u0438\u0442\u043D\u0438\u0446\u0430 \u0446\u0435\u043F\u043B\u044F\u0435\u0442\u0441\u044F \u0437\u0430 \u043D\u0438\u0445 \u043A\u0440\u044E\u043A\u0430\u043C\u0438. \u041D\u0443\u0436\u043D\u0430 \u0441\u0442\u0435\u043D\u043A\u0430 \u043E\u0442 ",
+                    CARDH.minH,
+                    " \u043C\u043C \u0432\u044B\u0441\u043E\u0442\u043E\u0439 \u0438 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 \u043E\u0442 ",
+                    CARDH.minW,
+                    " \u043C\u043C. \u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0434\u0435\u0442\u0430\u043B\u044C \u2014 \u043D\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0435 \u00AB\u041F\u0440\u0438\u043D\u0442\u0435\u0440\u00BB.")))),
             React.createElement("div", { style: { fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" } }, "\u0421\u043F\u0443\u0441\u043A \u043A\u0440\u043E\u043C\u043A\u0438 \u0434\u0443\u0433\u043E\u0439"),
             React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap" } }, [["none", "Нет"], ["a", endLabels(key)[0]], ["b", endLabels(key)[1]]].map(([d, t]) => (React.createElement("button", { key: d, onClick: () => updWall(key, { drop: d }), style: {
                     padding: "4px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
@@ -4239,7 +4407,21 @@ function TrayGenerator() {
                             border: fDir === d ? `2px solid ${SEL}` : "1px solid #D6DDE6",
                             background: fDir === d ? "#DBEAFE" : "#fff", color: fDir === d ? SEL : "#3D4A5C",
                         } }, t)))),
-                    fDir !== "none" && (React.createElement(Param, { label: "\u0423\u0433\u043E\u043B \u043D\u0430\u043A\u043B\u043E\u043D\u0430 \u043F\u043E\u043B\u0430", unit: "\u00B0", value: cc.tiltA || 5, min: 1, max: 30, step: 0.5, onChange: (v) => updCell(selection.i, selection.j, { tiltA: v }) }))));
+                    fDir !== "none" && (React.createElement(Param, { label: "\u0423\u0433\u043E\u043B \u043D\u0430\u043A\u043B\u043E\u043D\u0430 \u043F\u043E\u043B\u0430", unit: "\u00B0", value: cc.tiltA || 5, min: 1, max: 30, step: 0.5, onChange: (v) => updCell(selection.i, selection.j, { tiltA: v }) })),
+                    React.createElement("button", { onClick: () => {
+                            // уровень и наклон этой ячейки — во все ячейки контейнера:
+                            // так задаётся общий уровень пола и общий наклон
+                            const src = { ...cc };
+                            const L3 = layout(cur);
+                            const cells = {};
+                            for (let j = 0; j < L3.nRows; j++)
+                                for (let i = 0; i < L3.nColsAt(j); i++)
+                                    cells[i + ":" + j] = { ...src };
+                            updCur({ cells });
+                        }, style: {
+                            width: "100%", margin: "2px 0 6px", padding: "7px 0", borderRadius: 8, fontSize: 12,
+                            fontWeight: 600, cursor: "pointer", border: `1px solid ${SEL}`, background: "#fff", color: SEL,
+                        } }, "\u041F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0438 \u043D\u0430\u043A\u043B\u043E\u043D \u043A\u043E \u0432\u0441\u0435\u043C \u044F\u0447\u0435\u0439\u043A\u0430\u043C")));
             })(),
             React.createElement("div", { style: { fontSize: 12, color: "#3D4A5C", fontWeight: 600, margin: "6px 0 4px" } }, "\u041D\u0430\u043A\u043B\u043E\u043D \u0441\u0442\u0435\u043D\u043E\u043A \u0432\u043D\u0443\u0442\u0440\u044C"),
             keys.map(({ side, key, slot }) => (React.createElement(Param, { key: key + slot, label: side, unit: "\u00B0", value: getWall(cur, key)[slot], min: 0, max: 50, step: 1, onChange: (v) => updWall(key, { [slot]: v }) }))),
@@ -4299,6 +4481,13 @@ function TrayGenerator() {
                     React.createElement("b", null, "+"),
                     " \u2014 \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u0443\u0435\u0442\u0441\u044F \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 (\u0440\u0430\u0437\u043C\u0435\u0440\u043E\u043C \u0441 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u043F\u043E \u0448\u0438\u0440\u0438\u043D\u0435 \u0438 \u0433\u043B\u0443\u0431\u0438\u043D\u0435); \u043A\u043E\u0433\u0434\u0430 \u043C\u0435\u0441\u0442\u0430 \u0432 \u043B\u0438\u043C\u0438\u0442\u0435 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043C\u0435\u043D\u044C\u0448\u0435, \u0447\u0435\u043C \u043D\u0430 \u0434\u0432\u0430 \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0445, \u043D\u043E\u0432\u044B\u0439 \u0440\u0430\u0441\u0442\u044F\u0433\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0438 \u0437\u0430\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u043E\u0441\u0442\u0430\u0442\u043E\u043A (\u0430 \u0435\u0441\u043B\u0438 \u043E\u0441\u0442\u0430\u0442\u043E\u043A \u0431\u043E\u043B\u044C\u0448\u0435 \u043B\u0438\u043C\u0438\u0442\u0430 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u2014 \u0432\u0441\u0442\u0430\u0432\u044F\u0442\u0441\u044F \u0441\u0440\u0430\u0437\u0443 \u0434\u0432\u0430, \u043F\u043E\u043F\u043E\u043B\u0430\u043C). \u0412 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044E\u0449\u0435\u043C \u0440\u044F\u0434\u0443/\u043A\u043E\u043B\u043E\u043D\u043A\u0435 \u0440\u0430\u0437\u043C\u0435\u0440 \u043F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0434 \u0441\u043E\u0441\u0435\u0434\u0435\u0439."),
                 React.createElement("div", { style: { display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" } }, gridCells),
+                React.createElement("button", { onClick: () => { setSwapArm(swapArm === null ? -1 : null); }, style: {
+                        width: "100%", marginTop: 8, padding: "7px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
+                        cursor: "pointer", border: swapArm !== null ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                        background: swapArm !== null ? "#DBEAFE" : "#fff", color: swapArm !== null ? SEL : "#3D4A5C",
+                    } }, swapArm === null ? "⇄ Поменять контейнеры местами"
+                    : swapArm === -1 ? "Нажми первый контейнер… (или сюда — отмена)"
+                        : `№${swapArm + 1} выбран — нажми второй (или сюда — отмена)`),
                 React.createElement("button", { onClick: fillLayout, style: {
                         width: "100%", marginTop: 8, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
                         cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
@@ -4383,6 +4572,7 @@ function TrayGenerator() {
                         " \u00D7 ",
                         insertSize(cur, INS.dir).hgt,
                         " \u043C\u043C")),
+                    Object.values(cur.walls || {}).some((w2) => w2 && w2.cardHooks) && (React.createElement("button", { onClick: () => exportSTL(cardHolderSolids(cur), "card_holder.stl"), style: { width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: "#16202E", border: "1.5px solid #D6DDE6", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" } }, "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0432\u0438\u0437\u0438\u0442\u043D\u0438\u0446\u0443 \u2014 \u043F\u043E\u0434 \u043E\u0442\u0432\u0435\u0440\u0441\u0442\u0438\u044F \u0432 \u0441\u0442\u0435\u043D\u043A\u0435")),
                     containers.length > 1 && (React.createElement("button", { onClick: exportAll, style: { width: "100%", marginTop: 8, padding: "10px 0", background: "#fff", color: ACCENT, border: `1.5px solid ${ACCENT}`, borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer" } },
                         "\u0421\u043A\u0430\u0447\u0430\u0442\u044C \u0432\u0441\u0435 (",
                         containers.length,
@@ -4451,11 +4641,12 @@ function TrayGenerator() {
                             React.createElement(Param, { label: "\u0428\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F", unit: "\u043C\u043C", value: gorka.stepH, min: 3, max: Math.max(3, Math.min(60, Math.floor((limits.maxH - (cur?.floor ?? 1.6) - 20) / Math.max(1, gorka.steps - 1)))), step: 1, onChange: (v) => updGorka({ stepH: v }) }),
                             React.createElement(Param, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", unit: "\u0448\u0442", value: gorka.cols ?? 1, min: 1, max: 8, step: 1, onChange: (v) => updGorka({ cols: Math.round(v) }) }),
                             React.createElement(Param, { label: "\u0411\u043E\u0440\u0442\u0438\u043A (\u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u044F\u0447\u0435\u0435\u043A)", unit: "\u043C\u043C", value: gorka.lip ?? 6, min: 2, max: 80, step: 1, onChange: (v) => updGorka({ lip: v }) }),
+                            React.createElement(Param, { label: "\u041E\u0431\u0449\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430", unit: "\u043C\u043C", value: gorka.base ?? 0, min: 0, max: 120, step: 1, onChange: (v) => updGorka({ base: v }) }),
                             React.createElement("button", { onClick: () => applyPreset("stairs"), style: {
                                     width: "100%", margin: "2px 0 8px", padding: "8px 0", borderRadius: 8, fontSize: 12.5,
                                     fontWeight: 700, cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
                                 } }, "\u0413\u043E\u0440\u043A\u0430 \u2014 \u043F\u0440\u0438\u043C\u0435\u043D\u0438\u0442\u044C"),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, "\u042D\u0442\u0438 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u043E\u0442\u043D\u043E\u0441\u044F\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A \u0433\u043E\u0440\u043A\u0435: \u043F\u043E\u043A\u0430 \u043E\u043D\u0430 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0430, \u043E\u043D\u0438 \u043D\u0438 \u043D\u0430 \u0447\u0442\u043E \u043D\u0435 \u0432\u043B\u0438\u044F\u044E\u0442, \u0430 \u0448\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u0432\u0441\u044F \u043B\u0435\u0441\u0435\u043D\u043A\u0430 \u0432\u043B\u0435\u0437\u0430\u043B\u0430 \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u043F\u043E \u0432\u044B\u0441\u043E\u0442\u0435. \u0421\u0442\u0443\u043F\u0435\u043D\u0438 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u044E\u0442\u0441\u044F \u043A \u0437\u0430\u0434\u043D\u0435\u0439 \u0441\u0442\u0435\u043D\u043A\u0435; \u0441\u043F\u0438\u043D\u043A\u0430 \u2014 \u0441\u0430\u043C\u0430\u044F \u0432\u044B\u0441\u043E\u043A\u0430\u044F (\u0441\u043B\u0430\u0439\u0434\u0435\u0440 \u00AB\u0412\u044B\u0441\u043E\u0442\u0430\u00BB). \u0412\u0441\u0435 \u0441\u0442\u0443\u043F\u0435\u043D\u0438 \u0440\u0430\u0432\u043D\u043E\u0439 \u0433\u043B\u0443\u0431\u0438\u043D\u044B, \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u0440\u0430\u0432\u043D\u043E\u0439 \u0448\u0438\u0440\u0438\u043D\u044B. \u0411\u043E\u0440\u0442\u0438\u043A \u2014 \u0432\u044B\u0441\u043E\u0442\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u043D\u0430\u0434 \u043F\u043E\u043B\u043E\u043C \u0441\u0432\u043E\u0435\u0439 \u0441\u0442\u0443\u043F\u0435\u043D\u0438: \u0431\u043E\u043B\u044C\u0448\u043E\u0439 \u0431\u043E\u0440\u0442\u0438\u043A \u043F\u0440\u0438 \u043D\u0438\u0437\u043A\u043E\u043C \u0443\u0440\u043E\u0432\u043D\u0435 \u043F\u043E\u043B\u0430 \u0434\u0430\u0451\u0442 \u0433\u043B\u0443\u0431\u043E\u043A\u0438\u0435 \u044F\u0447\u0435\u0439\u043A\u0438; \u043E\u043D \u043C\u0435\u043D\u044F\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u0442\u0435\u043D\u043A\u0438, \u0443\u0440\u043E\u0432\u043D\u0438 \u043F\u043E\u043B\u043E\u0432 \u043D\u0435 \u0442\u0440\u043E\u0433\u0430\u0435\u0442. \u041F\u043E\u0441\u043B\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0433\u043E\u0440\u043A\u0430 \u0436\u0438\u0432\u0430\u044F: \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 \u043B\u044E\u0431\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u0438 \u0447\u0438\u0441\u043B\u043E \u043A\u043E\u043B\u043E\u043D\u043E\u043A \u043F\u0440\u0430\u0432\u044F\u0442\u0441\u044F \u043E\u0431\u044B\u0447\u043D\u044B\u043C\u0438 \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430\u043C\u0438 \u2014 \u0431\u043E\u0440\u0442\u0438\u043A\u0438 \u043F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u044E\u0442\u0441\u044F \u0441\u0430\u043C\u0438, \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u043D\u0430\u0441\u043B\u0435\u0434\u0443\u044E\u0442 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0440\u044F\u0434\u0430. \u00AB\u0421\u0442\u0443\u043F\u0435\u043D\u0435\u043A\u00BB \u0438 \u00AB\u0428\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F\u00BB \u043F\u0435\u0440\u0435\u0441\u043E\u0431\u0438\u0440\u0430\u044E\u0442 \u043B\u0435\u0441\u0435\u043D\u043A\u0443 \u0446\u0435\u043B\u0438\u043A\u043E\u043C."))),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } }, "\u042D\u0442\u0438 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u044B \u043E\u0442\u043D\u043E\u0441\u044F\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A \u0433\u043E\u0440\u043A\u0435: \u043F\u043E\u043A\u0430 \u043E\u043D\u0430 \u043D\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0430, \u043E\u043D\u0438 \u043D\u0438 \u043D\u0430 \u0447\u0442\u043E \u043D\u0435 \u0432\u043B\u0438\u044F\u044E\u0442, \u0430 \u0448\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F \u043E\u0433\u0440\u0430\u043D\u0438\u0447\u0435\u043D \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u0432\u0441\u044F \u043B\u0435\u0441\u0435\u043D\u043A\u0430 \u0432\u043B\u0435\u0437\u0430\u043B\u0430 \u0432 \u043B\u0438\u043C\u0438\u0442 \u043F\u0440\u0438\u043D\u0442\u0435\u0440\u0430 \u043F\u043E \u0432\u044B\u0441\u043E\u0442\u0435. \u0421\u0442\u0443\u043F\u0435\u043D\u0438 \u043F\u043E\u0434\u043D\u0438\u043C\u0430\u044E\u0442\u0441\u044F \u043A \u0437\u0430\u0434\u043D\u0435\u0439 \u0441\u0442\u0435\u043D\u043A\u0435; \u0441\u043F\u0438\u043D\u043A\u0430 \u2014 \u0441\u0430\u043C\u0430\u044F \u0432\u044B\u0441\u043E\u043A\u0430\u044F (\u0441\u043B\u0430\u0439\u0434\u0435\u0440 \u00AB\u0412\u044B\u0441\u043E\u0442\u0430\u00BB). \u0412\u0441\u0435 \u0441\u0442\u0443\u043F\u0435\u043D\u0438 \u0440\u0430\u0432\u043D\u043E\u0439 \u0433\u043B\u0443\u0431\u0438\u043D\u044B, \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u0440\u0430\u0432\u043D\u043E\u0439 \u0448\u0438\u0440\u0438\u043D\u044B. \u0411\u043E\u0440\u0442\u0438\u043A \u2014 \u0432\u044B\u0441\u043E\u0442\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u043D\u0430\u0434 \u043F\u043E\u043B\u043E\u043C \u0441\u0432\u043E\u0435\u0439 \u0441\u0442\u0443\u043F\u0435\u043D\u0438: \u0431\u043E\u043B\u044C\u0448\u043E\u0439 \u0431\u043E\u0440\u0442\u0438\u043A \u043F\u0440\u0438 \u043D\u0438\u0437\u043A\u043E\u043C \u0443\u0440\u043E\u0432\u043D\u0435 \u043F\u043E\u043B\u0430 \u0434\u0430\u0451\u0442 \u0433\u043B\u0443\u0431\u043E\u043A\u0438\u0435 \u044F\u0447\u0435\u0439\u043A\u0438; \u043E\u043D \u043C\u0435\u043D\u044F\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u0442\u0435\u043D\u043A\u0438, \u0443\u0440\u043E\u0432\u043D\u0438 \u043F\u043E\u043B\u043E\u0432 \u043D\u0435 \u0442\u0440\u043E\u0433\u0430\u0435\u0442. \u041E\u0431\u0449\u0438\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 \u043F\u0440\u0438\u043F\u043E\u0434\u043D\u0438\u043C\u0430\u0435\u0442 \u0432\u0441\u044E \u043B\u0435\u0441\u0435\u043D\u043A\u0443 \u0440\u0430\u0437\u043E\u043C (\u0440\u0443\u0447\u043D\u044B\u0435 \u043F\u0440\u0430\u0432\u043A\u0438 \u0443\u0440\u043E\u0432\u043D\u0435\u0439 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F). \u041F\u043E\u0441\u043B\u0435 \u043F\u0440\u0438\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0433\u043E\u0440\u043A\u0430 \u0436\u0438\u0432\u0430\u044F: \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043F\u043E\u043B\u0430 \u043B\u044E\u0431\u043E\u0439 \u044F\u0447\u0435\u0439\u043A\u0438 \u0438 \u0447\u0438\u0441\u043B\u043E \u043A\u043E\u043B\u043E\u043D\u043E\u043A \u043F\u0440\u0430\u0432\u044F\u0442\u0441\u044F \u043E\u0431\u044B\u0447\u043D\u044B\u043C\u0438 \u0440\u0435\u0434\u0430\u043A\u0442\u043E\u0440\u0430\u043C\u0438 \u2014 \u0431\u043E\u0440\u0442\u0438\u043A\u0438 \u043F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u044E\u0442\u0441\u044F \u0441\u0430\u043C\u0438, \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0438 \u043D\u0430\u0441\u043B\u0435\u0434\u0443\u044E\u0442 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0440\u044F\u0434\u0430. \u00AB\u0421\u0442\u0443\u043F\u0435\u043D\u0435\u043A\u00BB \u0438 \u00AB\u0428\u0430\u0433 \u0443\u0440\u043E\u0432\u043D\u044F\u00BB \u043F\u0435\u0440\u0435\u0441\u043E\u0431\u0438\u0440\u0430\u044E\u0442 \u043B\u0435\u0441\u0435\u043D\u043A\u0443 \u0446\u0435\u043B\u0438\u043A\u043E\u043C."))),
                     React.createElement(Collapse, { title: "\u0422\u043E\u043B\u0449\u0438\u043D\u0430 \u0441\u0442\u0435\u043D\u043E\u043A \u0438 \u0434\u043D\u0430", open: openSecs.cells, onToggle: () => toggleSec("cells") },
                         React.createElement(Param, { label: "\u0412\u043D\u0435\u0448\u043D\u0438\u0435 \u0441\u0442\u0435\u043D\u043A\u0438", unit: "\u043C\u043C", value: cur.wallOut, min: connect ? CG.minWall : 0.8, max: 8, step: 0.1, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ wallOut: connect ? Math.max(v, CG.minWall) : v }) }),
                         connect && (cur.wallOut < CG.minWall - 0.001 ? (React.createElement("p", { style: { fontSize: 11.5, color: "#B45309", margin: "-6px 0 10px", lineHeight: 1.4 } },

@@ -150,6 +150,47 @@ for (const [kind, title] of PRESETS) {
   ok("низкий пол + бортик = глубокая ячейка при пересчёте", near(w2["o:w:1"].h, p.floor + 40));
 }
 
+// ── горка с замками: лесенка не ломается, рельс — на ровных участках ──
+{
+  const { connectorVs } = await import("../src/model/connectors.js");
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, cols: 2 });
+  const L2 = layout(p);
+  // горка всегда несёт рельс (male) — и на боку, и на спинке
+  const s = buildContainer(p, { N: null, W: null, E: { male: true, vs: connectorVs(p.D) }, S: { male: true, vs: connectorVs(p.W) } }, { fillets: false });
+  const conns = s.filter((b) => b.tag === "conn");
+  ok("горка-male строится с замками", conns.length > 0);
+  // каждое тело замка на боку целиком в пределах ОДНОГО ряда лесенки:
+  // зона на стыке ступеней пропускается, лесенка не режется
+  const rowEdges = [];
+  for (let j = 0; j < L2.nRows; j++) rowEdges.push([L2.cz0(j) - p.wallOut, L2.cz0(j) + L2.cd(j) + p.wallOut]);
+  let broken = 0;
+  for (const b of conns) {
+    let hiX = -1e9, loZ = 1e9, hiZ = -1e9;
+    for (const t of b.tris) for (const q of t) { hiX = Math.max(hiX, q[0]); loZ = Math.min(loZ, q[2]); hiZ = Math.max(hiZ, q[2]); }
+    const onSide = hiX > p.W / 2 - p.wallOut + 0.05 && hiZ < p.D / 2 - p.wallOut;
+    if (onSide && !rowEdges.some(([a, b2]) => loZ >= a - 0.05 && hiZ <= b2 + 0.05)) broken++;
+  }
+  ok("боковые замки не пересекают ступени", broken === 0, broken ? ` → ${broken} тел через стык` : "");
+  // низкая передняя ступень рельс не несёт (лесенка спереди цела)
+  const front = conns.some((b) => {
+    let loZ2 = 1e9, hiX2 = -1e9;
+    for (const t of b.tris) for (const q of t) { loZ2 = Math.min(loZ2, q[2]); hiX2 = Math.max(hiX2, q[0]); }
+    return hiX2 > p.W / 2 - p.wallOut + 0.05 && loZ2 < L2.cz0(0) + L2.cd(0);
+  });
+  ok("на низкой передней ступени замка нет", !front);
+}
+
+// ── общий уровень пола ──
+{
+  const p = presetContainer(mk(), "stairs", limits, { steps: 3, stepH: 15, cols: 2, base: 20 });
+  ok("база хранится", p.stairsBase === 20);
+  const lv = [0, 1, 2].map((j) => getCellLvl(p, 0, j));
+  ok(`уровни подняты на базу (${lv.join(" → ")})`, near(lv[0], 20) && near(lv[1], 35) && near(lv[2], 50));
+  ok("бортики считаются от поднятых уровней", near(getWall(p, "o:n:0").h, 20 + p.floor + 6));
+  ok(`спинка выше верхней ступени (H ${p.H})`, p.H >= 50 + p.floor + 19.9 && p.H <= limits.maxH);
+  ok("строится", buildContainer(p, noConn, {}).length > 100);
+}
+
 // ── шаг уровня ограничен лимитом принтера по высоте ──
 {
   const lim2 = { ...limits, maxH: 80 };

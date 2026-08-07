@@ -56,6 +56,7 @@ const sanitizeWall = (w) => {
   if (o.seed !== undefined) out.seed = int(o.seed, 1, 0, 1e9);
   if (["none", "a", "b"].includes(o.drop)) out.drop = o.drop;
   if (["solid", "hex", "lines"].includes(o.face)) out.face = o.face;
+  if (o.cardHooks) out.cardHooks = true;
   return out;
 };
 
@@ -126,6 +127,7 @@ const sanitizeContainer = (c0) => {
   // метка применённого пресета (для живых параметров горки) и её бортик
   if (c.preset !== undefined && typeof c.preset !== "string") delete c.preset;
   if (c.stairsLip !== undefined) c.stairsLip = num(c.stairsLip, 6, 2, 200);
+  if (c.stairsBase !== undefined) c.stairsBase = num(c.stairsBase, 0, 0, 500);
   return c;
 };
 
