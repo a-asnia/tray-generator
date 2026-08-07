@@ -50,6 +50,27 @@ await undoBtn.click();
 await page.waitForTimeout(400);
 ok(`«назад» вернул высоту (${(await st()).containers[0].H} = ${H0})`, (await st()).containers[0].H === H0);
 
+// ── шаг вперёд ──
+const redoBtn = page.locator('button[title*="Вернуть отменённое"]');
+ok("кнопка «вперёд» есть", (await redoBtn.count()) === 1);
+await redoBtn.click();
+await page.waitForTimeout(400);
+ok(`«вперёд» вернул высоту 55 (${(await st()).containers[0].H})`, (await st()).containers[0].H === 55);
+await undoBtn.click();
+await page.waitForTimeout(400);
+ok("«назад» снова отменил", (await st()).containers[0].H === H0);
+await page.keyboard.press("Control+Shift+z");
+await page.waitForTimeout(400);
+ok("Ctrl+Shift+Z работает как «вперёд»", (await st()).containers[0].H === 55);
+await undoBtn.click();
+await page.waitForTimeout(500);
+// новая правка обрывает ветку «вперёд»
+await setNum("Высота", 44);
+await page.waitForTimeout(400);
+ok("после новой правки «вперёд» недоступен", await redoBtn.isDisabled());
+await undoBtn.click();
+await page.waitForTimeout(400);
+
 // Ctrl+Z отменяет добавление контейнера
 await page.locator("button", { hasText: /^Раскладка$/ }).click();
 await page.waitForTimeout(300);

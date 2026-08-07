@@ -87,16 +87,19 @@ export default function TrayGenerator() {
   // История правок контейнеров и лимитов. Быстрые правки одного и того же
   // (тяжка ползунка, доводка эффектами) склеиваются в один шаг: иначе
   // «Назад» отменяло бы движение слайдера по миллиметру.
-  const hist = useRef([]);
+  const hist = useRef([]);      // шаги назад
+  const ahead = useRef([]);     // шаги вперёд (после «назад»)
   const histPrev = useRef({ containers, limits });
   const histAt = useRef(0);
-  const undoing = useRef(false);
+  const jumping = useRef(false);
   const [histLen, setHistLen] = useState(0);
+  const [aheadLen, setAheadLen] = useState(0);
+  const syncLens = () => { setHistLen(hist.current.length); setAheadLen(ahead.current.length); };
   useEffect(() => {
     const prev = histPrev.current;
     if (prev.containers === containers && prev.limits === limits) return;
     histPrev.current = { containers, limits };
-    if (undoing.current) { undoing.current = false; setHistLen(hist.current.length); return; }
+    if (jumping.current) { jumping.current = false; syncLens(); return; }
     // пересборка списка с теми же значениями (доводка эффектами, повторный
     // ввод того же числа) — не шаг: иначе «назад» отменял бы пустоту
     if (JSON.stringify(prev.containers) === JSON.stringify(containers) && prev.limits === limits) return;
@@ -106,22 +109,32 @@ export default function TrayGenerator() {
       if (hist.current.length > 60) hist.current.shift();
     }
     histAt.current = now;
-    setHistLen(hist.current.length);
+    ahead.current = []; // новая правка обрывает ветку «вперёд»
+    syncLens();
   }, [containers, limits]);
-  const undo = () => {
-    const prev = hist.current.pop();
-    if (!prev) return;
-    undoing.current = true;
+  // общий переход по истории: снимок берётся из одного стека и кладётся в другой
+  const jump = (from, to) => {
+    const snap = from.current.pop();
+    if (!snap) return;
+    to.current.push({ containers, limits });
+    jumping.current = true;
     histAt.current = 0;
-    setContainers(prev.containers);
-    setLimits(prev.limits);
-    setSel((s) => Math.min(s, prev.containers.length - 1));
+    setContainers(snap.containers);
+    setLimits(snap.limits);
+    setSel((s) => Math.min(s, snap.containers.length - 1));
     setSelection(null);
-    setHistLen(hist.current.length);
+    syncLens();
   };
+  const undo = () => jump(hist, ahead);
+  const redo = () => jump(ahead, hist);
+  const histRefs = useRef({ undo, redo });
+  histRefs.current = { undo, redo };
   useEffect(() => {
     const key = (e) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "я")) { e.preventDefault(); undo(); }
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = (e.key || "").toLowerCase();
+      if (k === "z" || k === "я") { e.preventDefault(); (e.shiftKey ? histRefs.current.redo : histRefs.current.undo)(); }
+      else if (k === "y" || k === "н") { e.preventDefault(); histRefs.current.redo(); }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
@@ -533,17 +546,17 @@ export default function TrayGenerator() {
     applyOuterDim({ D: D2 });
   };
 
-  // Отверстия под визитницу: у них есть требования к стенке (высота от
-  // CARDH.minH, длина сегмента от CARDH.minW). Включили галку — стенка и её
-  // сегмент сразу подгоняются под эти требования, а не молча остаются
-  // без окон.
+  // Отверстия под визитницу: у них есть требования к стенке (высота, при
+  // которой навешенный карман не упирается в стол, — CARDH.wallH; длина
+  // сегмента от CARDH.minW). Включили галку — стенка и её сегмент сразу
+  // подгоняются под эти требования, а не молча остаются без окон.
   const setCardHooks = (key, on) => {
     updWall(key, { cardHooks: on });
     if (!on) return;
     const [, side, ns] = key.split(":");
     const n = +ns;
     const Lc = layout(cur);
-    if (getWall(cur, key).h < CARDH.minH) updWall(key, { h: Math.min(limits.maxH, CARDH.minH) });
+    if (getWall(cur, key).h < CARDH.wallH) updWall(key, { h: Math.min(limits.maxH, CARDH.wallH) });
     if (side === "n" || side === "s") {
       const j = side === "n" ? 0 : Lc.nRows - 1;
       if (Lc.cw(n, j) < CARDH.minW) setCellWidth(n, j, CARDH.minW);
@@ -978,7 +991,7 @@ export default function TrayGenerator() {
             </label>
             {w.cardHooks && (
               <p style={{ fontSize: 11.5, color: "#64748B", margin: "0 0 6px", lineHeight: 1.4 }}>
-                Окна {CARDH.hw}×{CARDH.hh} мм под крюки. Стенка и её сегмент подогнаны под них автоматически; деталь — на вкладке «Принтер».
+                Окна {CARDH.hw}×{CARDH.hh} мм под крюки. Стенка поднята до {CARDH.wallH} мм, чтобы карман висел не задевая стол; деталь — на вкладке «Принтер».
               </p>
             )}
           </>
@@ -1300,18 +1313,22 @@ export default function TrayGenerator() {
         <h1 style={{ fontSize: 19, fontWeight: 700, margin: "3px 0 0" }}>Система контейнеров</h1>
 
         <div style={{ display: "flex", gap: 6, margin: "12px 0 16px" }}>
-          <button
-            onClick={undo}
-            disabled={!histLen}
-            title="Отменить последнее изменение (Ctrl+Z)"
-            style={{
-              flex: "0 0 auto", width: 34, padding: "7px 0", borderRadius: 8, fontSize: 14, fontWeight: 700,
-              cursor: histLen ? "pointer" : "default", border: "1px solid #D6DDE6",
-              background: histLen ? "#fff" : "#F1F5F9", color: histLen ? "#3D4A5C" : "#B6C0CC",
-            }}
-          >
-            ↶
-          </button>
+          {[["↶", undo, histLen, "Отменить последнее изменение (Ctrl+Z)"],
+            ["↷", redo, aheadLen, "Вернуть отменённое (Ctrl+Shift+Z)"]].map(([sign, act, on, hint]) => (
+            <button
+              key={sign}
+              onClick={act}
+              disabled={!on}
+              title={hint}
+              style={{
+                flex: "0 0 auto", width: 32, padding: "7px 0", borderRadius: 8, fontSize: 14, fontWeight: 700,
+                cursor: on ? "pointer" : "default", border: "1px solid #D6DDE6",
+                background: on ? "#fff" : "#F1F5F9", color: on ? "#3D4A5C" : "#B6C0CC",
+              }}
+            >
+              {sign}
+            </button>
+          ))}
           {[["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (
             <button
               key={t}
