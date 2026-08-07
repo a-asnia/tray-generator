@@ -53,9 +53,34 @@ export function insertSlotsAll(c, axis) {
   return out;
 }
 
+// Печатная перегородка ВДОЛЬ вставки занимает её место: канал с рёбрами
+// туда не встанет, а деталь пересеклась бы со стенкой. Такие места
+// пропускаем — вместе с зазором на рёбра.
+export function slotBlocked(c, axis, u) {
+  const ins = insertsOf(c);
+  const L = layout(c);
+  const keep = railHalf(ins) + c.wall / 2 + 0.4;
+  if (axis === "x") {
+    for (let j = 0; j < L.nRows; j++)
+      for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+        if (getWall(c, `v:${i}:${j}`).h <= 0.3) continue;
+        if (Math.abs(L.cx0(i, j) + L.cw(i, j) + c.wall / 2 - u) < keep) return true;
+      }
+    return false;
+  }
+  for (let j = 0; j < L.nRows - 1; j++) {
+    const anyWall = Array.from({ length: L.nColsAt(j) }, (_, i) => getWall(c, `h:${j}:${i}`).h).some((h) => h > 0.3);
+    if (!anyWall) continue;
+    if (Math.abs(L.cz0(j) + L.cd(j) + c.wall / 2 - u) < keep) return true;
+  }
+  return false;
+}
+
 // Пригодные места: где вставка может оседлать все поперечные стенки
 export function insertSlots(c, axis) {
-  return insertSlotsAll(c, axis).filter((u) => insertProfile(c, axis, u) !== null);
+  return insertSlotsAll(c, axis)
+    .filter((u) => !slotBlocked(c, axis, u))
+    .filter((u) => insertProfile(c, axis, u) !== null);
 }
 
 // Профиль вставки на месте u — прямоугольники {s0, s1, y0, y1} в
@@ -70,6 +95,28 @@ export function insertProfile(c, axis, u) {
   const span = (axis === "x" ? c.D : c.W) - 2 * c.wallOut;
   const sEnd = span / 2 - ins.clr;
   const lvlOf = (i, j) => Math.min(getCellLvl(c, i, j), c.H - 4);
+  // Верх пола ячейки в точке (x, z) — с учётом наклона: деталь обязана
+  // сесть НА пол, а не воткнуться в клин наклона.
+  const floorTopAt = (i, j, x, z) => {
+    const cc = (c.cells && c.cells[i + ":" + j]) || {};
+    const lvl = lvlOf(i, j);
+    const base = c.floor + lvl;
+    const dir = cc.tiltDir || "none";
+    const ang = cc.tiltA ?? 5;
+    if (dir === "none" || ang < 0.5) return base;
+    const wide = dir === "w" || dir === "e";
+    const cellSpan = wide ? L.cw(i, j) : L.cd(j);
+    const rise = Math.min(cellSpan * Math.tan((ang * Math.PI) / 180), Math.max(0, c.H - lvl - c.floor - 1));
+    // клин пола строится по границам плиты — они заходят под стенки
+    const xa = Math.max(-c.W / 2, L.cx0(i, j) - (i === 0 ? c.wallOut : c.wall));
+    const xb = Math.min(c.W / 2, L.cx0(i, j) + L.cw(i, j) + (i === L.nColsAt(j) - 1 ? c.wallOut : c.wall));
+    const za = Math.max(-c.D / 2, L.cz0(j) - (j === 0 ? c.wallOut : c.wall));
+    const zb = Math.min(c.D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? c.wallOut : c.wall));
+    const t = wide
+      ? (dir === "e" ? (xb - x) / Math.max(0.01, xb - xa) : (x - xa) / Math.max(0.01, xb - xa))
+      : (dir === "s" ? (zb - z) / Math.max(0.01, zb - za) : (z - za) / Math.max(0.01, zb - za));
+    return base + rise * Math.max(0, Math.min(1, t));
+  };
   // ячейки вдоль пролёта и поперечные стенки между ними
   const cells = []; // {s0, s1, lvl}
   const walls = []; // {sMid, h} — h ≤ 0.3 означает «стенки нет»
@@ -77,7 +124,7 @@ export function insertProfile(c, axis, u) {
     // вставка идёт вдоль Z и пересекает все ряды
     for (let j = 0; j < L.nRows; j++) {
       const i = L.cellIndexAt(j, u);
-      cells.push({ s0: L.cz0(j), s1: L.cz0(j) + L.cd(j), lvl: lvlOf(i, j) });
+      cells.push({ s0: L.cz0(j), s1: L.cz0(j) + L.cd(j), lvl: lvlOf(i, j), i, j });
       if (j < L.nRows - 1)
         walls.push({ sMid: L.cz0(j) + L.cd(j) + c.wall / 2, h: getWall(c, `h:${j}:${i}`).h });
     }
@@ -89,7 +136,7 @@ export function insertProfile(c, axis, u) {
       if (d > best) { best = d; j = jj; }
     }
     for (let i = 0; i < L.nColsAt(j); i++) {
-      cells.push({ s0: L.cx0(i, j), s1: L.cx0(i, j) + L.cw(i, j), lvl: lvlOf(i, j) });
+      cells.push({ s0: L.cx0(i, j), s1: L.cx0(i, j) + L.cw(i, j), lvl: lvlOf(i, j), i, j });
       if (i < L.nColsAt(j) - 1)
         walls.push({ sMid: L.cx0(i, j) + L.cw(i, j) + c.wall / 2, h: getWall(c, `v:${i}:${j}`).h });
     }
@@ -106,7 +153,17 @@ export function insertProfile(c, axis, u) {
   for (let k = 0; k < cells.length; k++) {
     const a = k === 0 ? -sEnd : walls[k - 1].sMid + cutW;
     const b = k === cells.length - 1 ? sEnd : walls[k].sMid - cutW;
-    push(a, b, c.floor + cells[k].lvl);
+    // на наклонном полу низ идёт ступеньками по 3 мм — деталь садится
+    // на пол по всей длине и нигде в него не втыкается
+    const at = (s) => (axis === "x" ? floorTopAt(cells[k].i, cells[k].j, u, s) : floorTopAt(cells[k].i, cells[k].j, s, u));
+    const flat = Math.abs(at(a) - at(b)) < 0.05;
+    if (flat) { push(a, b, Math.max(at(a), at(b))); continue; }
+    const STEP = 3;
+    const n = Math.max(1, Math.ceil((b - a) / STEP));
+    for (let q = 0; q < n; q++) {
+      const s0 = a + ((b - a) * q) / n, s1 = a + ((b - a) * (q + 1)) / n;
+      push(s0, s1, Math.max(at(s0), at(s1)));
+    }
   }
   for (let k = 0; k < walls.length; k++) {
     // над стыком: выше поперечной стенки и выше плит пола, заходящих под неё

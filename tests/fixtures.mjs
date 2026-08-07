@@ -55,3 +55,74 @@ export const cases = {
   "тонкие стенки": [{ ...base, wall: 0.8, wallOut: 1.2, floor: 0.8 }, noConn],
   "толстые стенки": [{ ...base, wall: 4, wallOut: 6, floor: 4 }, noConn],
 };
+
+// ── Геометрические помощники для проверок печатопригодности ──
+// Тела — выпуклые призмы, поэтому «точка внутри» = точка по внутреннюю
+// сторону всех граней.
+export function bboxOf(solid) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const t of solid.tris) for (const p of t)
+    for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+  return { lo, hi };
+}
+export function bboxAll(solids) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const s of solids) {
+    const b = bboxOf(s);
+    for (let k = 0; k < 3; k++) { if (b.lo[k] < lo[k]) lo[k] = b.lo[k]; if (b.hi[k] > hi[k]) hi[k] = b.hi[k]; }
+  }
+  return { lo, hi };
+}
+// eps > 0 — «строго внутри на eps»: касание поверхностей не считается
+export function insideConvex(solid, p, eps = 0) {
+  const c = [0, 0, 0];
+  let n = 0;
+  for (const t of solid.tris) for (const q of t) { c[0] += q[0]; c[1] += q[1]; c[2] += q[2]; n++; }
+  c[0] /= n; c[1] /= n; c[2] /= n;
+  for (const [a, b, d] of solid.tris) {
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const v = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+    let nn = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    const len = Math.hypot(nn[0], nn[1], nn[2]);
+    if (len < 1e-9) continue;
+    nn = nn.map((x) => x / len);
+    // нормаль наружу (от центра тела)
+    if ((c[0] - a[0]) * nn[0] + (c[1] - a[1]) * nn[1] + (c[2] - a[2]) * nn[2] > 0) nn = nn.map((x) => -x);
+    if ((p[0] - a[0]) * nn[0] + (p[1] - a[1]) * nn[1] + (p[2] - a[2]) * nn[2] > -eps) return false;
+  }
+  return true;
+}
+// индекс тел по ячейкам сетки — чтобы не проверять все тела на каждую точку
+export function solidIndex(solids, cell = 8) {
+  const map = new Map();
+  const key = (i, j, k) => i + ":" + j + ":" + k;
+  solids.forEach((s, idx) => {
+    const b = bboxOf(s);
+    for (let i = Math.floor(b.lo[0] / cell); i <= Math.floor(b.hi[0] / cell); i++)
+      for (let j = Math.floor(b.lo[1] / cell); j <= Math.floor(b.hi[1] / cell); j++)
+        for (let k = Math.floor(b.lo[2] / cell); k <= Math.floor(b.hi[2] / cell); k++) {
+          const kk = key(i, j, k);
+          if (!map.has(kk)) map.set(kk, []);
+          map.get(kk).push(idx);
+        }
+  });
+  return {
+    at: (p) => map.get(key(Math.floor(p[0] / cell), Math.floor(p[1] / cell), Math.floor(p[2] / cell))) || [],
+    inside: function (p, eps = 0) {
+      for (const idx of this.at(p)) if (insideConvex(solids[idx], p, eps)) return true;
+      return false;
+    },
+  };
+}
+// точки строго внутри тела: сетка по его габариту с шагом step
+export function pointsInside(solid, step = 0.4, eps = 0.05) {
+  const { lo, hi } = bboxOf(solid);
+  const out = [];
+  for (let x = lo[0] + step / 2; x < hi[0]; x += step)
+    for (let y = lo[1] + step / 2; y < hi[1]; y += step)
+      for (let z = lo[2] + step / 2; z < hi[2]; z += step) {
+        const p = [x, y, z];
+        if (insideConvex(solid, p, eps)) out.push(p);
+      }
+  return out;
+}

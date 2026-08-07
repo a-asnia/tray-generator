@@ -8,8 +8,8 @@ import { exportSTL, exportSTLIndexed, weldTris, solidsVolume } from "./geometry/
 import { getManifold } from "./geometry/manifold.js";
 import { connectorVs, connGeom, DEFAULT_CLR } from "./model/connectors.js";
 import { insertsOf, insertSlots, insertSlotsAll, insertSize, insertPlateSolids, MIN_WEB } from "./model/inserts.js";
-import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, remapCells, DEFAULT_CORNER_R } from "./model/layout.js";
-import { buildContainer } from "./model/build.js";
+import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wallTitle, minOuterDim, fitSizes, lockedWIn, layoutIssues, remapCells, maxColsOf, maxRowsOf, DEFAULT_CORNER_R } from "./model/layout.js";
+import { buildContainer, pairVs } from "./model/build.js";
 import { presetContainer, PRESETS, GORKA_DEF, applyStairsWalls, fillStairsLevels } from "./model/presets.js";
 import { snapLayout } from "./model/laymagnet.js";
 import { moveContainer, fitAssembly } from "./model/laymove.js";
@@ -67,7 +67,9 @@ export default function TrayGenerator() {
   // идемпотентен (на результате возвращает null), поэтому эффект
   // сходится за один повтор и не зацикливается
   useEffect(() => {
-    if (!layMagnet) return;
+    // шаг по истории магнит не переигрывает: иначе «назад» не давало бы
+    // видимого результата — дотяжка тут же возвращала бы прежний размер
+    if (!layMagnet || settling()) return;
     const next = snapLayout(containers, limits);
     if (next) {
       setContainers(next);
@@ -91,7 +93,12 @@ export default function TrayGenerator() {
   const ahead = useRef([]);     // шаги вперёд (после «назад»)
   const histPrev = useRef({ containers, limits });
   const histAt = useRef(0);
-  const jumping = useRef(false);
+  // Окно «доводки» после шага по истории. Восстановленное состояние тут же
+  // проходят нормализующие эффекты (лимит раскладки, магниты, живая горка) —
+  // их правки не должны считаться новым действием: иначе они обрывали бы
+  // ветку «вперёд», и кнопка работала бы через раз.
+  const jumpAt = useRef(0);
+  const settling = () => Date.now() - jumpAt.current < 400;
   const [histLen, setHistLen] = useState(0);
   const [aheadLen, setAheadLen] = useState(0);
   const syncLens = () => { setHistLen(hist.current.length); setAheadLen(ahead.current.length); };
@@ -99,7 +106,7 @@ export default function TrayGenerator() {
     const prev = histPrev.current;
     if (prev.containers === containers && prev.limits === limits) return;
     histPrev.current = { containers, limits };
-    if (jumping.current) { jumping.current = false; syncLens(); return; }
+    if (settling()) { syncLens(); return; }
     // пересборка списка с теми же значениями (доводка эффектами, повторный
     // ввод того же числа) — не шаг: иначе «назад» отменял бы пустоту
     if (JSON.stringify(prev.containers) === JSON.stringify(containers) && prev.limits === limits) return;
@@ -117,7 +124,7 @@ export default function TrayGenerator() {
     const snap = from.current.pop();
     if (!snap) return;
     to.current.push({ containers, limits });
-    jumping.current = true;
+    jumpAt.current = Date.now();
     histAt.current = 0;
     setContainers(snap.containers);
     setLimits(snap.limits);
@@ -634,13 +641,16 @@ export default function TrayGenerator() {
     };
     const items = containers.map((c) => {
       const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
+      // Позиции замков согласуются с соседом: если у одного из двух зона не
+      // годится (низкая или ступенчатая стенка), замка нет у обоих — иначе
+      // рельс упёрся бы в сплошную стенку соседа и контейнеры не сошлись.
       const conn = !connect
         ? { N: null, S: null, W: null, E: null }
         : {
-            E: E ? { male: railCarrier(c, E), vs: connectorVs(Math.min(c.D, E.D)) } : null,
-            W: Wn ? { male: !railCarrier(Wn, c), vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
-            S: S ? { male: railCarrier(c, S), vs: connectorVs(Math.min(c.W, S.W)) } : null,
-            N: N ? { male: !railCarrier(N, c), vs: connectorVs(Math.min(c.W, N.W)) } : null,
+            E: E ? { male: railCarrier(c, E), vs: pairVs(c, "E", E, "W", connectorVs(Math.min(c.D, E.D))) } : null,
+            W: Wn ? { male: !railCarrier(Wn, c), vs: pairVs(c, "W", Wn, "E", connectorVs(Math.min(c.D, Wn.D))) } : null,
+            S: S ? { male: railCarrier(c, S), vs: pairVs(c, "S", S, "N", connectorVs(Math.min(c.W, S.W))) } : null,
+            N: N ? { male: !railCarrier(N, c), vs: pairVs(c, "N", N, "S", connectorVs(Math.min(c.W, N.W))) } : null,
           };
       const ck = JSON.stringify(conn);
       let hit = geoCache.current.get(c);
@@ -1688,8 +1698,12 @@ export default function TrayGenerator() {
         </Collapse>
 
         <Collapse title="Деление на ячейки" open={openSecs.grid} onToggle={() => toggleSec("grid")}>
-        <Stepper label="Колонки" value={cur.cols} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
-        <Stepper label="Ряды" value={cur.rows} min={1} max={8} disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
+        {/* делить можно ровно настолько, насколько хватает пролёта:
+            ячейка тоньше 5 мм — это уже не ячейка, а слипшиеся стенки */}
+        <Stepper label="Колонки" value={Math.min(cur.cols, maxColsOf(cur))} min={1} max={Math.min(8, maxColsOf(cur))}
+          disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ cols: v })} />
+        <Stepper label="Ряды" value={Math.min(cur.rows, maxRowsOf(cur))} min={1} max={Math.min(8, maxRowsOf(cur))}
+          disabled={cur.lockOuter && cur.lockCell} onChange={(v) => applyParam({ rows: v })} />
         </Collapse>
 
         </div>)}

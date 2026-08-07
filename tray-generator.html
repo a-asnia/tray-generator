@@ -596,9 +596,37 @@ function insertSlotsAll(c, axis) {
         out.push(k * step);
     return out;
 }
+// Печатная перегородка ВДОЛЬ вставки занимает её место: канал с рёбрами
+// туда не встанет, а деталь пересеклась бы со стенкой. Такие места
+// пропускаем — вместе с зазором на рёбра.
+function slotBlocked(c, axis, u) {
+    const ins = insertsOf(c);
+    const L = layout(c);
+    const keep = railHalf(ins) + c.wall / 2 + 0.4;
+    if (axis === "x") {
+        for (let j = 0; j < L.nRows; j++)
+            for (let i = 0; i < L.nColsAt(j) - 1; i++) {
+                if (getWall(c, `v:${i}:${j}`).h <= 0.3)
+                    continue;
+                if (Math.abs(L.cx0(i, j) + L.cw(i, j) + c.wall / 2 - u) < keep)
+                    return true;
+            }
+        return false;
+    }
+    for (let j = 0; j < L.nRows - 1; j++) {
+        const anyWall = Array.from({ length: L.nColsAt(j) }, (_, i) => getWall(c, `h:${j}:${i}`).h).some((h) => h > 0.3);
+        if (!anyWall)
+            continue;
+        if (Math.abs(L.cz0(j) + L.cd(j) + c.wall / 2 - u) < keep)
+            return true;
+    }
+    return false;
+}
 // Пригодные места: где вставка может оседлать все поперечные стенки
 function insertSlots(c, axis) {
-    return insertSlotsAll(c, axis).filter((u) => insertProfile(c, axis, u) !== null);
+    return insertSlotsAll(c, axis)
+        .filter((u) => !slotBlocked(c, axis, u))
+        .filter((u) => insertProfile(c, axis, u) !== null);
 }
 // Профиль вставки на месте u — прямоугольники {s0, s1, y0, y1} в
 // координатах (s — вдоль пролёта, y — высота от стола). Низ каждого
@@ -612,6 +640,29 @@ function insertProfile(c, axis, u) {
     const span = (axis === "x" ? c.D : c.W) - 2 * c.wallOut;
     const sEnd = span / 2 - ins.clr;
     const lvlOf = (i, j) => Math.min(getCellLvl(c, i, j), c.H - 4);
+    // Верх пола ячейки в точке (x, z) — с учётом наклона: деталь обязана
+    // сесть НА пол, а не воткнуться в клин наклона.
+    const floorTopAt = (i, j, x, z) => {
+        const cc = (c.cells && c.cells[i + ":" + j]) || {};
+        const lvl = lvlOf(i, j);
+        const base = c.floor + lvl;
+        const dir = cc.tiltDir || "none";
+        const ang = cc.tiltA ?? 5;
+        if (dir === "none" || ang < 0.5)
+            return base;
+        const wide = dir === "w" || dir === "e";
+        const cellSpan = wide ? L.cw(i, j) : L.cd(j);
+        const rise = Math.min(cellSpan * Math.tan((ang * Math.PI) / 180), Math.max(0, c.H - lvl - c.floor - 1));
+        // клин пола строится по границам плиты — они заходят под стенки
+        const xa = Math.max(-c.W / 2, L.cx0(i, j) - (i === 0 ? c.wallOut : c.wall));
+        const xb = Math.min(c.W / 2, L.cx0(i, j) + L.cw(i, j) + (i === L.nColsAt(j) - 1 ? c.wallOut : c.wall));
+        const za = Math.max(-c.D / 2, L.cz0(j) - (j === 0 ? c.wallOut : c.wall));
+        const zb = Math.min(c.D / 2, L.cz0(j) + L.cd(j) + (j === L.nRows - 1 ? c.wallOut : c.wall));
+        const t = wide
+            ? (dir === "e" ? (xb - x) / Math.max(0.01, xb - xa) : (x - xa) / Math.max(0.01, xb - xa))
+            : (dir === "s" ? (zb - z) / Math.max(0.01, zb - za) : (z - za) / Math.max(0.01, zb - za));
+        return base + rise * Math.max(0, Math.min(1, t));
+    };
     // ячейки вдоль пролёта и поперечные стенки между ними
     const cells = []; // {s0, s1, lvl}
     const walls = []; // {sMid, h} — h ≤ 0.3 означает «стенки нет»
@@ -619,7 +670,7 @@ function insertProfile(c, axis, u) {
         // вставка идёт вдоль Z и пересекает все ряды
         for (let j = 0; j < L.nRows; j++) {
             const i = L.cellIndexAt(j, u);
-            cells.push({ s0: L.cz0(j), s1: L.cz0(j) + L.cd(j), lvl: lvlOf(i, j) });
+            cells.push({ s0: L.cz0(j), s1: L.cz0(j) + L.cd(j), lvl: lvlOf(i, j), i, j });
             if (j < L.nRows - 1)
                 walls.push({ sMid: L.cz0(j) + L.cd(j) + c.wall / 2, h: getWall(c, `h:${j}:${i}`).h });
         }
@@ -635,7 +686,7 @@ function insertProfile(c, axis, u) {
             }
         }
         for (let i = 0; i < L.nColsAt(j); i++) {
-            cells.push({ s0: L.cx0(i, j), s1: L.cx0(i, j) + L.cw(i, j), lvl: lvlOf(i, j) });
+            cells.push({ s0: L.cx0(i, j), s1: L.cx0(i, j) + L.cw(i, j), lvl: lvlOf(i, j), i, j });
             if (i < L.nColsAt(j) - 1)
                 walls.push({ sMid: L.cx0(i, j) + L.cw(i, j) + c.wall / 2, h: getWall(c, `v:${i}:${j}`).h });
         }
@@ -654,7 +705,20 @@ function insertProfile(c, axis, u) {
     for (let k = 0; k < cells.length; k++) {
         const a = k === 0 ? -sEnd : walls[k - 1].sMid + cutW;
         const b = k === cells.length - 1 ? sEnd : walls[k].sMid - cutW;
-        push(a, b, c.floor + cells[k].lvl);
+        // на наклонном полу низ идёт ступеньками по 3 мм — деталь садится
+        // на пол по всей длине и нигде в него не втыкается
+        const at = (s) => (axis === "x" ? floorTopAt(cells[k].i, cells[k].j, u, s) : floorTopAt(cells[k].i, cells[k].j, s, u));
+        const flat = Math.abs(at(a) - at(b)) < 0.05;
+        if (flat) {
+            push(a, b, Math.max(at(a), at(b)));
+            continue;
+        }
+        const STEP = 3;
+        const n = Math.max(1, Math.ceil((b - a) / STEP));
+        for (let q = 0; q < n; q++) {
+            const s0 = a + ((b - a) * q) / n, s1 = a + ((b - a) * (q + 1)) / n;
+            push(s0, s1, Math.max(at(s0), at(s1)));
+        }
     }
     for (let k = 0; k < walls.length; k++) {
         // над стыком: выше поперечной стенки и выше плит пола, заходящих под неё
@@ -776,6 +840,11 @@ function minOuterDim(c, axis) {
         need = Math.max(need, 2 * c.wallOut + (f.w || 40) + 2 * c.wall + 5);
     return need;
 }
+// Сколько ячеек влезает в пролёт: ниже MIN_CELL ячейка перестаёт быть
+// ячейкой (стенки толще просвета), поэтому деление ограничено размером.
+const maxCells = (inner, wall) => Math.max(1, Math.floor((inner + wall) / (MIN_CELL + wall)));
+const maxColsOf = (c) => maxCells(c.W - 2 * c.wallOut, c.wall);
+const maxRowsOf = (c) => maxCells(c.D - 2 * c.wallOut, c.wall);
 function layout(c) {
     const innerW = c.W - 2 * c.wallOut;
     const innerD = c.D - 2 * c.wallOut;
@@ -785,8 +854,11 @@ function layout(c) {
         rowDs = fillAxis(innerD, c.wall, c.cellDt || 40);
     }
     else {
-        colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
-        rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
+        // деление ограничено пролётом: 6 колонок в 30 мм дали бы ячейки по 3 мм
+        const nc = Math.max(1, Math.min(c.cols, maxCells(innerW, c.wall)));
+        const nr = Math.max(1, Math.min(c.rows, maxCells(innerD, c.wall)));
+        colWs = Array.from({ length: nc }, () => (innerW - (nc - 1) * c.wall) / nc);
+        rowDs = Array.from({ length: nr }, () => (innerD - (nr - 1) * c.wall) / nr);
     }
     // явные размеры рядов (появляются при замке ряда) фиксируют сетку рядов
     if (c.rowDs && c.rowDs.length)
@@ -1071,13 +1143,13 @@ function layoutIssues(c) {
 // minW; back/depth/frontH — габариты самого кармана.
 // wallH — высота стенки, при которой навешенный карман не упирается в
 // стол: окна у кромки, а спинка висит на (back − плечо) ниже них.
-const CARDH = { hw: 12, hh: 6, sp: 40, top: 4, minW: 60, minH: 22, back: 55, depth: 14, frontH: 30 };
+const CARDH = { hw: 12, hh: 6, sp: 40, top: 4, minW: 60, minH: 22, back: 55, depth: 14, frontH: 30, wide: 70, T: 2.4 };
 CARDH.wallH = Math.ceil(CARDH.top + CARDH.hh + CARDH.back - (CARDH.hh - 2.5) + 2);
 // Съёмный карман: спинка + дно + передний борт + два крюка.
 // wallOut контейнера задаёт длину плеча крюка (сквозь стенку).
 function cardHolderSolids(c) {
     const wallOut = c && Number.isFinite(c.wallOut) ? c.wallOut : 2.9;
-    const W = 70, Hb = CARDH.back, T = 2.4; // спинка: ширина, высота, толщина
+    const W = CARDH.wide, Hb = CARDH.back, T = CARDH.T; // спинка: ширина, высота, толщина
     const depth = CARDH.depth, frontH = CARDH.frontH; // карман: глубина и высота борта
     const hookW = CARDH.hw - 2; // крюк уже окна на зазор по 1 мм
     const armT = CARDH.hh - 2.5; // плечо ниже окна — люфт для навешивания
@@ -1108,6 +1180,57 @@ function cardHolderSolids(c) {
 // заполнения (соты вершиной вверх, диагональные линии), пандусы,
 // пол с лесенкой и рёбрами, зоны соединителей.
 // ══════════════════════════════════════════════════════════════
+// ── Зона замка на внешней стенке ──
+// Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у сегмента,
+// на котором он стоит (зона может накрыть два сегмента — высота по минимуму).
+// even: все сегменты под зоной одной высоты. На ступенчатой стенке (горка)
+// замок не ставится: вырезать зону из сегментов разной высоты и вернуть
+// плоскую — значит разломать лесенку на куски.
+function lockZone(c, side, vc) {
+    const L = layout(c);
+    const wallOut = c.wallOut;
+    const CONN = connOf(c);
+    const sideL = side.toLowerCase();
+    const segs = [];
+    if (sideL === "n" || sideL === "s") {
+        const j = sideL === "n" ? 0 : L.nRows - 1;
+        for (let i = 0; i < L.nColsAt(j); i++)
+            segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
+    }
+    else {
+        for (let j = 0; j < L.nRows; j++)
+            segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
+    }
+    const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+    let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
+    for (const sg of segs) {
+        if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01)
+            continue;
+        const wc = getWall(c, sg.key);
+        h = Math.min(h, wc.h);
+        hMax = Math.max(hMax, wc.h);
+        const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
+        if (ov > best) {
+            best = ov;
+            rnd = wc.rnd;
+        }
+    }
+    if (!Number.isFinite(h)) {
+        const wc = getWall(c, `o:${sideL}:0`);
+        h = wc.h;
+        hMax = wc.h;
+        rnd = wc.rnd;
+    }
+    return { vc, h, rnd, even: hMax - h < 0.01 };
+}
+const lockFits = (CONN, u) => u.even && u.h >= lockMinH(CONN);
+// Замок ставится, только если зона годится у ОБОИХ соседей: иначе рельс
+// упрётся в сплошную стенку соседа, у которого паз не прорезан.
+const lockOk = (c, side, vc) => {
+    const CONN = connOf(c);
+    return CONN.fits && lockFits(CONN, lockZone(c, side, vc));
+};
+const pairVs = (a, sideA, b, sideB, vs) => vs.filter((v) => lockOk(a, sideA, v) && lockOk(b, sideB, v));
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
 function buildContainer(c, conn, opts = {}) {
@@ -1199,49 +1322,9 @@ function buildContainer(c, conn, opts = {}) {
         return low ? Math.max(0.4, Math.min(wc.dropH, wc.h)) : wc.h;
     };
     const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-    // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
-    // сегмента, на котором он стоит (зона может накрыть два сегмента —
-    // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
-    // и замок не ставится: стенка остаётся целой и ровной.
-    const zoneInfo = (side, vc) => {
-        const sideL = side.toLowerCase();
-        const segs = [];
-        if (sideL === "n" || sideL === "s") {
-            const j = sideL === "n" ? 0 : L.nRows - 1;
-            for (let i = 0; i < L.nColsAt(j); i++)
-                segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
-        }
-        else {
-            for (let j = 0; j < L.nRows; j++)
-                segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
-        }
-        const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
-        let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
-        for (const sg of segs) {
-            if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01)
-                continue;
-            const wc = getWall(c, sg.key);
-            h = Math.min(h, wc.h);
-            hMax = Math.max(hMax, wc.h);
-            const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
-            if (ov > best) {
-                best = ov;
-                rnd = wc.rnd;
-            }
-        }
-        if (!Number.isFinite(h)) {
-            const wc = getWall(c, `o:${sideL}:0`);
-            h = wc.h;
-            hMax = wc.h;
-            rnd = wc.rnd;
-        }
-        // even: все сегменты под зоной одной высоты. На ступенчатой стенке
-        // (горка) замок не ставится: вырезать зону из сегментов разной высоты
-        // и вернуть плоскую — значит разломать лесенку на куски
-        return { vc, h, rnd, even: hMax - h < 0.01 };
-    };
+    const zoneInfo = (side, vc) => lockZone(c, side, vc);
     const unitsOf = (side) => conn[side] && CONN.fits
-        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.even && u.h >= lockMinH(CONN))
+        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => lockFits(CONN, u))
         : [];
     const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
     const zonesFrom = (units) => units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
@@ -1655,11 +1738,18 @@ function buildContainer(c, conn, opts = {}) {
         const toO = (u) => facePos + dir * ((u * run) / Lslope);
         const toY = (u) => yTop - (u * dh) / Lslope;
         const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+        // Задняя грань панели утапливается в стенку, но НЕ насквозь: за дальней
+        // гранью стенки она проступила бы на наружной плоскости (там стык с
+        // соседом) или влезла бы в соседнюю ячейку.
+        const backO = (o) => {
+            const b = o - dir * thkH, lim = facePos - dir * thk;
+            return dir > 0 ? Math.max(b, lim) : Math.min(b, lim);
+        };
         const pushQuadUS = (corners) => {
             // corners: 4 точки [u, s]; передняя грань на наклонной плоскости,
             // задняя — сдвиг по горизонтали внутрь (к стенке)
             const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
-            const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+            const qb = corners.map(([u, sv]) => p3(backO(toO(u)), toY(u), sv));
             solids.push(prismSolid(qa, qb, tag));
         };
         // рамка наклонной панели — тоже две толщины стенки
@@ -1760,9 +1850,14 @@ function buildContainer(c, conn, opts = {}) {
         const toO = (u) => facePos + dir * ((u * run) / Lslope);
         const toY = (u) => yTop - (u * dh) / Lslope;
         const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+        // задняя грань не пробивает стенку насквозь (см. сотовый пандус)
+        const backO = (o) => {
+            const b = o - dir * thkH, lim = facePos - dir * thk;
+            return dir > 0 ? Math.max(b, lim) : Math.min(b, lim);
+        };
         const pushQuadUS = (corners) => {
             const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
-            const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+            const qb = corners.map(([u, sv]) => p3(backO(toO(u)), toY(u), sv));
             solids.push(prismSolid(qa, qb, tag));
         };
         // рамка наклонной панели — тоже две толщины стенки
@@ -3094,6 +3189,17 @@ function fitAssembly(containers, limits) {
                 size.set(g, v);
             }
         }
+        // хвост от округления до 0,1 мм снимает самая широкая колонка: иначе
+        // сборка остаётся на десятую шире рамки, а лимит — жёсткий
+        while (excess > 0.05) {
+            const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
+            if (!open.length)
+                break;
+            const g = open.reduce((a, b) => (size.get(b) > size.get(a) ? b : a));
+            const v = mvR1(Math.max(30, size.get(g) - excess));
+            excess = mvR1(excess - (size.get(g) - v));
+            size.set(g, v);
+        }
         // ужимаем только то, что перестало влезать: контейнеры уже, чем
         // колонка (магнит соседей выключен), остаются как были
         out = out.map((c) => (!c.lockOuter && c[ax.dim] > size.get(c[ax.pos]) + 0.05
@@ -3629,7 +3735,9 @@ function TrayGenerator() {
     // идемпотентен (на результате возвращает null), поэтому эффект
     // сходится за один повтор и не зацикливается
     useEffect(() => {
-        if (!layMagnet)
+        // шаг по истории магнит не переигрывает: иначе «назад» не давало бы
+        // видимого результата — дотяжка тут же возвращала бы прежний размер
+        if (!layMagnet || settling())
             return;
         const next = snapLayout(containers, limits);
         if (next) {
@@ -3653,7 +3761,12 @@ function TrayGenerator() {
     const ahead = useRef([]); // шаги вперёд (после «назад»)
     const histPrev = useRef({ containers, limits });
     const histAt = useRef(0);
-    const jumping = useRef(false);
+    // Окно «доводки» после шага по истории. Восстановленное состояние тут же
+    // проходят нормализующие эффекты (лимит раскладки, магниты, живая горка) —
+    // их правки не должны считаться новым действием: иначе они обрывали бы
+    // ветку «вперёд», и кнопка работала бы через раз.
+    const jumpAt = useRef(0);
+    const settling = () => Date.now() - jumpAt.current < 400;
     const [histLen, setHistLen] = useState(0);
     const [aheadLen, setAheadLen] = useState(0);
     const syncLens = () => { setHistLen(hist.current.length); setAheadLen(ahead.current.length); };
@@ -3662,8 +3775,7 @@ function TrayGenerator() {
         if (prev.containers === containers && prev.limits === limits)
             return;
         histPrev.current = { containers, limits };
-        if (jumping.current) {
-            jumping.current = false;
+        if (settling()) {
             syncLens();
             return;
         }
@@ -3687,7 +3799,7 @@ function TrayGenerator() {
         if (!snap)
             return;
         to.current.push({ containers, limits });
-        jumping.current = true;
+        jumpAt.current = Date.now();
         histAt.current = 0;
         setContainers(snap.containers);
         setLimits(snap.limits);
@@ -4237,13 +4349,16 @@ function TrayGenerator() {
         };
         const items = containers.map((c) => {
             const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
+            // Позиции замков согласуются с соседом: если у одного из двух зона не
+            // годится (низкая или ступенчатая стенка), замка нет у обоих — иначе
+            // рельс упёрся бы в сплошную стенку соседа и контейнеры не сошлись.
             const conn = !connect
                 ? { N: null, S: null, W: null, E: null }
                 : {
-                    E: E ? { male: railCarrier(c, E), vs: connectorVs(Math.min(c.D, E.D)) } : null,
-                    W: Wn ? { male: !railCarrier(Wn, c), vs: connectorVs(Math.min(c.D, Wn.D)) } : null,
-                    S: S ? { male: railCarrier(c, S), vs: connectorVs(Math.min(c.W, S.W)) } : null,
-                    N: N ? { male: !railCarrier(N, c), vs: connectorVs(Math.min(c.W, N.W)) } : null,
+                    E: E ? { male: railCarrier(c, E), vs: pairVs(c, "E", E, "W", connectorVs(Math.min(c.D, E.D))) } : null,
+                    W: Wn ? { male: !railCarrier(Wn, c), vs: pairVs(c, "W", Wn, "E", connectorVs(Math.min(c.D, Wn.D))) } : null,
+                    S: S ? { male: railCarrier(c, S), vs: pairVs(c, "S", S, "N", connectorVs(Math.min(c.W, S.W))) } : null,
+                    N: N ? { male: !railCarrier(N, c), vs: pairVs(c, "N", N, "S", connectorVs(Math.min(c.W, N.W))) } : null,
                 };
             const ck = JSON.stringify(conn);
             let hit = geoCache.current.get(c);
@@ -4961,8 +5076,8 @@ function TrayGenerator() {
                         React.createElement(Param, { label: "\u0421\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u0435 \u0443\u0433\u043B\u043E\u0432", unit: "\u043C\u043C", value: cur.cornerR ?? DEFAULT_CORNER_R, min: 0, max: Math.min(6, cur.wallOut), step: 0.1, onChange: (v) => updCur({ cornerR: v }) }),
                         React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "-6px 0 10px", lineHeight: 1.4 } }, "\u041D\u0430\u0440\u0443\u0436\u043D\u044B\u0435 \u0432\u0435\u0440\u0442\u0438\u043A\u0430\u043B\u044C\u043D\u044B\u0435 \u0443\u0433\u043B\u044B: \u0440\u0430\u0434\u0438\u0443\u0441 \u0437\u0430\u043C\u0435\u0442\u043D\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043A\u0440\u0443\u0433\u043B\u0435\u043D\u0438\u044F \u043A\u0440\u043E\u043C\u043A\u0438.")),
                     React.createElement(Collapse, { title: "\u0414\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0430 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.grid, onToggle: () => toggleSec("grid") },
-                        React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: cur.cols, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
-                        React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: cur.rows, min: 1, max: 8, disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })))),
+                        React.createElement(Stepper, { label: "\u041A\u043E\u043B\u043E\u043D\u043A\u0438", value: Math.min(cur.cols, maxColsOf(cur)), min: 1, max: Math.min(8, maxColsOf(cur)), disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ cols: v }) }),
+                        React.createElement(Stepper, { label: "\u0420\u044F\u0434\u044B", value: Math.min(cur.rows, maxRowsOf(cur)), min: 1, max: Math.min(8, maxRowsOf(cur)), disabled: cur.lockOuter && cur.lockCell, onChange: (v) => applyParam({ rows: v }) })))),
                 sub === "cell" && (React.createElement("div", null,
                     React.createElement(Collapse, { title: "\u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u044F\u0447\u0435\u0439\u043A\u0438", open: openSecs.cellPick, onToggle: () => toggleSec("cellPick") },
                         editorCell,

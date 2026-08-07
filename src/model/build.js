@@ -12,6 +12,49 @@ import { layout, getWall, getCellLvl, DEFAULT_CORNER_R } from "./layout.js";
 import { insertsOf, insertSlots, insertInPlace } from "./inserts.js";
 import { CARDH } from "./cardholder.js";
 
+// ── Зона замка на внешней стенке ──
+// Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у сегмента,
+// на котором он стоит (зона может накрыть два сегмента — высота по минимуму).
+// even: все сегменты под зоной одной высоты. На ступенчатой стенке (горка)
+// замок не ставится: вырезать зону из сегментов разной высоты и вернуть
+// плоскую — значит разломать лесенку на куски.
+export function lockZone(c, side, vc) {
+  const L = layout(c);
+  const wallOut = c.wallOut;
+  const CONN = connOf(c);
+  const sideL = side.toLowerCase();
+  const segs = [];
+  if (sideL === "n" || sideL === "s") {
+    const j = sideL === "n" ? 0 : L.nRows - 1;
+    for (let i = 0; i < L.nColsAt(j); i++)
+      segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
+  } else {
+    for (let j = 0; j < L.nRows; j++)
+      segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
+  }
+  const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
+  let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
+  for (const sg of segs) {
+    if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01) continue;
+    const wc = getWall(c, sg.key);
+    h = Math.min(h, wc.h);
+    hMax = Math.max(hMax, wc.h);
+    const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
+    if (ov > best) { best = ov; rnd = wc.rnd; }
+  }
+  if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; hMax = wc.h; rnd = wc.rnd; }
+  return { vc, h, rnd, even: hMax - h < 0.01 };
+}
+export const lockFits = (CONN, u) => u.even && u.h >= lockMinH(CONN);
+// Замок ставится, только если зона годится у ОБОИХ соседей: иначе рельс
+// упрётся в сплошную стенку соседа, у которого паз не прорезан.
+export const lockOk = (c, side, vc) => {
+  const CONN = connOf(c);
+  return CONN.fits && lockFits(CONN, lockZone(c, side, vc));
+};
+export const pairVs = (a, sideA, b, sideB, vs) =>
+  vs.filter((v) => lockOk(a, sideA, v) && lockOk(b, sideB, v));
+
 // ── Полная сборка контейнера. conn = {N,S,W,E: {male, vs} | null} ──
 // opts.fillets === false отключает галтели (для сверки с эталоном)
 export function buildContainer(c, conn, opts = {}) {
@@ -97,40 +140,10 @@ export function buildContainer(c, conn, opts = {}) {
   };
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
-  // Замок следует СВОЕЙ стенке: высота и скругление кромки берутся у
-  // сегмента, на котором он стоит (зона может накрыть два сегмента —
-  // высота по минимуму). Слишком низкая стенка — зона не режется вовсе
-  // и замок не ставится: стенка остаётся целой и ровной.
-  const zoneInfo = (side, vc) => {
-    const sideL = side.toLowerCase();
-    const segs = [];
-    if (sideL === "n" || sideL === "s") {
-      const j = sideL === "n" ? 0 : L.nRows - 1;
-      for (let i = 0; i < L.nColsAt(j); i++)
-        segs.push({ a: L.cx0(i, j) - wallOut, b: L.cx0(i, j) + L.cw(i, j) + wallOut, key: `o:${sideL}:${i}` });
-    } else {
-      for (let j = 0; j < L.nRows; j++)
-        segs.push({ a: L.cz0(j) - wallOut, b: L.cz0(j) + L.cd(j) + wallOut, key: `o:${sideL}:${j}` });
-    }
-    const z0 = vc - CONN.bossW / 2, z1 = vc + CONN.bossW / 2;
-    let h = Infinity, hMax = -Infinity, rnd = 0, best = -1e9;
-    for (const sg of segs) {
-      if (sg.b < z0 + 0.01 || sg.a > z1 - 0.01) continue;
-      const wc = getWall(c, sg.key);
-      h = Math.min(h, wc.h);
-      hMax = Math.max(hMax, wc.h);
-      const ov = Math.min(sg.b, z1) - Math.max(sg.a, z0);
-      if (ov > best) { best = ov; rnd = wc.rnd; }
-    }
-    if (!Number.isFinite(h)) { const wc = getWall(c, `o:${sideL}:0`); h = wc.h; hMax = wc.h; rnd = wc.rnd; }
-    // even: все сегменты под зоной одной высоты. На ступенчатой стенке
-    // (горка) замок не ставится: вырезать зону из сегментов разной высоты
-    // и вернуть плоскую — значит разломать лесенку на куски
-    return { vc, h, rnd, even: hMax - h < 0.01 };
-  };
+  const zoneInfo = (side, vc) => lockZone(c, side, vc);
   const unitsOf = (side) =>
     conn[side] && CONN.fits
-      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => u.even && u.h >= lockMinH(CONN))
+      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => lockFits(CONN, u))
       : [];
   const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
   const zonesFrom = (units) =>
@@ -515,11 +528,18 @@ export function buildContainer(c, conn, opts = {}) {
     const toO = (u) => facePos + dir * ((u * run) / Lslope);
     const toY = (u) => yTop - (u * dh) / Lslope;
     const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+    // Задняя грань панели утапливается в стенку, но НЕ насквозь: за дальней
+    // гранью стенки она проступила бы на наружной плоскости (там стык с
+    // соседом) или влезла бы в соседнюю ячейку.
+    const backO = (o) => {
+      const b = o - dir * thkH, lim = facePos - dir * thk;
+      return dir > 0 ? Math.max(b, lim) : Math.min(b, lim);
+    };
     const pushQuadUS = (corners) => {
       // corners: 4 точки [u, s]; передняя грань на наклонной плоскости,
       // задняя — сдвиг по горизонтали внутрь (к стенке)
       const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
-      const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+      const qb = corners.map(([u, sv]) => p3(backO(toO(u)), toY(u), sv));
       solids.push(prismSolid(qa, qb, tag));
     };
     // рамка наклонной панели — тоже две толщины стенки
@@ -602,9 +622,14 @@ export function buildContainer(c, conn, opts = {}) {
     const toO = (u) => facePos + dir * ((u * run) / Lslope);
     const toY = (u) => yTop - (u * dh) / Lslope;
     const p3 = (o, y, sv) => (orient === "x" ? [o, y, sv] : [sv, y, o]);
+    // задняя грань не пробивает стенку насквозь (см. сотовый пандус)
+    const backO = (o) => {
+      const b = o - dir * thkH, lim = facePos - dir * thk;
+      return dir > 0 ? Math.max(b, lim) : Math.min(b, lim);
+    };
     const pushQuadUS = (corners) => {
       const qa = corners.map(([u, sv]) => p3(toO(u), toY(u), sv));
-      const qb = corners.map(([u, sv]) => p3(toO(u) - dir * thkH, toY(u), sv));
+      const qb = corners.map(([u, sv]) => p3(backO(toO(u)), toY(u), sv));
       solids.push(prismSolid(qa, qb, tag));
     };
     // рамка наклонной панели — тоже две толщины стенки

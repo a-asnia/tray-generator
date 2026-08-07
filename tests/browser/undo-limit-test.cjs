@@ -81,6 +81,34 @@ await page.keyboard.press("Control+z");
 await page.waitForTimeout(400);
 ok("Ctrl+Z убрал добавленный контейнер", (await st()).containers.length === 1);
 
+// «назад/вперёд» переживают нормализующие эффекты (магнит раскладки):
+// раньше дотяжка сразу после шага считалась новым действием и обрывала
+// ветку «вперёд» — кнопка работала через раз
+await page.locator("label", { hasText: "Магнит раскладки" }).locator('input[type="checkbox"]').check();
+await page.waitForTimeout(800);
+const nMag = (await st()).containers.length;
+ok("магнит раскладки достроил сборку", nMag > 1, ` → ${nMag}`);
+await undoBtn.click();
+await page.waitForTimeout(700);
+ok("«назад» отменил дотяжку магнита", (await st()).containers.length < nMag,
+  ` → ${(await st()).containers.length}`);
+ok("«вперёд» доступен после отмены при магните", !(await redoBtn.isDisabled()));
+await redoBtn.click();
+await page.waitForTimeout(700);
+ok("«вперёд» вернул дотянутую сборку", (await st()).containers.length === nMag);
+await page.locator("label", { hasText: "Магнит раскладки" }).locator('input[type="checkbox"]').uncheck();
+await page.waitForTimeout(400);
+await page.evaluate(() => {
+  const s = JSON.parse(localStorage.getItem("trayGenState"));
+  s.containers = [s.containers[0]];
+  localStorage.setItem("trayGenState", JSON.stringify(s));
+});
+await page.reload({ waitUntil: "load" });
+await page.waitForSelector("canvas");
+await page.waitForTimeout(700);
+await page.locator("button", { hasText: /^Раскладка$/ }).click();
+await page.waitForTimeout(300);
+
 // ── лимит раскладки жёсткий ──
 await setNum("Раскладка по X", 20); // 200 мм при контейнере 170
 let cs = (await st()).containers;

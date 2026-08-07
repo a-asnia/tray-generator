@@ -107,6 +107,16 @@ export function fitAssembly(containers, limits) {
         size.set(g, v);
       }
     }
+    // хвост от округления до 0,1 мм снимает самая широкая колонка: иначе
+    // сборка остаётся на десятую шире рамки, а лимит — жёсткий
+    while (excess > 0.05) {
+      const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
+      if (!open.length) break;
+      const g = open.reduce((a, b) => (size.get(b) > size.get(a) ? b : a));
+      const v = mvR1(Math.max(30, size.get(g) - excess));
+      excess = mvR1(excess - (size.get(g) - v));
+      size.set(g, v);
+    }
     // ужимаем только то, что перестало влезать: контейнеры уже, чем
     // колонка (магнит соседей выключен), остаются как были
     out = out.map((c) => (!c.lockOuter && c[ax.dim] > size.get(c[ax.pos]) + 0.05

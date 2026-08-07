@@ -15,14 +15,14 @@ import { boxSolid } from "../geometry/solids.js";
 // minW; back/depth/frontH — габариты самого кармана.
 // wallH — высота стенки, при которой навешенный карман не упирается в
 // стол: окна у кромки, а спинка висит на (back − плечо) ниже них.
-export const CARDH = { hw: 12, hh: 6, sp: 40, top: 4, minW: 60, minH: 22, back: 55, depth: 14, frontH: 30 };
+export const CARDH = { hw: 12, hh: 6, sp: 40, top: 4, minW: 60, minH: 22, back: 55, depth: 14, frontH: 30, wide: 70, T: 2.4 };
 CARDH.wallH = Math.ceil(CARDH.top + CARDH.hh + CARDH.back - (CARDH.hh - 2.5) + 2);
 
 // Съёмный карман: спинка + дно + передний борт + два крюка.
 // wallOut контейнера задаёт длину плеча крюка (сквозь стенку).
 export function cardHolderSolids(c) {
   const wallOut = c && Number.isFinite(c.wallOut) ? c.wallOut : 2.9;
-  const W = 70, Hb = CARDH.back, T = 2.4;         // спинка: ширина, высота, толщина
+  const W = CARDH.wide, Hb = CARDH.back, T = CARDH.T; // спинка: ширина, высота, толщина
   const depth = CARDH.depth, frontH = CARDH.frontH; // карман: глубина и высота борта
   const hookW = CARDH.hw - 2;       // крюк уже окна на зазор по 1 мм
   const armT = CARDH.hh - 2.5;      // плечо ниже окна — люфт для навешивания

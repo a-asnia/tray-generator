@@ -3,7 +3,7 @@
 // (o:сторона:индекс — внешние, v:i:j / h:j:i — перегородки)
 // ══════════════════════════════════════════════════════════════
 
-import { solveSizes } from "./solver.js";
+import { solveSizes, MIN_CELL } from "./solver.js";
 
 // заполнение оси ячейками целевого размера: последняя забирает остаток
 // (от одного до двух целевых размеров), как в логике раскладки
@@ -76,6 +76,12 @@ export function minOuterDim(c, axis) {
   return need;
 }
 
+// Сколько ячеек влезает в пролёт: ниже MIN_CELL ячейка перестаёт быть
+// ячейкой (стенки толще просвета), поэтому деление ограничено размером.
+export const maxCells = (inner, wall) => Math.max(1, Math.floor((inner + wall) / (MIN_CELL + wall)));
+export const maxColsOf = (c) => maxCells(c.W - 2 * c.wallOut, c.wall);
+export const maxRowsOf = (c) => maxCells(c.D - 2 * c.wallOut, c.wall);
+
 export function layout(c) {
   const innerW = c.W - 2 * c.wallOut;
   const innerD = c.D - 2 * c.wallOut;
@@ -84,8 +90,11 @@ export function layout(c) {
     colWs = fillAxis(innerW, c.wall, c.cellWt || 40);
     rowDs = fillAxis(innerD, c.wall, c.cellDt || 40);
   } else {
-    colWs = Array.from({ length: c.cols }, () => (innerW - (c.cols - 1) * c.wall) / c.cols);
-    rowDs = Array.from({ length: c.rows }, () => (innerD - (c.rows - 1) * c.wall) / c.rows);
+    // деление ограничено пролётом: 6 колонок в 30 мм дали бы ячейки по 3 мм
+    const nc = Math.max(1, Math.min(c.cols, maxCells(innerW, c.wall)));
+    const nr = Math.max(1, Math.min(c.rows, maxCells(innerD, c.wall)));
+    colWs = Array.from({ length: nc }, () => (innerW - (nc - 1) * c.wall) / nc);
+    rowDs = Array.from({ length: nr }, () => (innerD - (nr - 1) * c.wall) / nr);
   }
   // явные размеры рядов (появляются при замке ряда) фиксируют сетку рядов
   if (c.rowDs && c.rowDs.length) rowDs = fitSizes(c.rowDs, c.lockedRows || {}, innerD - (c.rowDs.length - 1) * c.wall);
