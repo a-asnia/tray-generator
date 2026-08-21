@@ -6,7 +6,8 @@
 // ГПСЧ детерминированный: упавший сценарий воспроизводится по номеру.
 import { buildContainer } from "../src/model/build.js";
 import { layout, remapCells } from "../src/model/layout.js";
-import { moveContainer, fitAssembly, gridDims } from "../src/model/laymove.js";
+import { moveContainer, fitAssembly, rowsOf } from "../src/model/laymove.js";
+import { assemble } from "../src/model/assembly.js";
 import { snapLayout } from "../src/model/laymagnet.js";
 import { presetContainer, PRESETS, GORKA_DEF } from "../src/model/presets.js";
 import { normalizeProject } from "../src/state/storage.js";
@@ -33,7 +34,7 @@ const invariants = (label, cs, limits) => {
   const seen = new Set();
   for (const c of cs) {
     const k = `${c.gx},${c.gy}`;
-    if (seen.has(k)) bad(`${label}: две коробки в одной клетке ${k}`);
+    if (seen.has(k)) bad(`${label}: два контейнера на одном месте ${k}`);
     seen.add(k);
     if (!(c.W >= 29.9 && c.W <= limits.maxW + 0.01)) bad(`${label}: ширина вне лимита`, ` → ${c.W}`);
     if (!(c.D >= 29.9 && c.D <= limits.maxD + 0.01)) bad(`${label}: глубина вне лимита`, ` → ${c.D}`);
@@ -61,15 +62,33 @@ const geometryOk = (label, cs) => {
 };
 
 const fits = (label, cs, limits) => {
-  const { colW, rowD } = gridDims(cs);
-  const sw = Object.values(colW).reduce((s, v) => s + v, 0);
-  const sd = Object.values(rowD).reduce((s, v) => s + v, 0);
-  // колонка с замком габарита не ужимается — ниже этой суммы не опуститься
-  const froz = (key, dim, map) => Object.keys(map).reduce((s, g) =>
-    s + (cs.some((c) => String(c[key]) === g && c.lockOuter) ? map[g] : 30), 0);
-  const minW = froz("gx", "W", colW), minD = froz("gy", "D", rowD);
-  if (sw > limits.layW * 10 + 0.05 && sw > minW + 0.05) bad(`${label}: сборка шире лимита`, ` → ${sw} > ${limits.layW * 10}`);
-  if (sd > limits.layD * 10 + 0.05 && sd > minD + 0.05) bad(`${label}: сборка глубже лимита`, ` → ${sd} > ${limits.layD * 10}`);
+  const rows = rowsOf(cs);
+  // ниже суммы замков и минимумов сборку не ужать — это не нарушение
+  for (const r of rows) {
+    const floor = r.list.reduce((s, c) => s + (c.lockOuter ? c.W : 30), 0);
+    if (r.width > limits.layW * 10 + 0.05 && r.width > floor + 0.05)
+      bad(`${label}: ряд шире лимита`, ` → ${r.width} > ${limits.layW * 10}`);
+  }
+  const sd = rows.reduce((s, r) => s + r.depth, 0);
+  const floorD = rows.reduce((s, r) => s + (r.list.some((c) => c.lockOuter) ? r.depth : 30), 0);
+  if (sd > limits.layD * 10 + 0.05 && sd > floorD + 0.05)
+    bad(`${label}: сборка глубже лимита`, ` → ${sd} > ${limits.layD * 10}`);
+};
+
+// сборка строится и соседи стыкуются без разъездов
+const assembles = (label, cs) => {
+  let a;
+  try { a = assemble(cs, true); }
+  catch (e) { bad(`${label}: сборка упала`, ` → ${e.message}`); return; }
+  if (a.items.length !== cs.length) bad(`${label}: потеряны контейнеры при сборке`);
+  for (const it of a.items) {
+    if (!Number.isFinite(it.ox) || !Number.isFinite(it.oz)) bad(`${label}: битая позиция`);
+    for (const side of ["N", "S", "W", "E"]) {
+      const g = it.conn[side];
+      if (g && !Array.isArray(g)) bad(`${label}: описание стороны не список`);
+      if (g) for (const gr of g) if (!gr.vs.every(Number.isFinite)) bad(`${label}: битые позиции замков`);
+    }
+  }
 };
 
 const RUNS = 60;
@@ -85,7 +104,7 @@ for (let run = 0; run < RUNS; run++) {
     const op = Math.floor(r() * 6);
     if (op === 0) {
       const i = Math.floor(r() * cs.length);
-      cs = moveContainer(cs, i, Math.floor(r() * 4) - 1, Math.floor(r() * 3) - 1);
+      cs = moveContainer(cs, i, Math.floor(r() * 4) - 1, Math.floor(r() * 4));
     } else if (op === 1) {
       cs = fitAssembly(cs, limits) || cs;
     } else if (op === 2) {
@@ -111,6 +130,7 @@ for (let run = 0; run < RUNS; run++) {
   cs = fitAssembly(cs, limits) || cs;
   fits(label, cs, limits);
   geometryOk(label, cs);
+  assembles(label, cs);
 
   // и пережить сохранение-загрузку проекта
   const proj = normalizeProject(JSON.parse(JSON.stringify({ containers: cs, limits })));

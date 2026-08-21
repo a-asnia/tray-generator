@@ -45,6 +45,7 @@ const MODULES = [
   "src/state/storage.js",
   "src/model/laymagnet.js",
   "src/model/laymove.js",
+  "src/model/assembly.js",
   "src/ui/theme.js",
   "src/ui/controls.jsx",
   "src/ui/Schematic.jsx",

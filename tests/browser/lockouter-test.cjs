@@ -95,7 +95,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   // магнит соседей не двигает зафиксированный контейнер
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await setNum("Раскладка по X", 40);
-  await page.locator('button:text-is("+")').nth(2).click(); // сосед справа
+  await page.locator('button:text-is("+")').first().click(); // сосед в конце ряда
   await page.waitForTimeout(500);
   st = await state();
   const lockedIdx = st.containers.findIndex((c) => c.lockOuter);

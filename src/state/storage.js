@@ -76,6 +76,8 @@ const sanitizeContainer = (c0) => {
   c.floor = num(c.floor, 1.6, 0.2, 40);
   if (c.cornerR !== undefined) c.cornerR = num(c.cornerR, 2, 0, 20);
   c.gridMode = c.gridMode === "size" ? "size" : "count";
+  // прижим ряда: к левому краю сборки (по умолчанию) или к правому
+  if (c.rowAlign === "right") c.rowAlign = "right"; else delete c.rowAlign;
   c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
   c.cells = Object.fromEntries(
     Object.entries(obj(c.cells)).map(([k, v]) => {

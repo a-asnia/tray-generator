@@ -1,15 +1,197 @@
-// ── Перенос контейнеров по раскладке (перетаскивание мышью) ──
-// Раскладка — сетка клеток: ширину колонки задаёт самый широкий контейнер
-// в ней, глубину ряда — самый глубокий. Поэтому переехавший контейнер
-// подгоняется под габарит НОВОЙ клетки, а не тащит свой размер с собой:
-// иначе колонка расползается, соседи остаются прежними, и сборка расходится
-// щелями — а «ласточкины хвосты» соединителей повисают в воздухе.
+// ── Раскладка контейнеров: ряды со свободными ширинами ──
+// Сборка — это стопка РЯДОВ. Внутри ряда контейнеры стоят слева направо
+// вплотную, и ширина у каждого своя: 160 + 160 в одном ряду и 118 в
+// другом — нормальная раскладка, колонки между рядами не связаны.
+// Общая для ряда только глубина: иначе между рядами появились бы щели.
+//
+// Адресация: gy — номер ряда, gx — место в ряду (порядок слева направо).
 
 import { minOuterDim } from "./layout.js";
 
 const mvR1 = (v) => Math.round(v * 10) / 10;
+export const MIN_BOX = 30; // минимальный габарит контейнера, мм
 
-// габариты клеток сетки: ширины колонок по gx и глубины рядов по gy
+// Ряды сборки: [{ gy, list (по порядку gx), depth, width }]
+export function rowsOf(containers) {
+  const gys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
+  return gys.map((gy) => {
+    const list = containers.filter((c) => c.gy === gy).sort((a, b) => a.gx - b.gx);
+    return {
+      gy,
+      list,
+      depth: Math.max(MIN_BOX, ...list.map((c) => c.D)),
+      width: list.reduce((s, c) => s + c.W, 0),
+      // ряд короче самого широкого прижимается к левому краю или к правому
+      align: list[0] && list[0].rowAlign === "right" ? "right" : "left",
+    };
+  });
+}
+
+// Позиции контейнеров на столе: ряды идут от ближнего к дальнему, внутри
+// ряда — слева направо вплотную; ряды выровнены по левому краю.
+export function placeContainers(containers) {
+  const rows = rowsOf(containers);
+  const totalD = rows.reduce((s, r) => s + r.depth, 0);
+  const totalW = Math.max(0, ...rows.map((r) => r.width));
+  const pos = new Map(); // id → { ox, oz, row }
+  let z = 0;
+  for (const r of rows) {
+    let x = r.align === "right" ? totalW - r.width : 0;
+    for (const c of r.list) {
+      pos.set(c.id, { ox: x + c.W / 2 - totalW / 2, oz: z + r.depth / 2 - totalD / 2, row: r });
+      x += c.W;
+    }
+    z += r.depth;
+  }
+  // порядок items совпадает с порядком списка контейнеров: номера
+  // контейнеров в панели — это индексы в нём
+  const items = containers.map((c) => ({ c, ...(pos.get(c.id) || { ox: 0, oz: 0, row: rows[0] }) }));
+  return { items, rows, totalW, totalD };
+}
+
+// Соседи по сборке: в ряду — предыдущий и следующий (стыкуются полностью),
+// между рядами — все, чьи пролёты по X пересекаются. Возвращает по каждой
+// стороне список { c, at (позиция в списке items), a, b } — абсолютный
+// перехлёст, по которому считаются замки.
+export function neighborsOf(placed, idx) {
+  const me = placed.items[idx];
+  const x0 = me.ox - me.c.W / 2, x1 = me.ox + me.c.W / 2;
+  const out = { W: [], E: [], N: [], S: [] };
+  placed.items.forEach((o, k) => {
+    if (k === idx) return;
+    if (o.c.gy === me.c.gy) {
+      if (o.c.gx === me.c.gx - 1) out.W.push({ item: o, k });
+      if (o.c.gx === me.c.gx + 1) out.E.push({ item: o, k });
+      return;
+    }
+    if (o.c.gy !== me.c.gy - 1 && o.c.gy !== me.c.gy + 1) return;
+    const a = Math.max(x0, o.ox - o.c.W / 2), b = Math.min(x1, o.ox + o.c.W / 2);
+    if (b - a < 0.5) return; // касание углом — не соседство
+    (o.c.gy < me.c.gy ? out.N : out.S).push({ item: o, k, a, b });
+  });
+  return out;
+}
+
+// Подгонка контейнера под ряд: общая только глубина, ширина остаётся своей.
+export function fitToRow(c, depth) {
+  if (c.lockOuter) return c;
+  const D2 = mvR1(Math.max(MIN_BOX, depth ?? c.D, minOuterDim(c, "D")));
+  if (Math.abs(D2 - c.D) < 0.05) return c;
+  // внутренние размеры не переписываем: решатель растянет ряды сам
+  return { ...c, D: D2 };
+}
+
+// Нумерация: ряды подряд с нуля, места в ряду — подряд слева направо.
+// Ссылки на неизменившиеся контейнеры сохраняются (жив кэш геометрии).
+export function renumber(containers) {
+  const rows = rowsOf(containers);
+  const out = [];
+  rows.forEach((r, gy) => {
+    r.list.forEach((c, gx) => out.push(c.gy === gy && c.gx === gx ? c : { ...c, gx, gy }));
+  });
+  // порядок в массиве сохраняем прежним: номера контейнеров не скачут
+  return containers.map((c) => out.find((o) => o.id === c.id) || c);
+}
+
+// Выравнивание глубины внутри затронутых рядов (клетка ряда держит глубину)
+function tidyRows(containers, gys) {
+  const depth = new Map(rowsOf(containers).map((r) => [r.gy, r.depth]));
+  return containers.map((c) => (gys.has(c.gy) ? fitToRow(c, depth.get(c.gy)) : c));
+}
+
+// ── Перенос контейнера ──
+// gy — ряд назначения (может быть новым: −1 перед первым, n после последнего),
+// pos — место в ряду (0…длина). Возвращает новый список либо прежний.
+export function moveContainer(containers, idx, gy, pos) {
+  const src = containers[idx];
+  if (!src || !Number.isFinite(gy) || !Number.isFinite(pos)) return containers;
+  const rows = rowsOf(containers);
+  const row = rows.find((r) => r.gy === gy);
+  const sameRow = src.gy === gy;
+  if (sameRow && row) {
+    const cur = row.list.indexOf(src);
+    if (pos === cur || pos === cur + 1) return containers; // ничего не меняется
+  }
+  const depth = row ? row.depth : src.D;
+  // порядок в новом ряду: вынимаем контейнер и вставляем на место pos
+  const target = (row ? row.list.filter((c) => c !== src) : []);
+  const at = Math.max(0, Math.min(target.length, sameRow && row && row.list.indexOf(src) < pos ? pos - 1 : pos));
+  target.splice(at, 0, src);
+  const orderIn = new Map(target.map((c, k) => [c.id, k]));
+  // старый ряд ужимается: места пересчитываются подряд
+  const restOld = rows.find((r) => r.gy === src.gy);
+  const oldOrder = new Map((restOld ? restOld.list.filter((c) => c !== src) : []).map((c, k) => [c.id, k]));
+  let next = containers.map((c) => {
+    if (c.id === src.id) return { ...fitToRow(c, depth), gx: orderIn.get(c.id), gy };
+    if (c.gy === gy) return { ...c, gx: orderIn.get(c.id) };
+    if (c.gy === src.gy) return { ...c, gx: oldOrder.get(c.id) };
+    return c;
+  });
+  next = renumber(next);
+  const touched = new Set([next[idx].gy]);
+  return tidyRows(next, touched);
+}
+
+// ── Жёсткая рамка стола ──
+// Лимит раскладки не превышается никогда: ряд шире рамки ужимается по
+// ширине (пропорционально, но не ниже 30 мм и не за счёт контейнеров с
+// замком габарита), стопка рядов глубже рамки — по глубине.
+// Идемпотентно: на помещающейся сборке возвращает null.
+export function fitAssembly(containers, limits) {
+  if (!containers || !containers.length || !limits) return null;
+  let out = containers;
+  const shrink = (sizes, frozen, total) => {
+    // sizes: Map key→размер; frozen: Set ключей, которые не ужимаются
+    let excess = mvR1([...sizes.values()].reduce((s, v) => s + v, 0) - total);
+    if (excess <= 0.05) return null;
+    const next = new Map(sizes);
+    for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
+      const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
+      const room = open.reduce((s, k) => s + next.get(k) - MIN_BOX, 0);
+      if (room <= 0.05) break;
+      const take = Math.min(excess, room);
+      for (const k of open) {
+        const v = mvR1(Math.max(MIN_BOX, next.get(k) - (take * (next.get(k) - MIN_BOX)) / room));
+        excess = mvR1(excess - (next.get(k) - v));
+        next.set(k, v);
+      }
+    }
+    while (excess > 0.05) {
+      const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
+      if (!open.length) break;
+      const k = open.reduce((a, b) => (next.get(b) > next.get(a) ? b : a));
+      const v = mvR1(Math.max(MIN_BOX, next.get(k) - excess));
+      excess = mvR1(excess - (next.get(k) - v));
+      next.set(k, v);
+    }
+    return next;
+  };
+
+  // 1. ширина: каждый ряд отдельно
+  const limW = (limits.layW || 0) * 10;
+  if (limW > 0) {
+    for (const r of rowsOf(out)) {
+      const sizes = new Map(r.list.map((c) => [c.id, c.W]));
+      const frozen = new Set(r.list.filter((c) => c.lockOuter).map((c) => c.id));
+      const fixed = shrink(sizes, frozen, limW);
+      if (!fixed) continue;
+      out = out.map((c) => (fixed.has(c.id) && c.W > fixed.get(c.id) + 0.05 ? { ...c, W: fixed.get(c.id) } : c));
+    }
+  }
+  // 2. глубина: стопка рядов
+  const limD = (limits.layD || 0) * 10;
+  if (limD > 0) {
+    const rows = rowsOf(out);
+    const sizes = new Map(rows.map((r) => [r.gy, r.depth]));
+    const frozen = new Set(rows.filter((r) => r.list.some((c) => c.lockOuter)).map((r) => r.gy));
+    const fixed = shrink(sizes, frozen, limD);
+    if (fixed)
+      out = out.map((c) => (!c.lockOuter && c.D > fixed.get(c.gy) + 0.05 ? { ...c, D: fixed.get(c.gy) } : c));
+  }
+  return out === containers ? null : out;
+}
+
+// совместимость: габариты «клеток» (ширина по месту в ряду, глубина ряда)
 export function gridDims(containers) {
   const colW = {}, rowD = {};
   for (const c of containers) {
@@ -17,110 +199,4 @@ export function gridDims(containers) {
     rowD[c.gy] = Math.max(rowD[c.gy] ?? 0, c.D);
   }
   return { colW, rowD };
-}
-
-// Подгонка контейнера под клетку. Меньше своих замков (зафиксированные
-// ячейки, фиксированные боксы) он стать не может — тогда под него
-// расширится сама клетка. Габарит «намертво» (lockOuter) не трогается.
-export function fitToCell(c, W, D) {
-  if (c.lockOuter) return c;
-  const W2 = mvR1(Math.max(30, W ?? c.W, minOuterDim(c, "W")));
-  const D2 = mvR1(Math.max(30, D ?? c.D, minOuterDim(c, "D")));
-  if (Math.abs(W2 - c.W) < 0.05 && Math.abs(D2 - c.D) < 0.05) return c;
-  // внутренние размеры (ряды, ширины ячеек) не переписываем: решатель
-  // раскладки сам растянет свободные пропорционально новому пролёту
-  return { ...c, W: W2, D: D2 };
-}
-
-// Схлопывание опустевших колонок и рядов и сдвиг сетки к началу координат.
-// Ссылки на неизменившиеся контейнеры сохраняются — кэш геометрии живёт.
-export function compactGrid(containers) {
-  const xs = [...new Set(containers.map((c) => c.gx))].sort((a, b) => a - b);
-  const ys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
-  const mx = new Map(xs.map((v, i) => [v, i]));
-  const my = new Map(ys.map((v, i) => [v, i]));
-  return containers.map((c) => {
-    const gx = mx.get(c.gx), gy = my.get(c.gy);
-    return gx === c.gx && gy === c.gy ? c : { ...c, gx, gy };
-  });
-}
-
-// Выравнивание габаритов в затронутых колонках и рядах: все контейнеры
-// колонки одной ширины, ряда — одной глубины (клетка держит размер).
-function tidyAt(containers, cols, rows) {
-  const { colW, rowD } = gridDims(containers);
-  return containers.map((c) =>
-    fitToCell(c, cols.has(c.gx) ? colW[c.gx] : c.W, rows.has(c.gy) ? rowD[c.gy] : c.D)
-  );
-}
-
-// Перенос контейнера idx в клетку (gx, gy). Клетка занята — контейнеры
-// меняются местами (каждый берёт габарит клетки, в которую приехал).
-// Возвращает новый список; если двигать нечего — прежний (та же ссылка).
-export function moveContainer(containers, idx, tgx, tgy) {
-  const src = containers[idx];
-  if (!src || !Number.isFinite(tgx) || !Number.isFinite(tgy)) return containers;
-  if (src.gx === tgx && src.gy === tgy) return containers;
-  const { colW, rowD } = gridDims(containers);
-  const dst = containers.findIndex((c, i) => i !== idx && c.gx === tgx && c.gy === tgy);
-  // габариты клеток берём ДО переноса: обе стороны обмена целятся в
-  // размеры, которые клетки имели в исходной раскладке
-  const place = (c, gx, gy) => ({ ...fitToCell(c, colW[gx], rowD[gy]), gx, gy });
-  const next = containers.slice();
-  next[idx] = place(src, tgx, tgy);
-  if (dst >= 0) next[dst] = place(containers[dst], src.gx, src.gy);
-  const packed = compactGrid(next);
-  const cols = new Set([packed[idx].gx]), rows = new Set([packed[idx].gy]);
-  // при обмене вторая клетка тоже затронута; при простом переезде колонка
-  // источника могла только сузиться — выравнивать там нечего
-  if (dst >= 0) { cols.add(packed[dst].gx); rows.add(packed[dst].gy); }
-  return tidyAt(packed, cols, rows);
-}
-
-// Лимит раскладки — жёсткая рамка стола: сборка не вылезает за него
-// никогда. Если сумма ширин колонок (глубин рядов) вышла за лимит —
-// например, добавили контейнер в заполненную раскладку или уменьшили сам
-// лимит, — лишнее снимается пропорционально, но не ниже 30 мм и не с
-// контейнеров с зафиксированным намертво габаритом. Идемпотентно:
-// на уже помещающейся сборке возвращает null.
-export function fitAssembly(containers, limits) {
-  if (!containers || !containers.length || !limits) return null;
-  let out = containers;
-  for (const ax of [
-    { pos: "gx", dim: "W", total: (limits.layW || 0) * 10 },
-    { pos: "gy", dim: "D", total: (limits.layD || 0) * 10 },
-  ]) {
-    if (!(ax.total > 0)) continue;
-    const gs = [...new Set(out.map((c) => c[ax.pos]))].sort((a, b) => a - b);
-    const size = new Map(gs.map((g) => [g, Math.max(30, ...out.filter((c) => c[ax.pos] === g).map((c) => c[ax.dim]))]));
-    const frozen = new Set(gs.filter((g) => out.some((c) => c[ax.pos] === g && c.lockOuter)));
-    let excess = [...size.values()].reduce((s, v) => s + v, 0) - ax.total;
-    if (excess <= 0.05) continue;
-    for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
-      const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
-      const room = open.reduce((s, g) => s + size.get(g) - 30, 0);
-      if (room <= 0.05) break;
-      const take = Math.min(excess, room);
-      for (const g of open) {
-        const v = mvR1(Math.max(30, size.get(g) - (take * (size.get(g) - 30)) / room));
-        excess = mvR1(excess - (size.get(g) - v));
-        size.set(g, v);
-      }
-    }
-    // хвост от округления до 0,1 мм снимает самая широкая колонка: иначе
-    // сборка остаётся на десятую шире рамки, а лимит — жёсткий
-    while (excess > 0.05) {
-      const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
-      if (!open.length) break;
-      const g = open.reduce((a, b) => (size.get(b) > size.get(a) ? b : a));
-      const v = mvR1(Math.max(30, size.get(g) - excess));
-      excess = mvR1(excess - (size.get(g) - v));
-      size.set(g, v);
-    }
-    // ужимаем только то, что перестало влезать: контейнеры уже, чем
-    // колонка (магнит соседей выключен), остаются как были
-    out = out.map((c) => (!c.lockOuter && c[ax.dim] > size.get(c[ax.pos]) + 0.05
-      ? { ...c, [ax.dim]: size.get(c[ax.pos]) } : c));
-  }
-  return out === containers ? null : out;
 }

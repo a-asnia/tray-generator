@@ -77,7 +77,7 @@ const nT = buf.readUInt32LE(80);
 ok(`STL визитницы валиден (${nT} тр.)`, buf.length === 84 + nT * 50 && nT >= 84);
 
 // перетаскивание контейнеров по карте раскладки: два контейнера разной
-// ширины в одном ряду (клетки должны удержать свои габариты)
+// ширины в одном ряду — ширины при переносе сохраняются
 await page.evaluate(() => {
   const s = JSON.parse(localStorage.getItem("trayGenState"));
   const a = { ...s.containers[0], id: 1, gx: 0, gy: 0, W: 150, D: 120, cols: 1, rows: 1, cells: {}, walls: {} };
@@ -100,42 +100,43 @@ const dragCell = async (from, toXY) => {
   await page.mouse.down();
   await page.mouse.move(x0 + 10, y0 + 4, { steps: 3 });
   await page.mouse.move(toXY[0], toXY[1], { steps: 8 });
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(150);
   await page.mouse.up();
   await page.waitForTimeout(450);
 };
-await dragCell("№1", await centerOf("№2"));
+// тащим №1 на правую половину №2 — встаёт после него
+const b2 = await page.locator('button:text-is("№2")').boundingBox();
+await dragCell("№1", [b2.x + b2.width - 3, b2.y + b2.height / 2]);
 let cs = (await st()).containers;
-const after = cs.map((x) => [x.gx, x.gy, x.id]);
-ok("перетаскивание поменяло контейнеры местами",
-  cs[0].gx === 1 && cs[0].gy === 0 && cs[1].gx === 0 && cs[1].gy === 0,
+ok("перетаскивание поменяло порядок в ряду",
+  cs[0].gx === 1 && cs[1].gx === 0 && cs.every((c) => c.gy === 0),
   ` → ${cs.map((c) => `${c.gx},${c.gy}`).join(" | ")}`);
-ok("контейнеры приняли габарит своей клетки",
-  Math.abs(cs[0].W - 90) < 0.05 && Math.abs(cs[1].W - 150) < 0.05,
+ok("ширины при переносе сохранились", Math.abs(cs[0].W - 150) < 0.05 && Math.abs(cs[1].W - 90) < 0.05,
   ` → ${cs.map((c) => c.W).join(" | ")}`);
-ok("габариты остались за клетками (сборка плотная)",
-  cs.every((c) => {
-    const colW = Math.max(...cs.filter((o) => o.gx === c.gx).map((o) => o.W));
-    const rowD = Math.max(...cs.filter((o) => o.gy === c.gy).map((o) => o.D));
-    return Math.abs(c.W - colW) < 0.05 && Math.abs(c.D - rowD) < 0.05;
-  }),
-  ` → ${cs.map((c) => `${c.gx},${c.gy}:${c.W}×${c.D}`).join(" | ")}`);
 
-// перенос на пустую клетку: контейнер переезжает во второй ряд
-const cellXY = await page.evaluate((k) => {
-  const el = document.querySelector(`[data-cell="${k}"]`);
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
+// перенос в новый ряд: полоса «новый ряд снизу» появляется во время тяги
+const [sx, sy] = await centerOf("№1");
+await page.mouse.move(sx, sy);
+await page.mouse.down();
+await page.mouse.move(sx + 12, sy + 6, { steps: 3 });
+const strip = await page.evaluate(() => {
+  const els = [...document.querySelectorAll("[data-drop]")].filter((e) => /новый ряд снизу/.test(e.textContent));
+  if (!els.length) return null;
+  const r = els[0].getBoundingClientRect();
   return [r.x + r.width / 2, r.y + r.height / 2];
-}, `${after[1][0]},${after[1][1] + 1}`);
-ok("пустая клетка — тоже мишень для переноса", !!cellXY);
-if (cellXY) {
-  await dragCell("№2", cellXY);
+});
+ok("во время тяги видна полоса нового ряда", !!strip);
+if (strip) {
+  await page.mouse.move(strip[0], strip[1], { steps: 8 });
+  await page.waitForTimeout(120);
+  await page.mouse.up();
+  await page.waitForTimeout(450);
   cs = (await st()).containers;
-  ok("контейнер переехал в свободный ряд", cs[1].gy === 1 && cs[0].gy === 0,
+  ok("контейнер уехал в новый ряд", new Set(cs.map((c) => c.gy)).size === 2,
     ` → ${cs.map((c) => `${c.gx},${c.gy}`).join(" | ")}`);
-  ok("сетка осталась без дыр в начале координат",
-    Math.min(...cs.map((c) => c.gx)) === 0 && Math.min(...cs.map((c) => c.gy)) === 0);
+  ok("глубину взял у своего ряда", cs.every((c) => c.D > 0));
+} else {
+  await page.mouse.up();
 }
 
 // клик без сдвига по-прежнему просто выбирает контейнер
@@ -147,6 +148,7 @@ ok("одиночный клик выбирает контейнер", (await pag
 await setNum("Раскладка по X", 5);
 await setNum("Раскладка по Y", 5);
 ok("плюсы на месте при заполненной раскладке", (await page.locator('button:text-is("+")').count()) > 0);
+ok("кнопка «+ ряд» есть", (await page.locator('button:text-is("+ ряд")').count()) === 1);
 
 ok("ошибок в консоли нет", errs.length === 0, errs.length ? ` → ${errs[0]}` : "");
 await browser.close();

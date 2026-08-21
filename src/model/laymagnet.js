@@ -1,77 +1,101 @@
 // ── «Магнит раскладки» ──
-// При включённой галке сборка липнет к краю лимита раскладки: если до
-// края остаётся пустота, крайняя колонка (и ряд) дорастает до края —
-// когда это возможно в пределах лимита принтера; большое пустое место
-// (от 30 мм) закрывается новыми контейнерами, как в «Заполнить
-// раскладку». Контейнеры с замками не растягиваются. Возвращает новый
-// список контейнеров либо null, если менять нечего (идемпотентно —
-// повторный вызов на результате всегда даёт null).
+// При включённой галке сборка липнет к краю лимита раскладки: ряд, не
+// достающий до правого края, дотягивается последним контейнером (в
+// пределах лимита принтера), а большое пустое место (от 30 мм) закрывается
+// новым контейнером. То же по глубине: последний ряд дотягивается до
+// дальнего края или добавляется новый ряд. Контейнеры с замками не
+// растягиваются. Возвращает новый список либо null, если менять нечего
+// (идемпотентно — повторный вызов на результате всегда даёт null).
 
 import { makeContainer } from "../state/storage.js";
+import { rowsOf, MIN_BOX } from "./laymove.js";
 
 const round1 = (v) => Math.round(v * 10) / 10;
 
 export function snapLayout(containers, limits) {
-  if (!containers || !containers.length) return null;
-  const cs = containers.map((c) => ({ ...c }));
-  const added = [];
+  if (!containers || !containers.length || !limits) return null;
+  let cs = containers.map((c) => ({ ...c }));
   let changed = false;
+  const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
 
-  for (const ax of [
-    { pos: "gx", dim: "W", cross: "gy", crossDim: "D", total: limits.layW * 10, max: limits.maxW },
-    { pos: "gy", dim: "D", cross: "gx", crossDim: "W", total: limits.layD * 10, max: limits.maxD },
-  ]) {
-    const all = () => cs.concat(added);
-    const gs = all().map((c) => c[ax.pos]);
-    const g0 = Math.min(...gs);
-    let g1 = Math.max(...gs);
-    // ширина колонки/глубина ряда = максимум по контейнерам в ней
-    const sizeAt = (g) => Math.max(30, ...all().filter((c) => c[ax.pos] === g).map((c) => c[ax.dim]));
-    let sum = 0;
-    for (let g = g0; g <= g1; g++) sum += sizeAt(g);
-    let rem = ax.total - sum;
-    if (rem < 0.05) continue;
-
-    const growEdge = (g, amount) => {
-      const edge = all().filter((c) => c[ax.pos] === g);
-      if (!edge.every((c) => !c.lockOuter && !c.lockCell)) return false;
-      const target = round1(sizeAt(g) + amount);
-      if (target > ax.max + 0.01) return false;
-      for (const c of edge) c[ax.dim] = target;
-      changed = true;
-      return true;
-    };
-
-    // мелкий зазор (контейнер туда не поставить) — только дотяжка краёв
-    if (rem < 30) {
-      growEdge(g1, rem);
-      continue;
-    }
-    // контейнеров хватает — крайние дорастают до края целиком
-    if (growEdge(g1, rem)) continue;
-    // пустое место закрывают новые контейнеры (остаток меньше лимита
-    // принтера забирает последний, совсем мелкий хвост делится пополам)
-    while (rem >= 30) {
-      let size;
-      if (rem > ax.max + 0.01) size = rem - ax.max < 30 ? round1(rem / 2) : ax.max;
-      else size = round1(rem);
-      g1++;
-      const crossVals = [...new Set(all().map((c) => c[ax.cross]))];
-      for (const cv of crossVals) {
-        const peers = all().filter((c) => c[ax.cross] === cv);
-        const nc = makeContainer(null, 0, 0);
-        nc[ax.pos] = g1;
-        nc[ax.cross] = cv;
-        nc[ax.dim] = size;
-        nc[ax.crossDim] = Math.max(30, ...peers.map((c) => c[ax.crossDim]));
-        added.push(nc);
+  // ── ширина рядов ──
+  if (limW > 0)
+    for (const r of rowsOf(cs)) {
+      let rem = round1(limW - r.width);
+      if (rem < 0.05) continue;
+      const last = r.list[r.list.length - 1];
+      const free = last && !last.lockOuter && !last.lockCell;
+      // весь зазор закрывается растяжкой — растягиваем и всё
+      if (free && last.W + rem <= limits.maxW + 0.01) {
+        cs.find((c) => c.id === last.id).W = round1(last.W + rem);
+        changed = true;
+        continue;
       }
-      rem = round1(rem - size);
-      changed = true;
+      // иначе зазор закрывают новые контейнеры этого ряда
+      let gx = r.list.length;
+      let tail = null;
+      while (rem >= MIN_BOX) {
+        const size = rem > limits.maxW + 0.01
+          ? (rem - limits.maxW < MIN_BOX ? round1(rem / 2) : limits.maxW)
+          : round1(rem);
+        const nc = makeContainer(null, gx, r.gy);
+        nc.W = size;
+        nc.D = r.depth;
+        cs.push(nc);
+        tail = nc;
+        rem = round1(rem - size);
+        gx++;
+        changed = true;
+      }
+      // хвост меньше контейнера добирает крайний — ряд встаёт ровно у края
+      if (rem >= 0.05) {
+        const t = tail || (free ? cs.find((c) => c.id === last.id) : null);
+        if (t && t.W + rem <= limits.maxW + 0.01) { t.W = round1(t.W + rem); changed = true; }
+      }
     }
-    // хвост меньше 30 мм — дотянуть новую крайнюю колонку
-    if (rem >= 0.05) growEdge(g1, rem);
+
+  // ── глубина стопки ──
+  if (limD > 0) {
+    const rows = rowsOf(cs);
+    const totalD = rows.reduce((s, r) => s + r.depth, 0);
+    let rem = round1(limD - totalD);
+    if (rem >= 0.05) {
+      const last = rows[rows.length - 1];
+      const free = last.list.every((c) => !c.lockOuter && !c.lockCell);
+      if (free && last.depth + rem <= limits.maxD + 0.01) {
+        for (const c of last.list) cs.find((x) => x.id === c.id).D = round1(last.depth + rem);
+        return cs;
+      }
+      let gy = rows[rows.length - 1].gy + 1;
+      let tailRow = null;
+      while (rem >= MIN_BOX) {
+        const size = rem > limits.maxD + 0.01
+          ? (rem - limits.maxD < MIN_BOX ? round1(rem / 2) : limits.maxD)
+          : round1(rem);
+        // новый ряд повторяет ширины предыдущего — сборка остаётся ровной
+        const src = rowsOf(cs).slice(-1)[0].list;
+        tailRow = [];
+        src.forEach((c, gx) => {
+          const nc = makeContainer(null, gx, gy);
+          nc.W = c.W;
+          nc.D = size;
+          cs.push(nc);
+          tailRow.push(nc);
+        });
+        rem = round1(rem - size);
+        gy++;
+        changed = true;
+      }
+      // хвост по глубине добирает последний ряд
+      if (rem >= 0.05) {
+        const list = tailRow || (free ? last.list.map((c) => cs.find((x) => x.id === c.id)) : null);
+        if (list && list[0].D + rem <= limits.maxD + 0.01) {
+          for (const t of list) t.D = round1(t.D + rem);
+          changed = true;
+        }
+      }
+    }
   }
 
-  return changed ? cs.concat(added) : null;
+  return changed ? cs : null;
 }

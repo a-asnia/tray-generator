@@ -141,9 +141,19 @@ export function buildContainer(c, conn, opts = {}) {
 
   const CONN = connOf(c); // размеры соединителя с учётом зазора печати
   const zoneInfo = (side, vc) => lockZone(c, side, vc);
+  // На стороне может быть НЕСКОЛЬКО соседей (ряды со свободными ширинами:
+  // над одним контейнером стоят два), поэтому описание стороны — либо один
+  // узел {male, vs}, либо список таких узлов.
+  const groupsOf = (side) => {
+    const g = conn[side];
+    if (!g) return [];
+    return Array.isArray(g) ? g.filter(Boolean) : [g];
+  };
+  const hasConn = (side) => groupsOf(side).length > 0;
   const unitsOf = (side) =>
-    conn[side] && CONN.fits
-      ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => lockFits(CONN, u))
+    CONN.fits
+      ? groupsOf(side).flatMap((gr) =>
+          (gr.vs || []).map((vc) => ({ ...zoneInfo(side, vc), male: gr.male })).filter((u) => lockFits(CONN, u)))
       : [];
   const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
   const zonesFrom = (units) =>
@@ -889,7 +899,7 @@ export function buildContainer(c, conn, opts = {}) {
       if (wc.h > 0.3) {
         // сторона без замка: кромка скругляется с обеих сторон (симметрично);
         // со замком — только внутренняя, наружная плоскость строго ровная
-        const sym = !conn[side === "n" ? "N" : "S"];
+        const sym = !hasConn(side === "n" ? "N" : "S");
         const off = sym ? wallOut / 2 : 0;
         const mapFn = side === "n"
           ? (o, y, x) => [x, y, -D / 2 + off + o]
@@ -918,7 +928,7 @@ export function buildContainer(c, conn, opts = {}) {
       const key = `o:${side}:${j}`;
       const wc = getWall(c, key);
       if (wc.h > 0.3) {
-        const sym = !conn[side === "w" ? "W" : "E"];
+        const sym = !hasConn(side === "w" ? "W" : "E");
         const off = sym ? wallOut / 2 : 0;
         const mapFn = side === "w"
           ? (o, y, z) => [-W / 2 + off + o, y, z]
@@ -1238,7 +1248,7 @@ export function buildContainer(c, conn, opts = {}) {
       // скругление кромки этой стороны — за ним галтель и отступает
       const rSide = (s) => (f.own[s]
         ? rEff(sideKey(s), wall, true)
-        : rEff(sideKey(s), wallOut, !conn[s.toUpperCase()]));
+        : rEff(sideKey(s), wallOut, !hasConn(s.toUpperCase())));
       const pair = (a, b) => flatWall(sideKey(a)) && flatWall(sideKey(b));
       const hr = (a, b) => [Math.min(hSide(a), hSide(b)), Math.min(rSide(a), rSide(b))];
       if (pair("n", "w")) { const [hh, rr] = hr("n", "w"); addFillet(f.x0, f.z0, 1, 1, hh, `fx:${f.k}`, f.k, rr); }
@@ -1270,9 +1280,15 @@ export function buildContainer(c, conn, opts = {}) {
 
   // соединители (высота и скругление кромки — от стенки своей зоны)
   const sideUnits = { N: uN, S: uS, W: uW, E: uE };
-  for (const side of ["N", "S", "W", "E"])
-    if (conn[side] && sideUnits[side].length)
-      addConnUnits(solids, c, side, sideUnits[side], conn[side]);
+  for (const side of ["N", "S", "W", "E"]) {
+    if (!sideUnits[side].length) continue;
+    // рельсы и пазы могут соседствовать на одной стороне — раскладываем
+    // узлы по роли и строим каждую группу отдельно
+    for (const male of [true, false]) {
+      const part = sideUnits[side].filter((u) => !!u.male === male);
+      if (part.length) addConnUnits(solids, c, side, part, { male });
+    }
+  }
 
   return solids;
 }

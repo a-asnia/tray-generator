@@ -5,10 +5,10 @@
 // или, наоборот, из соседа торчит стенка).
 import { buildContainer } from "../src/model/build.js";
 import { presetContainer, GORKA_DEF } from "../src/model/presets.js";
-import { connectorVs, connGeom } from "../src/model/connectors.js";
-import { pairVs } from "../src/model/build.js";
-import { moveContainer, gridDims } from "../src/model/laymove.js";
-import { bboxOf, insideConvex, solidIndex, pointsInside } from "./fixtures.mjs";
+import { connGeom } from "../src/model/connectors.js";
+import { assemble } from "../src/model/assembly.js";
+import { moveContainer } from "../src/model/laymove.js";
+import { bboxOf, solidIndex, pointsInside } from "./fixtures.mjs";
 
 let fail = 0;
 const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
@@ -23,39 +23,15 @@ const mk = (o = {}) => ({
   lockOuter: false, lockCell: false, ...o,
 });
 
-// раскладка как в приложении: клетки по максимуму колонки/ряда, gap = 0
-const railCarrier = (a, b) => {
-  const aS = a.preset === "stairs", bS = b.preset === "stairs";
-  return aS === bS ? true : aS;
-};
+// сборка ровно та же, что в приложении (общий модуль assembly.js)
 function place(containers) {
-  const { colW, rowD } = gridDims(containers);
-  const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
-  const gx0 = Math.min(...gxs), gx1 = Math.max(...gxs);
-  const gy0 = Math.min(...gys), gy1 = Math.max(...gys);
-  const colX = {}, rowZ = {};
-  let acc = 0;
-  for (let g = gx0; g <= gx1; g++) { colX[g] = acc + (colW[g] || 30) / 2; acc += colW[g] || 30; }
-  const totalW = acc;
-  acc = 0;
-  for (let g = gy0; g <= gy1; g++) { rowZ[g] = acc + (rowD[g] || 30) / 2; acc += rowD[g] || 30; }
-  const totalD = acc;
-  const at = (gx, gy) => containers.find((c) => c.gx === gx && c.gy === gy);
-  return containers.map((c) => {
-    const E = at(c.gx + 1, c.gy), Wn = at(c.gx - 1, c.gy), S = at(c.gx, c.gy + 1), N = at(c.gx, c.gy - 1);
-    const conn = {
-      E: E ? { male: railCarrier(c, E), vs: pairVs(c, "E", E, "W", connectorVs(Math.min(c.D, E.D))) } : null,
-      W: Wn ? { male: !railCarrier(Wn, c), vs: pairVs(c, "W", Wn, "E", connectorVs(Math.min(c.D, Wn.D))) } : null,
-      S: S ? { male: railCarrier(c, S), vs: pairVs(c, "S", S, "N", connectorVs(Math.min(c.W, S.W))) } : null,
-      N: N ? { male: !railCarrier(N, c), vs: pairVs(c, "N", N, "S", connectorVs(Math.min(c.W, N.W))) } : null,
-    };
-    const ox = colX[c.gx] - totalW / 2, oz = rowZ[c.gy] - totalD / 2;
-    const solids = buildContainer(c, conn).map((s) => ({
+  return assemble(containers, true).items.map((it) => ({
+    c: it.c, ox: it.ox, oz: it.oz, conn: it.conn,
+    solids: buildContainer(it.c, it.conn).map((s) => ({
       tag: s.tag,
-      tris: s.tris.map((t) => t.map(([x, y, z]) => [x + ox, y, z + oz])),
-    }));
-    return { c, ox, oz, conn, solids };
-  });
+      tris: s.tris.map((t) => t.map(([x, y, z]) => [x + it.ox, y, z + it.oz])),
+    })),
+  }));
 }
 
 // проверка пары соседей
@@ -105,9 +81,18 @@ const configs = [
   ["визитница на стыке",
     [mk({ id: 1, W: 140, D: 140, H: 70, walls: { "o:e:0": { h: 64, cardHooks: true } } }), mk({ id: 2, gx: 1, W: 140, D: 140, H: 70 })],
     [[0, 1, "x"]]],
-  ["сетка 2×2",
+  ["два ряда по два",
     [mk({ id: 1, gx: 0, gy: 0 }), mk({ id: 2, gx: 1, gy: 0 }), mk({ id: 3, gx: 0, gy: 1 }), mk({ id: 4, gx: 1, gy: 1 })],
     [[0, 1, "x"], [0, 2, "z"], [1, 3, "z"], [2, 3, "x"]]],
+  // главный новый случай: ряды разной разбивки — 160+160 сзади и 118 спереди
+  ["ряды со свободными ширинами",
+    [mk({ id: 1, gx: 0, gy: 0, W: 160, D: 120 }), mk({ id: 2, gx: 1, gy: 0, W: 160, D: 120 }),
+     mk({ id: 3, gx: 0, gy: 1, W: 118, D: 161 })],
+    [[0, 1, "x"], [0, 2, "z"]]],
+  ["узкий под двумя широкими",
+    [mk({ id: 1, gx: 0, gy: 0, W: 90, D: 100 }), mk({ id: 2, gx: 1, gy: 0, W: 90, D: 100 }),
+     mk({ id: 3, gx: 0, gy: 1, W: 170, D: 100 })],
+    [[0, 1, "x"], [0, 2, "z"], [1, 2, "z"]]],
 ];
 
 for (const [name, cs, pairs] of configs) {
@@ -118,7 +103,7 @@ for (const [name, cs, pairs] of configs) {
 // после перетаскивания сборка обязана остаться такой же плотной
 {
   const cs = [mk({ id: 1, gx: 0, W: 150, D: 120 }), mk({ id: 2, gx: 1, W: 90, D: 120 })];
-  const moved = moveContainer(cs, 0, 1, 0);
+  const moved = moveContainer(cs, 0, 0, 2); // №1 в конец ряда
   const items = place(moved);
   checkPair("после переноса", items, 0, 1, "x");
 }

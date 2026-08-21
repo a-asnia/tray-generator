@@ -53,7 +53,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   ok("переключатель «Магнит соседей» на месте", await page.locator("label", { hasText: "Магнит соседей" }).count());
   await setNum("Раскладка по X", 34);
-  await page.locator('button:text-is("+")').nth(2).click();
+  await page.locator('button:text-is("+")').first().click();
   await page.waitForTimeout(400);
   let st = await state();
   ok(`два контейнера по 170 (сумма ${sumW(st)})`, st.containers.length === 2 && near(sumW(st), 340));

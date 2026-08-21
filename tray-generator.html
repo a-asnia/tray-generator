@@ -1323,8 +1323,18 @@ function buildContainer(c, conn, opts = {}) {
     };
     const CONN = connOf(c); // размеры соединителя с учётом зазора печати
     const zoneInfo = (side, vc) => lockZone(c, side, vc);
-    const unitsOf = (side) => conn[side] && CONN.fits
-        ? conn[side].vs.map((vc) => zoneInfo(side, vc)).filter((u) => lockFits(CONN, u))
+    // На стороне может быть НЕСКОЛЬКО соседей (ряды со свободными ширинами:
+    // над одним контейнером стоят два), поэтому описание стороны — либо один
+    // узел {male, vs}, либо список таких узлов.
+    const groupsOf = (side) => {
+        const g = conn[side];
+        if (!g)
+            return [];
+        return Array.isArray(g) ? g.filter(Boolean) : [g];
+    };
+    const hasConn = (side) => groupsOf(side).length > 0;
+    const unitsOf = (side) => CONN.fits
+        ? groupsOf(side).flatMap((gr) => (gr.vs || []).map((vc) => ({ ...zoneInfo(side, vc), male: gr.male })).filter((u) => lockFits(CONN, u)))
         : [];
     const uN = unitsOf("N"), uS = unitsOf("S"), uW = unitsOf("W"), uE = unitsOf("E");
     const zonesFrom = (units) => units.map((u) => [u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2]).sort((a, b) => a[0] - b[0]);
@@ -2158,7 +2168,7 @@ function buildContainer(c, conn, opts = {}) {
             if (wc.h > 0.3) {
                 // сторона без замка: кромка скругляется с обеих сторон (симметрично);
                 // со замком — только внутренняя, наружная плоскость строго ровная
-                const sym = !conn[side === "n" ? "N" : "S"];
+                const sym = !hasConn(side === "n" ? "N" : "S");
                 const off = sym ? wallOut / 2 : 0;
                 const mapFn = side === "n"
                     ? (o, y, x) => [x, y, -D / 2 + off + o]
@@ -2188,7 +2198,7 @@ function buildContainer(c, conn, opts = {}) {
             const key = `o:${side}:${j}`;
             const wc = getWall(c, key);
             if (wc.h > 0.3) {
-                const sym = !conn[side === "w" ? "W" : "E"];
+                const sym = !hasConn(side === "w" ? "W" : "E");
                 const off = sym ? wallOut / 2 : 0;
                 const mapFn = side === "w"
                     ? (o, y, z) => [-W / 2 + off + o, y, z]
@@ -2542,7 +2552,7 @@ function buildContainer(c, conn, opts = {}) {
             // скругление кромки этой стороны — за ним галтель и отступает
             const rSide = (s) => (f.own[s]
                 ? rEff(sideKey(s), wall, true)
-                : rEff(sideKey(s), wallOut, !conn[s.toUpperCase()]));
+                : rEff(sideKey(s), wallOut, !hasConn(s.toUpperCase())));
             const pair = (a, b) => flatWall(sideKey(a)) && flatWall(sideKey(b));
             const hr = (a, b) => [Math.min(hSide(a), hSide(b)), Math.min(rSide(a), rSide(b))];
             if (pair("n", "w")) {
@@ -2585,9 +2595,17 @@ function buildContainer(c, conn, opts = {}) {
     }
     // соединители (высота и скругление кромки — от стенки своей зоны)
     const sideUnits = { N: uN, S: uS, W: uW, E: uE };
-    for (const side of ["N", "S", "W", "E"])
-        if (conn[side] && sideUnits[side].length)
-            addConnUnits(solids, c, side, sideUnits[side], conn[side]);
+    for (const side of ["N", "S", "W", "E"]) {
+        if (!sideUnits[side].length)
+            continue;
+        // рельсы и пазы могут соседствовать на одной стороне — раскладываем
+        // узлы по роли и строим каждую группу отдельно
+        for (const male of [true, false]) {
+            const part = sideUnits[side].filter((u) => !!u.male === male);
+            if (part.length)
+                addConnUnits(solids, c, side, part, { male });
+        }
+    }
     return solids;
 }
 // ── src/model/presets.js ──
@@ -2836,6 +2854,11 @@ const sanitizeContainer = (c0) => {
     if (c.cornerR !== undefined)
         c.cornerR = num(c.cornerR, 2, 0, 20);
     c.gridMode = c.gridMode === "size" ? "size" : "count";
+    // прижим ряда: к левому краю сборки (по умолчанию) или к правому
+    if (c.rowAlign === "right")
+        c.rowAlign = "right";
+    else
+        delete c.rowAlign;
     c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
     c.cells = Object.fromEntries(Object.entries(obj(c.cells)).map(([k, v]) => {
         const o = obj(v), out = {};
@@ -3000,93 +3023,304 @@ function importProject(file, onDone) {
 }
 // ── src/model/laymagnet.js ──
 // ── «Магнит раскладки» ──
-// При включённой галке сборка липнет к краю лимита раскладки: если до
-// края остаётся пустота, крайняя колонка (и ряд) дорастает до края —
-// когда это возможно в пределах лимита принтера; большое пустое место
-// (от 30 мм) закрывается новыми контейнерами, как в «Заполнить
-// раскладку». Контейнеры с замками не растягиваются. Возвращает новый
-// список контейнеров либо null, если менять нечего (идемпотентно —
-// повторный вызов на результате всегда даёт null).
+// При включённой галке сборка липнет к краю лимита раскладки: ряд, не
+// достающий до правого края, дотягивается последним контейнером (в
+// пределах лимита принтера), а большое пустое место (от 30 мм) закрывается
+// новым контейнером. То же по глубине: последний ряд дотягивается до
+// дальнего края или добавляется новый ряд. Контейнеры с замками не
+// растягиваются. Возвращает новый список либо null, если менять нечего
+// (идемпотентно — повторный вызов на результате всегда даёт null).
 const round1 = (v) => Math.round(v * 10) / 10;
 function snapLayout(containers, limits) {
-    if (!containers || !containers.length)
+    if (!containers || !containers.length || !limits)
         return null;
-    const cs = containers.map((c) => ({ ...c }));
-    const added = [];
+    let cs = containers.map((c) => ({ ...c }));
     let changed = false;
-    for (const ax of [
-        { pos: "gx", dim: "W", cross: "gy", crossDim: "D", total: limits.layW * 10, max: limits.maxW },
-        { pos: "gy", dim: "D", cross: "gx", crossDim: "W", total: limits.layD * 10, max: limits.maxD },
-    ]) {
-        const all = () => cs.concat(added);
-        const gs = all().map((c) => c[ax.pos]);
-        const g0 = Math.min(...gs);
-        let g1 = Math.max(...gs);
-        // ширина колонки/глубина ряда = максимум по контейнерам в ней
-        const sizeAt = (g) => Math.max(30, ...all().filter((c) => c[ax.pos] === g).map((c) => c[ax.dim]));
-        let sum = 0;
-        for (let g = g0; g <= g1; g++)
-            sum += sizeAt(g);
-        let rem = ax.total - sum;
-        if (rem < 0.05)
-            continue;
-        const growEdge = (g, amount) => {
-            const edge = all().filter((c) => c[ax.pos] === g);
-            if (!edge.every((c) => !c.lockOuter && !c.lockCell))
-                return false;
-            const target = round1(sizeAt(g) + amount);
-            if (target > ax.max + 0.01)
-                return false;
-            for (const c of edge)
-                c[ax.dim] = target;
-            changed = true;
-            return true;
-        };
-        // мелкий зазор (контейнер туда не поставить) — только дотяжка краёв
-        if (rem < 30) {
-            growEdge(g1, rem);
-            continue;
-        }
-        // контейнеров хватает — крайние дорастают до края целиком
-        if (growEdge(g1, rem))
-            continue;
-        // пустое место закрывают новые контейнеры (остаток меньше лимита
-        // принтера забирает последний, совсем мелкий хвост делится пополам)
-        while (rem >= 30) {
-            let size;
-            if (rem > ax.max + 0.01)
-                size = rem - ax.max < 30 ? round1(rem / 2) : ax.max;
-            else
-                size = round1(rem);
-            g1++;
-            const crossVals = [...new Set(all().map((c) => c[ax.cross]))];
-            for (const cv of crossVals) {
-                const peers = all().filter((c) => c[ax.cross] === cv);
-                const nc = makeContainer(null, 0, 0);
-                nc[ax.pos] = g1;
-                nc[ax.cross] = cv;
-                nc[ax.dim] = size;
-                nc[ax.crossDim] = Math.max(30, ...peers.map((c) => c[ax.crossDim]));
-                added.push(nc);
+    const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
+    // ── ширина рядов ──
+    if (limW > 0)
+        for (const r of rowsOf(cs)) {
+            let rem = round1(limW - r.width);
+            if (rem < 0.05)
+                continue;
+            const last = r.list[r.list.length - 1];
+            const free = last && !last.lockOuter && !last.lockCell;
+            // весь зазор закрывается растяжкой — растягиваем и всё
+            if (free && last.W + rem <= limits.maxW + 0.01) {
+                cs.find((c) => c.id === last.id).W = round1(last.W + rem);
+                changed = true;
+                continue;
             }
-            rem = round1(rem - size);
-            changed = true;
+            // иначе зазор закрывают новые контейнеры этого ряда
+            let gx = r.list.length;
+            let tail = null;
+            while (rem >= MIN_BOX) {
+                const size = rem > limits.maxW + 0.01
+                    ? (rem - limits.maxW < MIN_BOX ? round1(rem / 2) : limits.maxW)
+                    : round1(rem);
+                const nc = makeContainer(null, gx, r.gy);
+                nc.W = size;
+                nc.D = r.depth;
+                cs.push(nc);
+                tail = nc;
+                rem = round1(rem - size);
+                gx++;
+                changed = true;
+            }
+            // хвост меньше контейнера добирает крайний — ряд встаёт ровно у края
+            if (rem >= 0.05) {
+                const t = tail || (free ? cs.find((c) => c.id === last.id) : null);
+                if (t && t.W + rem <= limits.maxW + 0.01) {
+                    t.W = round1(t.W + rem);
+                    changed = true;
+                }
+            }
         }
-        // хвост меньше 30 мм — дотянуть новую крайнюю колонку
-        if (rem >= 0.05)
-            growEdge(g1, rem);
+    // ── глубина стопки ──
+    if (limD > 0) {
+        const rows = rowsOf(cs);
+        const totalD = rows.reduce((s, r) => s + r.depth, 0);
+        let rem = round1(limD - totalD);
+        if (rem >= 0.05) {
+            const last = rows[rows.length - 1];
+            const free = last.list.every((c) => !c.lockOuter && !c.lockCell);
+            if (free && last.depth + rem <= limits.maxD + 0.01) {
+                for (const c of last.list)
+                    cs.find((x) => x.id === c.id).D = round1(last.depth + rem);
+                return cs;
+            }
+            let gy = rows[rows.length - 1].gy + 1;
+            let tailRow = null;
+            while (rem >= MIN_BOX) {
+                const size = rem > limits.maxD + 0.01
+                    ? (rem - limits.maxD < MIN_BOX ? round1(rem / 2) : limits.maxD)
+                    : round1(rem);
+                // новый ряд повторяет ширины предыдущего — сборка остаётся ровной
+                const src = rowsOf(cs).slice(-1)[0].list;
+                tailRow = [];
+                src.forEach((c, gx) => {
+                    const nc = makeContainer(null, gx, gy);
+                    nc.W = c.W;
+                    nc.D = size;
+                    cs.push(nc);
+                    tailRow.push(nc);
+                });
+                rem = round1(rem - size);
+                gy++;
+                changed = true;
+            }
+            // хвост по глубине добирает последний ряд
+            if (rem >= 0.05) {
+                const list = tailRow || (free ? last.list.map((c) => cs.find((x) => x.id === c.id)) : null);
+                if (list && list[0].D + rem <= limits.maxD + 0.01) {
+                    for (const t of list)
+                        t.D = round1(t.D + rem);
+                    changed = true;
+                }
+            }
+        }
     }
-    return changed ? cs.concat(added) : null;
+    return changed ? cs : null;
 }
 // ── src/model/laymove.js ──
-// ── Перенос контейнеров по раскладке (перетаскивание мышью) ──
-// Раскладка — сетка клеток: ширину колонки задаёт самый широкий контейнер
-// в ней, глубину ряда — самый глубокий. Поэтому переехавший контейнер
-// подгоняется под габарит НОВОЙ клетки, а не тащит свой размер с собой:
-// иначе колонка расползается, соседи остаются прежними, и сборка расходится
-// щелями — а «ласточкины хвосты» соединителей повисают в воздухе.
+// ── Раскладка контейнеров: ряды со свободными ширинами ──
+// Сборка — это стопка РЯДОВ. Внутри ряда контейнеры стоят слева направо
+// вплотную, и ширина у каждого своя: 160 + 160 в одном ряду и 118 в
+// другом — нормальная раскладка, колонки между рядами не связаны.
+// Общая для ряда только глубина: иначе между рядами появились бы щели.
+//
+// Адресация: gy — номер ряда, gx — место в ряду (порядок слева направо).
 const mvR1 = (v) => Math.round(v * 10) / 10;
-// габариты клеток сетки: ширины колонок по gx и глубины рядов по gy
+const MIN_BOX = 30; // минимальный габарит контейнера, мм
+// Ряды сборки: [{ gy, list (по порядку gx), depth, width }]
+function rowsOf(containers) {
+    const gys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
+    return gys.map((gy) => {
+        const list = containers.filter((c) => c.gy === gy).sort((a, b) => a.gx - b.gx);
+        return {
+            gy,
+            list,
+            depth: Math.max(MIN_BOX, ...list.map((c) => c.D)),
+            width: list.reduce((s, c) => s + c.W, 0),
+            // ряд короче самого широкого прижимается к левому краю или к правому
+            align: list[0] && list[0].rowAlign === "right" ? "right" : "left",
+        };
+    });
+}
+// Позиции контейнеров на столе: ряды идут от ближнего к дальнему, внутри
+// ряда — слева направо вплотную; ряды выровнены по левому краю.
+function placeContainers(containers) {
+    const rows = rowsOf(containers);
+    const totalD = rows.reduce((s, r) => s + r.depth, 0);
+    const totalW = Math.max(0, ...rows.map((r) => r.width));
+    const pos = new Map(); // id → { ox, oz, row }
+    let z = 0;
+    for (const r of rows) {
+        let x = r.align === "right" ? totalW - r.width : 0;
+        for (const c of r.list) {
+            pos.set(c.id, { ox: x + c.W / 2 - totalW / 2, oz: z + r.depth / 2 - totalD / 2, row: r });
+            x += c.W;
+        }
+        z += r.depth;
+    }
+    // порядок items совпадает с порядком списка контейнеров: номера
+    // контейнеров в панели — это индексы в нём
+    const items = containers.map((c) => ({ c, ...(pos.get(c.id) || { ox: 0, oz: 0, row: rows[0] }) }));
+    return { items, rows, totalW, totalD };
+}
+// Соседи по сборке: в ряду — предыдущий и следующий (стыкуются полностью),
+// между рядами — все, чьи пролёты по X пересекаются. Возвращает по каждой
+// стороне список { c, at (позиция в списке items), a, b } — абсолютный
+// перехлёст, по которому считаются замки.
+function neighborsOf(placed, idx) {
+    const me = placed.items[idx];
+    const x0 = me.ox - me.c.W / 2, x1 = me.ox + me.c.W / 2;
+    const out = { W: [], E: [], N: [], S: [] };
+    placed.items.forEach((o, k) => {
+        if (k === idx)
+            return;
+        if (o.c.gy === me.c.gy) {
+            if (o.c.gx === me.c.gx - 1)
+                out.W.push({ item: o, k });
+            if (o.c.gx === me.c.gx + 1)
+                out.E.push({ item: o, k });
+            return;
+        }
+        if (o.c.gy !== me.c.gy - 1 && o.c.gy !== me.c.gy + 1)
+            return;
+        const a = Math.max(x0, o.ox - o.c.W / 2), b = Math.min(x1, o.ox + o.c.W / 2);
+        if (b - a < 0.5)
+            return; // касание углом — не соседство
+        (o.c.gy < me.c.gy ? out.N : out.S).push({ item: o, k, a, b });
+    });
+    return out;
+}
+// Подгонка контейнера под ряд: общая только глубина, ширина остаётся своей.
+function fitToRow(c, depth) {
+    if (c.lockOuter)
+        return c;
+    const D2 = mvR1(Math.max(MIN_BOX, depth ?? c.D, minOuterDim(c, "D")));
+    if (Math.abs(D2 - c.D) < 0.05)
+        return c;
+    // внутренние размеры не переписываем: решатель растянет ряды сам
+    return { ...c, D: D2 };
+}
+// Нумерация: ряды подряд с нуля, места в ряду — подряд слева направо.
+// Ссылки на неизменившиеся контейнеры сохраняются (жив кэш геометрии).
+function renumber(containers) {
+    const rows = rowsOf(containers);
+    const out = [];
+    rows.forEach((r, gy) => {
+        r.list.forEach((c, gx) => out.push(c.gy === gy && c.gx === gx ? c : { ...c, gx, gy }));
+    });
+    // порядок в массиве сохраняем прежним: номера контейнеров не скачут
+    return containers.map((c) => out.find((o) => o.id === c.id) || c);
+}
+// Выравнивание глубины внутри затронутых рядов (клетка ряда держит глубину)
+function tidyRows(containers, gys) {
+    const depth = new Map(rowsOf(containers).map((r) => [r.gy, r.depth]));
+    return containers.map((c) => (gys.has(c.gy) ? fitToRow(c, depth.get(c.gy)) : c));
+}
+// ── Перенос контейнера ──
+// gy — ряд назначения (может быть новым: −1 перед первым, n после последнего),
+// pos — место в ряду (0…длина). Возвращает новый список либо прежний.
+function moveContainer(containers, idx, gy, pos) {
+    const src = containers[idx];
+    if (!src || !Number.isFinite(gy) || !Number.isFinite(pos))
+        return containers;
+    const rows = rowsOf(containers);
+    const row = rows.find((r) => r.gy === gy);
+    const sameRow = src.gy === gy;
+    if (sameRow && row) {
+        const cur = row.list.indexOf(src);
+        if (pos === cur || pos === cur + 1)
+            return containers; // ничего не меняется
+    }
+    const depth = row ? row.depth : src.D;
+    // порядок в новом ряду: вынимаем контейнер и вставляем на место pos
+    const target = (row ? row.list.filter((c) => c !== src) : []);
+    const at = Math.max(0, Math.min(target.length, sameRow && row && row.list.indexOf(src) < pos ? pos - 1 : pos));
+    target.splice(at, 0, src);
+    const orderIn = new Map(target.map((c, k) => [c.id, k]));
+    // старый ряд ужимается: места пересчитываются подряд
+    const restOld = rows.find((r) => r.gy === src.gy);
+    const oldOrder = new Map((restOld ? restOld.list.filter((c) => c !== src) : []).map((c, k) => [c.id, k]));
+    let next = containers.map((c) => {
+        if (c.id === src.id)
+            return { ...fitToRow(c, depth), gx: orderIn.get(c.id), gy };
+        if (c.gy === gy)
+            return { ...c, gx: orderIn.get(c.id) };
+        if (c.gy === src.gy)
+            return { ...c, gx: oldOrder.get(c.id) };
+        return c;
+    });
+    next = renumber(next);
+    const touched = new Set([next[idx].gy]);
+    return tidyRows(next, touched);
+}
+// ── Жёсткая рамка стола ──
+// Лимит раскладки не превышается никогда: ряд шире рамки ужимается по
+// ширине (пропорционально, но не ниже 30 мм и не за счёт контейнеров с
+// замком габарита), стопка рядов глубже рамки — по глубине.
+// Идемпотентно: на помещающейся сборке возвращает null.
+function fitAssembly(containers, limits) {
+    if (!containers || !containers.length || !limits)
+        return null;
+    let out = containers;
+    const shrink = (sizes, frozen, total) => {
+        // sizes: Map key→размер; frozen: Set ключей, которые не ужимаются
+        let excess = mvR1([...sizes.values()].reduce((s, v) => s + v, 0) - total);
+        if (excess <= 0.05)
+            return null;
+        const next = new Map(sizes);
+        for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
+            const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
+            const room = open.reduce((s, k) => s + next.get(k) - MIN_BOX, 0);
+            if (room <= 0.05)
+                break;
+            const take = Math.min(excess, room);
+            for (const k of open) {
+                const v = mvR1(Math.max(MIN_BOX, next.get(k) - (take * (next.get(k) - MIN_BOX)) / room));
+                excess = mvR1(excess - (next.get(k) - v));
+                next.set(k, v);
+            }
+        }
+        while (excess > 0.05) {
+            const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
+            if (!open.length)
+                break;
+            const k = open.reduce((a, b) => (next.get(b) > next.get(a) ? b : a));
+            const v = mvR1(Math.max(MIN_BOX, next.get(k) - excess));
+            excess = mvR1(excess - (next.get(k) - v));
+            next.set(k, v);
+        }
+        return next;
+    };
+    // 1. ширина: каждый ряд отдельно
+    const limW = (limits.layW || 0) * 10;
+    if (limW > 0) {
+        for (const r of rowsOf(out)) {
+            const sizes = new Map(r.list.map((c) => [c.id, c.W]));
+            const frozen = new Set(r.list.filter((c) => c.lockOuter).map((c) => c.id));
+            const fixed = shrink(sizes, frozen, limW);
+            if (!fixed)
+                continue;
+            out = out.map((c) => (fixed.has(c.id) && c.W > fixed.get(c.id) + 0.05 ? { ...c, W: fixed.get(c.id) } : c));
+        }
+    }
+    // 2. глубина: стопка рядов
+    const limD = (limits.layD || 0) * 10;
+    if (limD > 0) {
+        const rows = rowsOf(out);
+        const sizes = new Map(rows.map((r) => [r.gy, r.depth]));
+        const frozen = new Set(rows.filter((r) => r.list.some((c) => c.lockOuter)).map((r) => r.gy));
+        const fixed = shrink(sizes, frozen, limD);
+        if (fixed)
+            out = out.map((c) => (!c.lockOuter && c.D > fixed.get(c.gy) + 0.05 ? { ...c, D: fixed.get(c.gy) } : c));
+    }
+    return out === containers ? null : out;
+}
+// совместимость: габариты «клеток» (ширина по месту в ряду, глубина ряда)
 function gridDims(containers) {
     const colW = {}, rowD = {};
     for (const c of containers) {
@@ -3095,117 +3329,78 @@ function gridDims(containers) {
     }
     return { colW, rowD };
 }
-// Подгонка контейнера под клетку. Меньше своих замков (зафиксированные
-// ячейки, фиксированные боксы) он стать не может — тогда под него
-// расширится сама клетка. Габарит «намертво» (lockOuter) не трогается.
-function fitToCell(c, W, D) {
-    if (c.lockOuter)
-        return c;
-    const W2 = mvR1(Math.max(30, W ?? c.W, minOuterDim(c, "W")));
-    const D2 = mvR1(Math.max(30, D ?? c.D, minOuterDim(c, "D")));
-    if (Math.abs(W2 - c.W) < 0.05 && Math.abs(D2 - c.D) < 0.05)
-        return c;
-    // внутренние размеры (ряды, ширины ячеек) не переписываем: решатель
-    // раскладки сам растянет свободные пропорционально новому пролёту
-    return { ...c, W: W2, D: D2 };
-}
-// Схлопывание опустевших колонок и рядов и сдвиг сетки к началу координат.
-// Ссылки на неизменившиеся контейнеры сохраняются — кэш геометрии живёт.
-function compactGrid(containers) {
-    const xs = [...new Set(containers.map((c) => c.gx))].sort((a, b) => a - b);
-    const ys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
-    const mx = new Map(xs.map((v, i) => [v, i]));
-    const my = new Map(ys.map((v, i) => [v, i]));
-    return containers.map((c) => {
-        const gx = mx.get(c.gx), gy = my.get(c.gy);
-        return gx === c.gx && gy === c.gy ? c : { ...c, gx, gy };
-    });
-}
-// Выравнивание габаритов в затронутых колонках и рядах: все контейнеры
-// колонки одной ширины, ряда — одной глубины (клетка держит размер).
-function tidyAt(containers, cols, rows) {
-    const { colW, rowD } = gridDims(containers);
-    return containers.map((c) => fitToCell(c, cols.has(c.gx) ? colW[c.gx] : c.W, rows.has(c.gy) ? rowD[c.gy] : c.D));
-}
-// Перенос контейнера idx в клетку (gx, gy). Клетка занята — контейнеры
-// меняются местами (каждый берёт габарит клетки, в которую приехал).
-// Возвращает новый список; если двигать нечего — прежний (та же ссылка).
-function moveContainer(containers, idx, tgx, tgy) {
-    const src = containers[idx];
-    if (!src || !Number.isFinite(tgx) || !Number.isFinite(tgy))
-        return containers;
-    if (src.gx === tgx && src.gy === tgy)
-        return containers;
-    const { colW, rowD } = gridDims(containers);
-    const dst = containers.findIndex((c, i) => i !== idx && c.gx === tgx && c.gy === tgy);
-    // габариты клеток берём ДО переноса: обе стороны обмена целятся в
-    // размеры, которые клетки имели в исходной раскладке
-    const place = (c, gx, gy) => ({ ...fitToCell(c, colW[gx], rowD[gy]), gx, gy });
-    const next = containers.slice();
-    next[idx] = place(src, tgx, tgy);
-    if (dst >= 0)
-        next[dst] = place(containers[dst], src.gx, src.gy);
-    const packed = compactGrid(next);
-    const cols = new Set([packed[idx].gx]), rows = new Set([packed[idx].gy]);
-    // при обмене вторая клетка тоже затронута; при простом переезде колонка
-    // источника могла только сузиться — выравнивать там нечего
-    if (dst >= 0) {
-        cols.add(packed[dst].gx);
-        rows.add(packed[dst].gy);
-    }
-    return tidyAt(packed, cols, rows);
-}
-// Лимит раскладки — жёсткая рамка стола: сборка не вылезает за него
-// никогда. Если сумма ширин колонок (глубин рядов) вышла за лимит —
-// например, добавили контейнер в заполненную раскладку или уменьшили сам
-// лимит, — лишнее снимается пропорционально, но не ниже 30 мм и не с
-// контейнеров с зафиксированным намертво габаритом. Идемпотентно:
-// на уже помещающейся сборке возвращает null.
-function fitAssembly(containers, limits) {
-    if (!containers || !containers.length || !limits)
-        return null;
-    let out = containers;
-    for (const ax of [
-        { pos: "gx", dim: "W", total: (limits.layW || 0) * 10 },
-        { pos: "gy", dim: "D", total: (limits.layD || 0) * 10 },
-    ]) {
-        if (!(ax.total > 0))
-            continue;
-        const gs = [...new Set(out.map((c) => c[ax.pos]))].sort((a, b) => a - b);
-        const size = new Map(gs.map((g) => [g, Math.max(30, ...out.filter((c) => c[ax.pos] === g).map((c) => c[ax.dim]))]));
-        const frozen = new Set(gs.filter((g) => out.some((c) => c[ax.pos] === g && c.lockOuter)));
-        let excess = [...size.values()].reduce((s, v) => s + v, 0) - ax.total;
-        if (excess <= 0.05)
-            continue;
-        for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
-            const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
-            const room = open.reduce((s, g) => s + size.get(g) - 30, 0);
-            if (room <= 0.05)
-                break;
-            const take = Math.min(excess, room);
-            for (const g of open) {
-                const v = mvR1(Math.max(30, size.get(g) - (take * (size.get(g) - 30)) / room));
-                excess = mvR1(excess - (size.get(g) - v));
-                size.set(g, v);
+// ── src/model/assembly.js ──
+// ── Сборка: кто с кем стыкуется и где стоят замки ──
+// Раскладка — ряды со свободными ширинами (см. laymove.js), поэтому
+// сосед сверху или снизу может быть не один, а стыковаться лишь частью
+// стенки. Замки ставятся по ФАКТИЧЕСКОМУ перехлёсту двух контейнеров и
+// только там, где зона годится обоим (низкая или ступенчатая стенка —
+// замка нет ни у кого, иначе рельс упрётся в сплошную стенку соседа).
+// Кто в паре несёт рельс (наружный выступ), а кто паз. По умолчанию —
+// западный/северный. Горка всегда несёт рельс: паз в её ступенчатых
+// стенках не помещается, а рельс встаёт на ровный участок лесенки.
+const railCarrier = (a, b) => {
+    const aS = a.preset === "stairs", bS = b.preset === "stairs";
+    return aS === bS ? true : aS;
+};
+// Позиции замков на стыке двух контейнеров. Считаются в АБСОЛЮТНЫХ
+// координатах по перехлёсту, затем переводятся в систему каждого из них.
+const jointVs = (A, B, sideA, sideB, a, b) => {
+    const mid = (a + b) / 2;
+    const centerA = sideA === "E" || sideA === "W" ? A.oz : A.ox;
+    const centerB = sideB === "E" || sideB === "W" ? B.oz : B.ox;
+    return connectorVs(b - a)
+        .map((v) => v + mid)
+        .filter((abs) => lockOk(A.c, sideA, abs - centerA) && lockOk(B.c, sideB, abs - centerB))
+        .map((abs) => ({ a: abs - centerA, b: abs - centerB }));
+};
+// Полная сборка: позиции и описания соединителей для каждого контейнера.
+function assemble(containers, connect = true) {
+    const placed = placeContainers(containers);
+    const conns = placed.items.map(() => ({ N: [], S: [], W: [], E: [] }));
+    if (connect)
+        placed.items.forEach((me, i) => {
+            const nb = neighborsOf(placed, i);
+            // вдоль ряда стыкуются целиком: перехлёст — общая глубина ряда
+            for (const [side, other, oside] of [["E", nb.E, "W"], ["W", nb.W, "E"]]) {
+                for (const { item, k } of other) {
+                    if (k < i && side === "W")
+                        continue; // пару считаем один раз
+                    const a = Math.max(me.oz - me.c.D / 2, item.oz - item.c.D / 2);
+                    const b = Math.min(me.oz + me.c.D / 2, item.oz + item.c.D / 2);
+                    if (b - a < 0.5)
+                        continue;
+                    const male = side === "E" ? railCarrier(me.c, item.c) : !railCarrier(item.c, me.c);
+                    const vs = jointVs(me, item, side, oside, a, b);
+                    if (!vs.length)
+                        continue;
+                    conns[i][side].push({ male, vs: vs.map((v) => v.a) });
+                    conns[k][oside].push({ male: !male, vs: vs.map((v) => v.b) });
+                }
             }
-        }
-        // хвост от округления до 0,1 мм снимает самая широкая колонка: иначе
-        // сборка остаётся на десятую шире рамки, а лимит — жёсткий
-        while (excess > 0.05) {
-            const open = gs.filter((g) => !frozen.has(g) && size.get(g) > 30.05);
-            if (!open.length)
-                break;
-            const g = open.reduce((a, b) => (size.get(b) > size.get(a) ? b : a));
-            const v = mvR1(Math.max(30, size.get(g) - excess));
-            excess = mvR1(excess - (size.get(g) - v));
-            size.set(g, v);
-        }
-        // ужимаем только то, что перестало влезать: контейнеры уже, чем
-        // колонка (магнит соседей выключен), остаются как были
-        out = out.map((c) => (!c.lockOuter && c[ax.dim] > size.get(c[ax.pos]) + 0.05
-            ? { ...c, [ax.dim]: size.get(c[ax.pos]) } : c));
-    }
-    return out === containers ? null : out;
+            // между рядами: сосед может накрывать лишь часть стенки, и соседей
+            // на одной стороне бывает несколько
+            for (const { item, k, a, b } of nb.S) {
+                const male = railCarrier(me.c, item.c);
+                const vs = jointVs(me, item, "S", "N", a, b);
+                if (!vs.length)
+                    continue;
+                conns[i].S.push({ male, vs: vs.map((v) => v.a) });
+                conns[k].N.push({ male: !male, vs: vs.map((v) => v.b) });
+            }
+        });
+    const items = placed.items.map((it, i) => ({
+        c: it.c,
+        ox: it.ox,
+        oz: it.oz,
+        conn: {
+            N: conns[i].N.length ? conns[i].N : null,
+            S: conns[i].S.length ? conns[i].S : null,
+            W: conns[i].W.length ? conns[i].W : null,
+            E: conns[i].E.length ? conns[i].E : null,
+        },
+    }));
+    return { items, totalW: placed.totalW, totalD: placed.totalD, rows: placed.rows };
 }
 // ── src/ui/theme.js ──
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -3896,12 +4091,12 @@ function TrayGenerator() {
         }
         updCur(withRemap());
     };
-    // Магнит соседей (переключатель на вкладке «Раскладка»): сборка
-    // сохраняет общий габарит. Ужал контейнер — соседние колонки/ряды
-    // выросли на ту же величину (и наоборот). Сосед растёт максимум до
-    // лимита принтера; если впитать освободившееся место больше некому,
-    // рядом добавляется НОВЫЙ контейнер на остаток (минимум 30 мм).
-    // Замки соседа соблюдаются: зафиксированные ячейки не меняются.
+    // ── Внешний габарит контейнера ──
+    // Ширина — ЛИЧНЫЙ размер: в ряду контейнеры могут быть разной ширины.
+    // Глубина общая у ряда (иначе между рядами щели), поэтому применяется ко
+    // всему ряду. Магнит соседей держит общий габарит сборки: что забрал
+    // один, отдают соседи по ряду (по ширине) или соседние ряды (по глубине);
+    // контейнеры с замками не трогаются.
     const applyOuterDim = (patch) => {
         // «Зафиксировать внешний размер» — намертво: габарит не меняется ни
         // от ползунков, ни от изменения ячеек внутри, ни магнитом соседей
@@ -3909,92 +4104,101 @@ function TrayGenerator() {
             return;
         const isW = "W" in patch;
         const axis = isW ? "W" : "D";
-        const gKey = isW ? "gx" : "gy";
         const maxAxis = isW ? limits.maxW : limits.maxD;
-        // не даём ужать контейнер ниже суммы его зафиксированных колонок/рядов
-        patch = { [axis]: Math.max(patch[axis], minOuterDim(cur, axis)) };
-        // и не даём вылезти за лимит раскладки: с магнитом соседей сборка и так
-        // держит общий габарит, а без него потолок — лимит минус другие колонки
-        if (!magnet) {
-            const gK = isW ? "gx" : "gy";
-            const others = [...new Set(containers.filter((c) => c[gK] !== cur[gK]).map((c) => c[gK]))]
-                .reduce((s, g) => s + Math.max(30, ...containers.filter((c) => c[gK] === g).map((c) => c[axis])), 0);
-            const room = (isW ? limits.layW : limits.layD) * 10 - others;
-            if (room >= 30)
-                patch = { [axis]: Math.min(patch[axis], Math.round(room * 10) / 10) };
-        }
-        const myG = cur[gKey];
-        const myId = cur.id;
+        const layLim = (isW ? limits.layW : limits.layD) * 10;
+        const r1 = (v) => Math.round(v * 10) / 10;
+        const want0 = Math.max(minOuterDim(cur, axis), Math.min(patch[axis], maxAxis), 30);
+        const myId = cur.id, myGy = cur.gy, wasSize = cur[axis];
         const magnetOn = magnet;
-        const myOther = isW ? cur.D : cur.W;
-        const myOtherG = isW ? cur.gy : cur.gx;
-        setContainers((cs) => {
-            const widthIn = (arr, g) => Math.max(30, ...arr.filter((c) => c[gKey] === g).map((c) => c[axis]));
-            const myBefore = widthIn(cs, myG);
-            let next = cs.map((c) => (c.id === myId ? { ...c, ...patch } : c));
-            if (!magnetOn)
-                return next;
-            // В связанной сборке контейнеры одной колонки держат общую ширину
-            // (одного ряда — общую глубину), иначе вокруг ужатого появляются
-            // щели, а соединители расходятся. Поэтому при магните размер
-            // применяется ко всей колонке/ряду — кроме контейнеров с глобальными
-            // замками; замки ячеек каждого соседа по колонке соблюдаются.
-            const mates = cs.filter((c) => c[gKey] === myG && (c.id === myId || (!c.lockOuter && !c.lockCell)));
-            const tgt = Math.round(Math.max(patch[axis], ...mates.map((c) => minOuterDim(c, axis))) * 10) / 10;
-            next = cs.map((c) => (mates.some((m) => m.id === c.id) ? { ...c, [axis]: tgt } : c));
-            let delta = myBefore - widthIn(next, myG); // >0 — место освободилось, соседи растут
-            if (Math.abs(delta) < 0.05)
-                return next;
-            const groupOf = (g) => next.filter((c) => c[gKey] === g);
-            const adjustable = [...new Set(next.map((c) => c[gKey]))].filter((g) => g !== myG && groupOf(g).every((c) => !c.lockOuter && !c.lockCell));
-            const minOf = (g) => Math.max(...groupOf(g).map((c) => minOuterDim(c, axis)));
-            // расширяться может только контейнер, который способен впитать рост
-            // свободными ячейками: по ширине — в КАЖДОМ ряду есть незамкнутая
-            // ячейка, по глубине — есть незамкнутый ряд
-            const canGrow = (cc) => {
-                const Lg = layout(cc);
-                if (!isW) {
-                    const locked = cc.lockedRows || {};
-                    return Object.keys(locked).filter((k) => +k >= 0 && +k < Lg.nRows).length < Lg.nRows;
-                }
-                for (let j = 0; j < Lg.nRows; j++)
-                    if (Object.keys(lockedWIn(cc, j)).length >= Lg.nColsAt(j))
-                        return false;
-                return true;
-            };
-            const capOf = (g) => (groupOf(g).every(canGrow) ? maxAxis : widthIn(next, g));
-            const targets = new Map(adjustable.map((g) => [g, widthIn(next, g)]));
-            for (let pass = 0; pass < 3 && Math.abs(delta) > 0.05 && adjustable.length; pass++) {
-                const open = adjustable.filter((g) => delta > 0 ? targets.get(g) < capOf(g) - 0.01 : targets.get(g) > minOf(g) + 0.01);
+        // раздача разницы между «донорами»: delta > 0 — забрать у них,
+        // delta < 0 — раздать им. Возвращает остаток, который забрать не вышло.
+        const spread = (targets, lo, hi, delta) => {
+            for (let pass = 0; pass < 4 && Math.abs(delta) > 0.05; pass++) {
+                const open = [...targets.keys()].filter((k) => delta > 0 ? targets.get(k) > lo(k) + 0.01 : targets.get(k) < hi(k) - 0.01);
                 if (!open.length)
                     break;
                 const share = delta / open.length;
-                for (const g of open) {
-                    const t0 = targets.get(g);
-                    const t = Math.max(minOf(g), Math.min(capOf(g), Math.round((t0 + share) * 10) / 10));
-                    delta -= t - t0;
-                    targets.set(g, t);
+                for (const k of open) {
+                    const v = Math.max(lo(k), Math.min(hi(k), r1(targets.get(k) - share)));
+                    delta = r1(delta - (targets.get(k) - v));
+                    targets.set(k, v);
                 }
             }
-            next = next.map((c) => c[gKey] !== myG && targets.has(c[gKey]) && !c.lockOuter && !c.lockCell &&
-                Math.abs(targets.get(c[gKey]) - c[axis]) > 0.01
-                ? { ...c, [axis]: targets.get(c[gKey]) }
-                : c);
-            // соседям расти больше некуда (лимит принтера) — остаток закрывает
-            // новый контейнер, вставленный сразу за ужатым
-            if (delta >= 30) {
-                const size = Math.round(delta * 10) / 10;
-                next = next.map((c) => (c[gKey] > myG ? { ...c, [gKey]: c[gKey] + 1 } : c));
-                const fresh = makeContainer(null, 0, 0);
-                next = [...next, {
-                        ...fresh,
-                        [gKey]: myG + 1,
-                        [isW ? "gy" : "gx"]: myOtherG,
-                        [axis]: size,
-                        [isW ? "D" : "W"]: myOther,
-                    }];
+            return delta;
+        };
+        setContainers((cs) => {
+            const rows = rowsOf(cs);
+            const myRow = rows.find((r) => r.gy === myGy);
+            if (!myRow)
+                return cs;
+            if (isW) {
+                let want = want0;
+                const others = myRow.list.filter((c) => c.id !== myId);
+                const free = others.filter((c) => !c.lockOuter && !c.lockCell);
+                // без магнита (или когда в ряду больше некому отдавать и забирать)
+                // ряд просто становится шире или уже — но не за рамку стола
+                if (!magnetOn || !free.length) {
+                    if (layLim > 0) {
+                        const used = others.reduce((s, c) => s + c.W, 0);
+                        want = Math.min(want, Math.max(30, r1(layLim - used)));
+                    }
+                    return cs.map((c) => (c.id === myId ? { ...c, W: r1(want) } : c));
+                }
+                const targets = new Map(free.map((c) => [c.id, c.W]));
+                const byId = new Map(free.map((c) => [c.id, c]));
+                const rest = spread(targets, (k) => Math.max(30, minOuterDim(byId.get(k), "W")), () => maxAxis, r1(want - wasSize));
+                // Заданный размер контейнер получает всегда — магнит лишь
+                // компенсирует его соседями. Если соседям расти больше некуда
+                // (лимит принтера), освободившееся место закрывает новый контейнер
+                // сразу за ужатым; мелкий остаток оставляем как есть.
+                let extra = null;
+                if (rest <= -30)
+                    extra = { ...makeContainer(null, cur.gx + 1, myGy), W: r1(-rest), D: myRow.depth };
+                const shifted = cs.map((c) => {
+                    if (c.id === myId)
+                        return { ...c, W: want };
+                    if (targets.has(c.id) && Math.abs(targets.get(c.id) - c.W) > 0.01)
+                        return { ...c, W: targets.get(c.id) };
+                    return c;
+                });
+                if (!extra)
+                    return shifted;
+                return renumber([
+                    ...shifted.map((c) => (c.gy === myGy && c.gx > cur.gx ? { ...c, gx: c.gx + 1 } : c)),
+                    extra,
+                ]);
             }
-            return next;
+            // ── глубина: общая у ряда ──
+            let want = Math.max(want0, ...myRow.list.map((c) => minOuterDim(c, "D")));
+            const otherRows = rows.filter((r) => r.gy !== myGy && r.list.every((c) => !c.lockOuter && !c.lockCell));
+            if (!magnetOn && layLim > 0) {
+                const used = rows.filter((r) => r.gy !== myGy).reduce((s, r) => s + r.depth, 0);
+                want = Math.min(want, Math.max(30, r1(layLim - used)));
+            }
+            let targets = new Map();
+            let newRow = null;
+            if (magnetOn && otherRows.length) {
+                targets = new Map(otherRows.map((r) => [r.gy, r.depth]));
+                const rowById = new Map(otherRows.map((r) => [r.gy, r]));
+                const rest = spread(targets, (k) => Math.max(30, ...rowById.get(k).list.map((c) => minOuterDim(c, "D"))), () => maxAxis, r1(want - myRow.depth));
+                // соседним рядам расти некуда — освободившуюся полосу закрывает
+                // новый ряд с теми же ширинами
+                if (rest <= -30)
+                    newRow = { depth: r1(-rest), widths: myRow.list.map((c) => c.W) };
+            }
+            const out = cs.map((c) => {
+                if (c.lockOuter)
+                    return c;
+                if (c.gy === myGy)
+                    return Math.abs(c.D - want) > 0.01 ? { ...c, D: r1(want) } : c;
+                if (targets.has(c.gy) && Math.abs(targets.get(c.gy) - c.D) > 0.01)
+                    return { ...c, D: targets.get(c.gy) };
+                return c;
+            });
+            if (!newRow)
+                return out;
+            const added = newRow.widths.map((W, gx) => ({ ...makeContainer(null, gx, myGy + 1), W, D: newRow.depth }));
+            return renumber([...out.map((c) => (c.gy > myGy ? { ...c, gy: c.gy + 1 } : c)), ...added]);
         });
     };
     // сброс к значениям по умолчанию: без диалогов и перезагрузки,
@@ -4299,82 +4503,25 @@ function TrayGenerator() {
         else
             selectAndShow(s);
     };
-    const posMap = useMemo(() => {
-        const m = new Map();
-        containers.forEach((c, i) => m.set(`${c.gx},${c.gy}`, i));
-        return m;
-    }, [containers]);
     // Геометрия кэшируется по объекту контейнера: правка одного контейнера
     // не должна пересобирать остальные. Объекты неизменяемые (обновление
     // делает новый объект только для затронутого), поэтому ссылка — надёжный
     // ключ, а WeakMap не держит устаревшие записи.
     const geoCache = useRef(new WeakMap());
-    // ── сборка: соединители по соседям + раскладка сеткой ──
+    // ── сборка: ряды со свободными ширинами + соединители по соседям ──
     const built = useMemo(() => {
-        const nb = (c, dx, dy) => {
-            const i = posMap.get(`${c.gx + dx},${c.gy + dy}`);
-            return i === undefined ? null : containers[i];
-        };
-        // физическая сетка: ширина колонки/глубина ряда = максимум по контейнерам
-        const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
-        const gx0 = Math.min(...gxs), gx1 = Math.max(...gxs);
-        const gy0 = Math.min(...gys), gy1 = Math.max(...gys);
-        // контейнеры всегда стоят вплотную; галка «Соединители» решает только,
-        // резать ли на стыках «ласточкин хвост»
-        const gap = 0;
-        const colW = {}, rowD = {};
-        for (let g = gx0; g <= gx1; g++)
-            colW[g] = Math.max(30, ...containers.filter((c) => c.gx === g).map((c) => c.W));
-        for (let g = gy0; g <= gy1; g++)
-            rowD[g] = Math.max(30, ...containers.filter((c) => c.gy === g).map((c) => c.D));
-        const colX = {}, rowZ = {};
-        let acc = 0;
-        for (let g = gx0; g <= gx1; g++) {
-            colX[g] = acc + colW[g] / 2;
-            acc += colW[g] + gap;
-        }
-        const totalW = acc - gap;
-        acc = 0;
-        for (let g = gy0; g <= gy1; g++) {
-            rowZ[g] = acc + rowD[g] / 2;
-            acc += rowD[g] + gap;
-        }
-        const totalD = acc - gap;
-        // Кто в паре несёт рельс (наружный выступ), а кто паз. По умолчанию —
-        // западный/северный. Но горка всегда несёт рельс: паз в её ступенчатых
-        // стенках не помещается, а рельс встаёт на ровный участок лесенки.
-        const railCarrier = (a, b) => {
-            const aS = a.preset === "stairs", bS = b.preset === "stairs";
-            return aS === bS ? true : aS;
-        };
-        const items = containers.map((c) => {
-            const E = nb(c, 1, 0), Wn = nb(c, -1, 0), S = nb(c, 0, 1), N = nb(c, 0, -1);
-            // Позиции замков согласуются с соседом: если у одного из двух зона не
-            // годится (низкая или ступенчатая стенка), замка нет у обоих — иначе
-            // рельс упёрся бы в сплошную стенку соседа и контейнеры не сошлись.
-            const conn = !connect
-                ? { N: null, S: null, W: null, E: null }
-                : {
-                    E: E ? { male: railCarrier(c, E), vs: pairVs(c, "E", E, "W", connectorVs(Math.min(c.D, E.D))) } : null,
-                    W: Wn ? { male: !railCarrier(Wn, c), vs: pairVs(c, "W", Wn, "E", connectorVs(Math.min(c.D, Wn.D))) } : null,
-                    S: S ? { male: railCarrier(c, S), vs: pairVs(c, "S", S, "N", connectorVs(Math.min(c.W, S.W))) } : null,
-                    N: N ? { male: !railCarrier(N, c), vs: pairVs(c, "N", N, "S", connectorVs(Math.min(c.W, N.W))) } : null,
-                };
-            const ck = JSON.stringify(conn);
-            let hit = geoCache.current.get(c);
+        const a = assemble(containers, connect);
+        const items = a.items.map((it) => {
+            const ck = JSON.stringify(it.conn);
+            let hit = geoCache.current.get(it.c);
             if (!hit || hit.key !== ck) {
-                hit = { key: ck, solids: buildContainer(c, conn) };
-                geoCache.current.set(c, hit);
+                hit = { key: ck, solids: buildContainer(it.c, it.conn) };
+                geoCache.current.set(it.c, hit);
             }
-            return {
-                c,
-                solids: hit.solids,
-                ox: colX[c.gx] - totalW / 2,
-                oz: rowZ[c.gy] - totalD / 2,
-            };
+            return { c: it.c, solids: hit.solids, ox: it.ox, oz: it.oz };
         });
-        return { items, totalW, totalD };
-    }, [containers, connect, posMap]);
+        return { items, totalW: a.totalW, totalD: a.totalD, rows: a.rows };
+    }, [containers, connect]);
     // ── three.js: сцена, камера, пикинг ──
     const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
     const L = layout(cur);
@@ -4417,46 +4564,25 @@ function TrayGenerator() {
         }
     };
     // Заполнить раскладку: к существующим контейнерам добавляются новые —
-    // колонки и ряды максимально доступного размера (лимит принтера), пока
+    // ряды максимально доступного размера (лимит принтера), пока
     // влезают в лимит раскладки; остаток, который меньше лимита принтера,
     // забирает последний контейнер, а слишком мелкий хвост делится пополам
     // с предыдущим. Существующие контейнеры не меняются.
+    // «Заполнить раскладку»: ряды дотягиваются до правого края лимита, стопка
+    // рядов — до дальнего. Это тот же магнит раскладки, но разово и независимо
+    // от галки; повторяем, пока есть что достраивать (snapLayout идемпотентен).
     const fillLayout = () => {
-        const gxs2 = containers.map((c) => c.gx), gys2 = containers.map((c) => c.gy);
-        const fGx0 = Math.min(...gxs2), fGx1 = Math.max(...gxs2);
-        const fGy0 = Math.min(...gys2), fGy1 = Math.max(...gys2);
-        const colW = {}, rowD = {};
-        for (let g = fGx0; g <= fGx1; g++)
-            colW[g] = Math.max(30, ...containers.filter((c) => c.gx === g).map((c) => c.W));
-        for (let g = fGy0; g <= fGy1; g++)
-            rowD[g] = Math.max(30, ...containers.filter((c) => c.gy === g).map((c) => c.D));
-        const extend = (map, g1, total, maxDim) => {
-            let rem = total - Object.values(map).reduce((s, v) => s + v, 0);
-            let g = g1 + 1;
-            while (rem >= 30) {
-                let size;
-                if (rem > maxDim + 0.01)
-                    size = rem - maxDim < 30 ? Math.round((rem / 2) * 10) / 10 : maxDim;
-                else
-                    size = Math.round(rem * 10) / 10;
-                map[g] = size;
-                rem -= size;
-                g++;
+        setContainers((cs) => {
+            let out = cs;
+            for (let pass = 0; pass < 6; pass++) {
+                const next = snapLayout(out, limits);
+                if (!next)
+                    break;
+                out = next;
             }
-            return g - 1;
-        };
-        const nGx1 = extend(colW, fGx1, limits.layW * 10, limits.maxW);
-        const nGy1 = extend(rowD, fGy1, limits.layD * 10, limits.maxD);
-        const occupied = new Set(containers.map((c) => `${c.gx},${c.gy}`));
-        const added = [];
-        for (let gy = fGy0; gy <= nGy1; gy++)
-            for (let gx = fGx0; gx <= nGx1; gx++)
-                if (!occupied.has(`${gx},${gy}`))
-                    added.push({ ...makeContainer(null, gx, gy), W: colW[gx], D: rowD[gy] });
-        if (added.length) {
-            setContainers([...containers, ...added]);
-            setSelection(null);
-        }
+            return out;
+        });
+        setSelection(null);
     };
     // ── проект в файл и обратно ──
     const fileRef = useRef(null);
@@ -4496,102 +4622,54 @@ function TrayGenerator() {
         });
     };
     // ── карта раскладки ──
-    const gxs = containers.map((c) => c.gx), gys = containers.map((c) => c.gy);
-    const rGx0 = Math.min(...gxs), rGx1 = Math.max(...gxs);
-    const rGy0 = Math.min(...gys), rGy1 = Math.max(...gys);
-    const gx0 = rGx0 - 1, gx1 = rGx1 + 1, gy0 = rGy0 - 1, gy1 = rGy1 + 1;
-    // Размеры нового контейнера: стандартный (120×80), НО если после него
-    // в лимит раскладки уже не влезет ещё один стандартный — он растягивается
-    // и заполняет оставшееся место (в пределах лимита принтера).
-    // В существующей колонке/ряду размер совпадает с ними — для плотной стыковки.
-    // «стандартный» контейнер = максимум принтера по ширине и глубине
-    const STD = { W: limits.maxW, D: limits.maxD };
-    const colWidthAt = (g) => {
-        const ws = containers.filter((c) => c.gx === g).map((c) => c.W);
-        return ws.length ? Math.max(...ws) : 0;
-    };
-    const rowDepthAt = (g) => {
-        const ds = containers.filter((c) => c.gy === g).map((c) => c.D);
-        return ds.length ? Math.max(...ds) : 0;
-    };
-    const plannedDims = (gx, gy) => {
-        // остаток, не влезающий в один контейнер по лимиту принтера,
-        // делится пополам на ДВА контейнера (splitX/splitY)
-        let W, splitX = null;
-        if (gx >= rGx0 && gx <= rGx1 && colWidthAt(gx) > 0) {
-            W = Math.min(colWidthAt(gx), limits.maxW);
-        }
-        else {
-            let used = 0;
-            for (let g = Math.min(rGx0, gx); g <= Math.max(rGx1, gx); g++)
-                if (g !== gx)
-                    used += colWidthAt(g) || (g >= rGx0 && g <= rGx1 ? 30 : 0);
-            const remain = limits.layW * 10 - used;
-            if (remain < STD.W * 2) {
-                if (remain <= limits.maxW)
-                    W = Math.max(30, remain); // последний — заполняет остаток
-                else {
-                    const half = Math.round((remain / 2) * 10) / 10;
-                    if (half <= limits.maxW && half >= 30) {
-                        splitX = [half, Math.round((remain - half) * 10) / 10];
-                        W = splitX[0];
-                    }
-                    else
-                        W = Math.min(STD.W, limits.maxW);
-                }
-            }
-            else
-                W = STD.W;
-            W = Math.max(30, Math.min(W, limits.maxW));
-        }
-        let D, splitY = null;
-        if (gy >= rGy0 && gy <= rGy1 && rowDepthAt(gy) > 0) {
-            D = Math.min(rowDepthAt(gy), limits.maxD);
-        }
-        else {
-            let used = 0;
-            for (let g = Math.min(rGy0, gy); g <= Math.max(rGy1, gy); g++)
-                if (g !== gy)
-                    used += rowDepthAt(g) || (g >= rGy0 && g <= rGy1 ? 30 : 0);
-            const remain = limits.layD * 10 - used;
-            if (remain < STD.D * 2) {
-                if (remain <= limits.maxD)
-                    D = Math.max(30, remain);
-                else {
-                    const half = Math.round((remain / 2) * 10) / 10;
-                    if (half <= limits.maxD && half >= 30) {
-                        splitY = [half, Math.round((remain - half) * 10) / 10];
-                        D = splitY[0];
-                    }
-                    else
-                        D = Math.min(STD.D, limits.maxD);
-                }
-            }
-            else
-                D = STD.D;
-            D = Math.max(30, Math.min(D, limits.maxD));
-        }
-        return { W: Math.round(W * 10) / 10, D: Math.round(D * 10) / 10, splitX, splitY };
+    // Сборка — это ряды: внутри ряда контейнеры стоят слева направо и ширина
+    // у каждого своя, общая у ряда только глубина. Карта рисует ряды в
+    // масштабе, поэтому видно фактические пропорции.
+    const mapRows = rowsOf(containers);
+    const idxOf = (c) => containers.indexOf(c);
+    const layWmm = Math.max(60, limits.layW * 10);
+    const scale = Math.min(0.85, 250 / Math.max(layWmm, ...mapRows.map((r) => r.width)));
+    const nextRowGy = mapRows.length ? mapRows[mapRows.length - 1].gy + 1 : 0;
+    const firstRowGy = mapRows.length ? mapRows[0].gy : 0;
+    // Новый контейнер в конце ряда: берёт остаток до края лимита раскладки
+    // (в пределах лимита принтера), глубину — у своего ряда.
+    const addToRow = (gy) => {
+        const row = mapRows.find((r) => r.gy === gy);
+        const rem = Math.round((limits.layW * 10 - (row ? row.width : 0)) * 10) / 10;
+        const W = Math.max(30, Math.min(limits.maxW, rem >= 30 ? rem : limits.maxW));
+        const usedD = mapRows.reduce((sum, r) => sum + r.depth, 0);
+        const D = row ? row.depth
+            : Math.max(30, Math.min(limits.maxD, Math.round((limits.layD * 10 - usedD) * 10) / 10 || limits.maxD));
+        const nc = { ...makeContainer(null, row ? row.list.length : 0, gy), W, D };
+        setContainers((cs) => [...cs, nc]);
+        setSel(containers.length);
+        setSelection(null);
     };
     // ── перетаскивание контейнеров по карте ──
-    // Тянем мышью или пальцем: клетка под курсором подсвечивается, отпускание
-    // переносит контейнер (на занятую клетку — меняет их местами). Нажатие без
-    // сдвига остаётся обычным выбором контейнера.
-    const cellUnder = (x, y) => {
+    // Тянем мышью или пальцем: подсвечивается место вставки (щель между
+    // контейнерами, конец ряда или новый ряд). Нажатие без сдвига —
+    // обычный выбор контейнера.
+    const dropUnder = (x, y) => {
         const el = document.elementFromPoint(x, y);
-        const cell = el && el.closest && el.closest("[data-cell]");
-        if (!cell)
+        const t = el && el.closest && el.closest("[data-drop]");
+        if (!t)
             return null;
-        const [gx, gy] = cell.getAttribute("data-cell").split(",").map(Number);
-        return Number.isFinite(gx) && Number.isFinite(gy) ? { gx, gy } : null;
+        const [gy, pos] = t.getAttribute("data-drop").split(":").map(Number);
+        if (!Number.isFinite(gy) || !Number.isFinite(pos))
+            return null;
+        if (t.hasAttribute("data-box")) {
+            const r = t.getBoundingClientRect();
+            return { gy, pos: x > r.left + r.width / 2 ? pos + 1 : pos };
+        }
+        return { gy, pos };
     };
-    const dragStart = (e, idx, gx, gy) => {
+    const dragStart = (e, idx) => {
         if (e.button)
             return;
         // захват указателя: тянуть можно и за пределами исходной кнопки
         if (e.currentTarget.setPointerCapture)
             e.currentTarget.setPointerCapture(e.pointerId);
-        dragRef.current = { idx, gx, gy, x0: e.clientX, y0: e.clientY, moved: false };
+        dragRef.current = { idx, x0: e.clientX, y0: e.clientY, moved: false };
     };
     const dragMove = (e) => {
         const d = dragRef.current;
@@ -4601,7 +4679,7 @@ function TrayGenerator() {
         if (!d.moved && Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0) < 5)
             return;
         d.moved = true;
-        setDrag({ idx: d.idx, over: cellUnder(e.clientX, e.clientY), x: e.clientX, y: e.clientY });
+        setDrag({ idx: d.idx, over: dropUnder(e.clientX, e.clientY), x: e.clientX, y: e.clientY });
     };
     const dragEnd = (e) => {
         const d = dragRef.current;
@@ -4615,13 +4693,13 @@ function TrayGenerator() {
             return;
         }
         // мышь отпущена после переноса: следующий click (если браузер его
-        // всё-таки родит) не должен добавлять контейнер на клетке «+»
+        // всё-таки родит) не должен добавлять контейнер кнопкой «+»
         dragBlockClick.current = true;
         setTimeout(() => { dragBlockClick.current = false; }, 0);
-        const to = cellUnder(e.clientX, e.clientY);
+        const to = dropUnder(e.clientX, e.clientY);
         if (!to)
             return;
-        setContainers((cs) => moveContainer(cs, d.idx, to.gx, to.gy));
+        setContainers((cs) => moveContainer(cs, d.idx, to.gy, to.pos));
         setSel(d.idx); // порядок в списке не меняется — номер остаётся прежним
         setSelection(null);
     };
@@ -4634,56 +4712,65 @@ function TrayGenerator() {
         window.addEventListener("keydown", esc);
         return () => window.removeEventListener("keydown", esc);
     }, [drag]);
-    // «+» доступен всегда: лимит раскладки — ориентир (рамка на столе),
-    // а не запрет; вылезающую за него сборку видно сразу
-    const gridCells = [];
-    for (let gy = gy0; gy <= gy1; gy++)
-        for (let gx = gx0; gx <= gx1; gx++) {
-            const idx = posMap.get(`${gx},${gy}`);
-            const isOver = drag && drag.over && drag.over.gx === gx && drag.over.gy === gy && drag.idx !== idx;
-            if (idx !== undefined) {
+    const overIs = (gy, pos) => drag && drag.over && drag.over.gy === gy && drag.over.pos === pos;
+    // щель между контейнерами — мишень вставки
+    const slot = (gy, pos) => (React.createElement("div", { key: `s${gy}:${pos}`, "data-drop": `${gy}:${pos}`, style: {
+            width: drag ? 12 : 4, alignSelf: "stretch", borderRadius: 3,
+            background: overIs(gy, pos) ? SEL : drag ? "#E2E8F0" : "transparent",
+        } }));
+    const rowStrip = (gy, label) => (React.createElement("div", { key: `r${gy}`, "data-drop": `${gy}:0`, style: {
+            height: drag ? 20 : 0, marginTop: 2, borderRadius: 6, fontSize: 11, color: "#8A97A8",
+            display: drag ? "flex" : "none", alignItems: "center", justifyContent: "center",
+            border: `1px dashed ${overIs(gy, 0) ? SEL : "#C6D0DC"}`,
+            background: overIs(gy, 0) ? "#DBEAFE" : "transparent",
+        } }, label));
+    const mapView = (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3 } },
+        rowStrip(firstRowGy - 1, "новый ряд сверху"),
+        mapRows.map((r) => (React.createElement("div", { key: r.gy, style: { display: "flex", alignItems: "stretch", gap: 0 } },
+            slot(r.gy, 0),
+            r.list.map((c, k) => {
+                const idx = idxOf(c);
                 const isDragged = drag?.idx === idx;
-                gridCells.push(React.createElement("button", { key: `${gx},${gy}`, "data-cell": `${gx},${gy}`, title: `Контейнер №${idx + 1}: ${containers[idx].W}×${containers[idx].D} мм. Перетащи, чтобы переставить`, onPointerDown: (e) => dragStart(e, idx, gx, gy), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
-                        width: 38, height: 34, borderRadius: 8, fontSize: 12.5, fontWeight: 700,
-                        cursor: drag ? "grabbing" : "grab", touchAction: "none",
-                        border: isOver ? `2px dashed ${SEL}` : idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                        background: isOver ? "#DBEAFE" : idx === sel ? "#FFF3EB" : "#fff",
-                        color: isOver ? SEL : idx === sel ? ACCENT : "#3D4A5C",
-                        opacity: isDragged ? 0.35 : 1,
-                    } },
-                    "\u2116",
-                    idx + 1));
-            }
-            else {
-                const adjacent = posMap.has(`${gx + 1},${gy}`) || posMap.has(`${gx - 1},${gy}`) ||
-                    posMap.has(`${gx},${gy + 1}`) || posMap.has(`${gx},${gy - 1}`);
-                gridCells.push(adjacent ? (React.createElement("button", { key: `${gx},${gy}`, "data-cell": `${gx},${gy}`, onClick: () => {
-                        if (dragBlockClick.current)
-                            return; // клик-эхо после переноса
-                        const pd = plannedDims(gx, gy);
-                        const fresh = [{ ...makeContainer(null, gx, gy), W: pd.W, D: pd.D }];
-                        if (pd.splitX) {
-                            const dir = gx > rGx1 ? 1 : -1;
-                            fresh.push({ ...makeContainer(null, gx + dir, gy), W: pd.splitX[1], D: pd.D });
-                        }
-                        else if (pd.splitY) {
-                            const dir = gy > rGy1 ? 1 : -1;
-                            fresh.push({ ...makeContainer(null, gx, gy + dir), W: pd.W, D: pd.splitY[1] });
-                        }
-                        setContainers((cs) => [...cs, ...fresh]);
-                        setSel(containers.length);
-                        setSelection(null);
-                    }, style: {
-                        width: 38, height: 34, borderRadius: 8, fontSize: 15, cursor: "pointer", touchAction: "none",
-                        border: isOver ? `2px dashed ${SEL}` : "1px dashed #A9B4C2",
-                        background: isOver ? "#DBEAFE" : "transparent", color: isOver ? SEL : "#8A97A8",
-                    } }, "+")) : (React.createElement("div", { key: `${gx},${gy}`, "data-cell": `${gx},${gy}`, style: {
-                        width: 38, height: 34, borderRadius: 8,
-                        border: isOver ? `2px dashed ${SEL}` : "1px solid transparent",
-                        background: isOver ? "#DBEAFE" : "transparent",
-                    } })));
-            }
-        }
+                return [
+                    React.createElement("button", { key: `b${c.id}`, "data-drop": `${r.gy}:${k}`, "data-box": idx, title: `Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`, onPointerDown: (e) => dragStart(e, idx), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
+                            width: Math.max(30, Math.round(c.W * scale)),
+                            height: Math.max(26, Math.round(r.depth * scale)),
+                            borderRadius: 8, fontSize: 12, fontWeight: 700,
+                            cursor: drag ? "grabbing" : "grab", touchAction: "none",
+                            border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                            background: idx === sel ? "#FFF3EB" : "#fff",
+                            color: idx === sel ? ACCENT : "#3D4A5C",
+                            opacity: isDragged ? 0.35 : 1,
+                        } },
+                        "\u2116",
+                        idx + 1),
+                    slot(r.gy, k + 1),
+                ];
+            }),
+            React.createElement("button", { key: `a${r.gy}`, onClick: () => {
+                    if (dragBlockClick.current)
+                        return;
+                    const to = r.align === "right" ? undefined : "right";
+                    setContainers((cs) => cs.map((c) => (c.gy === r.gy ? { ...c, rowAlign: to } : c)));
+                }, title: r.align === "right" ? "Ряд прижат вправо — прижать влево" : "Ряд прижат влево — прижать вправо", style: {
+                    width: 22, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
+                    fontSize: 12, cursor: "pointer", border: "1px solid #E4E9EF",
+                    background: "transparent", color: "#8A97A8",
+                } }, r.align === "right" ? "⇥" : "⇤"),
+            React.createElement("button", { key: `p${r.gy}`, "data-drop": `${r.gy}:${r.list.length}`, onClick: () => { if (!dragBlockClick.current)
+                    addToRow(r.gy); }, title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432 \u044D\u0442\u043E\u0442 \u0440\u044F\u0434", style: {
+                    width: 30, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
+                    fontSize: 15, cursor: "pointer", touchAction: "none",
+                    border: `1px dashed ${overIs(r.gy, r.list.length) ? SEL : "#A9B4C2"}`,
+                    background: overIs(r.gy, r.list.length) ? "#DBEAFE" : "transparent",
+                    color: overIs(r.gy, r.list.length) ? SEL : "#8A97A8",
+                } }, "+")))),
+        rowStrip(nextRowGy, "новый ряд снизу"),
+        React.createElement("button", { onClick: () => { if (!dragBlockClick.current)
+                addToRow(nextRowGy); }, style: {
+                marginTop: 4, padding: "5px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
+                border: "1px dashed #A9B4C2", background: "transparent", color: "#6B7A8D", width: "100%",
+            } }, "+ \u0440\u044F\u0434")));
     // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
     let editorWall = null, editorCell = null;
     if (selection?.type === "wall") {
@@ -4887,9 +4974,12 @@ function TrayGenerator() {
             tab === "layout" && (React.createElement("div", null,
                 React.createElement(SectionTitle, null, "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430"),
                 React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
+                    "\u0421\u0431\u043E\u0440\u043A\u0430 \u2014 \u044D\u0442\u043E \u0440\u044F\u0434\u044B: \u0448\u0438\u0440\u0438\u043D\u0430 \u0443 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u0441\u0432\u043E\u044F, \u043E\u0431\u0449\u0430\u044F \u0443 \u0440\u044F\u0434\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0433\u043B\u0443\u0431\u0438\u043D\u0430. ",
                     React.createElement("b", null, "+"),
-                    " \u043F\u0440\u0438\u0441\u0442\u044B\u043A\u043E\u0432\u044B\u0432\u0430\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440: \u0440\u0430\u0437\u043C\u0435\u0440 \u043F\u043E\u0434\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043F\u043E\u0434 \u0441\u043E\u0441\u0435\u0434\u0435\u0439 \u0438 \u043F\u043E\u0434 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u0432 \u043B\u0438\u043C\u0438\u0442\u0435 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438."),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: `repeat(${gx1 - gx0 + 1}, 38px)`, gap: 4, justifyContent: "start" } }, gridCells),
+                    " \u0434\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432 \u043A\u043E\u043D\u0435\u0446 \u0440\u044F\u0434\u0430, ",
+                    React.createElement("b", null, "\u21E4/\u21E5"),
+                    " \u043F\u0440\u0438\u0436\u0438\u043C\u0430\u0435\u0442 \u043A\u043E\u0440\u043E\u0442\u043A\u0438\u0439 \u0440\u044F\u0434 \u043A \u043B\u0435\u0432\u043E\u043C\u0443 \u0438\u043B\u0438 \u043F\u0440\u0430\u0432\u043E\u043C\u0443 \u043A\u0440\u0430\u044E."),
+                mapView,
                 drag && (React.createElement("div", { style: {
                         position: "fixed", left: drag.x + 12, top: drag.y + 8, zIndex: 50, pointerEvents: "none",
                         padding: "3px 8px", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
@@ -4900,12 +4990,12 @@ function TrayGenerator() {
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } },
                     "\u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B ",
                     React.createElement("b", null, "\u0442\u0430\u0441\u043A\u0430\u044E\u0442\u0441\u044F \u043C\u044B\u0448\u044C\u044E"),
-                    ": \u043D\u0430 \u043F\u0443\u0441\u0442\u0443\u044E \u043A\u043B\u0435\u0442\u043A\u0443 \u2014 \u043F\u0435\u0440\u0435\u0435\u0437\u0434, \u043D\u0430 \u0437\u0430\u043D\u044F\u0442\u0443\u044E \u2014 \u043E\u0431\u043C\u0435\u043D \u043C\u0435\u0441\u0442\u0430\u043C\u0438 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442). \u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u043F\u0440\u0438\u043D\u0438\u043C\u0430\u0435\u0442 \u0433\u0430\u0431\u0430\u0440\u0438\u0442 \u043A\u043B\u0435\u0442\u043A\u0438, \u0432 \u043A\u043E\u0442\u043E\u0440\u0443\u044E \u0432\u0441\u0442\u0430\u043B."),
+                    ": \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043C\u0435\u0441\u0442\u043E \u0432\u0441\u0442\u0430\u0432\u043A\u0438 \u2014 \u0449\u0435\u043B\u044C \u0432 \u0440\u044F\u0434\u0443, \u043A\u043E\u043D\u0435\u0446 \u0440\u044F\u0434\u0430 \u0438\u043B\u0438 \u043D\u043E\u0432\u044B\u0439 \u0440\u044F\u0434 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442). \u0428\u0438\u0440\u0438\u043D\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442, \u0433\u043B\u0443\u0431\u0438\u043D\u0443 \u0431\u0435\u0440\u0451\u0442 \u0443 \u0440\u044F\u0434\u0430."),
                 React.createElement("button", { onClick: fillLayout, style: {
                         width: "100%", marginTop: 8, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
                         cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
                     } }, "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0443"),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 } }, "\u0414\u043E\u0441\u0442\u0440\u043E\u0438\u0442 \u0441\u0435\u0442\u043A\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430\u043C\u0438 \u0434\u043E \u043B\u0438\u043C\u0438\u0442\u0430 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438; \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0435 \u043D\u0435 \u0442\u0440\u043E\u0433\u0430\u0435\u0442."),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 } }, "\u0414\u043E\u0442\u044F\u043D\u0435\u0442 \u0440\u044F\u0434\u044B \u0434\u043E \u043F\u0440\u0430\u0432\u043E\u0433\u043E \u043A\u0440\u0430\u044F \u0438 \u0434\u043E\u0441\u0442\u0440\u043E\u0438\u0442 \u0440\u044F\u0434\u044B \u0434\u043E \u0434\u0430\u043B\u044C\u043D\u0435\u0433\u043E \u043A\u0440\u0430\u044F \u043B\u0438\u043C\u0438\u0442\u0430."),
                 React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" } },
                     containers.length > 1 && (React.createElement("button", { onClick: () => { setContainers((cs) => cs.filter((_, i) => i !== sel)); setSel(0); setSelection(null); }, style: { padding: "5px 10px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" } },
                         "\u0443\u0434\u0430\u043B\u0438\u0442\u044C \u2116",
@@ -4924,8 +5014,8 @@ function TrayGenerator() {
                     React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3D4A5C", cursor: "pointer" } },
                         React.createElement("input", { type: "checkbox", checked: layMagnet, onChange: (e) => setLayMagnet(e.target.checked), style: { accentColor: ACCENT } }),
                         "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439: \u0440\u0430\u0437\u043C\u0435\u0440 \u043F\u0440\u0438\u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u043A\u043E \u0432\u0441\u0435\u0439 \u043A\u043E\u043B\u043E\u043D\u043A\u0435 \u0438\u043B\u0438 \u0440\u044F\u0434\u0443, \u0441\u043E\u0441\u0435\u0434\u0438 \u0437\u0430\u0431\u0438\u0440\u0430\u044E\u0442 \u043E\u0441\u0432\u043E\u0431\u043E\u0434\u0438\u0432\u0448\u0435\u0435\u0441\u044F \u043C\u0435\u0441\u0442\u043E (\u0438\u043B\u0438 \u0443\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u0441\u0432\u043E\u0451)."),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438: \u043A\u0440\u0430\u0439\u043D\u0438\u0435 \u043A\u043E\u043B\u043E\u043D\u043A\u0430 \u0438 \u0440\u044F\u0434 \u0434\u043E\u0442\u044F\u0433\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0434\u043E \u043A\u0440\u0430\u044F \u043B\u0438\u043C\u0438\u0442\u0430, \u043F\u0443\u0441\u0442\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u043E\u0442 30 \u043C\u043C \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0442 \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B."),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439: \u0448\u0438\u0440\u0438\u043D\u0443 \u043C\u0435\u043D\u044F\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440, \u0430 \u0441\u043E\u0441\u0435\u0434\u0438 \u043F\u043E \u0440\u044F\u0434\u0443 \u0437\u0430\u0431\u0438\u0440\u0430\u044E\u0442 \u043E\u0441\u0432\u043E\u0431\u043E\u0434\u0438\u0432\u0448\u0435\u0435\u0441\u044F \u043C\u0435\u0441\u0442\u043E (\u0438\u043B\u0438 \u0443\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u0441\u0432\u043E\u0451); \u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u043E\u0431\u0449\u0430\u044F \u0443 \u0440\u044F\u0434\u0430 \u2014 \u0435\u0451 \u043A\u043E\u043C\u043F\u0435\u043D\u0441\u0438\u0440\u0443\u044E\u0442 \u0441\u043E\u0441\u0435\u0434\u043D\u0438\u0435 \u0440\u044F\u0434\u044B."),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438: \u0440\u044F\u0434\u044B \u0434\u043E\u0442\u044F\u0433\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0434\u043E \u043F\u0440\u0430\u0432\u043E\u0433\u043E \u043A\u0440\u0430\u044F \u043B\u0438\u043C\u0438\u0442\u0430, \u0441\u0442\u043E\u043F\u043A\u0430 \u0440\u044F\u0434\u043E\u0432 \u2014 \u0434\u043E \u0434\u0430\u043B\u044C\u043D\u0435\u0433\u043E; \u043F\u0443\u0441\u0442\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u043E\u0442 30 \u043C\u043C \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0442 \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0438 \u0440\u044F\u0434\u044B."),
                 React.createElement(SectionTitle, null, "\u0421\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0438"),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 0", lineHeight: 1.45 } },
                     "\u00AB\u041B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D \u0445\u0432\u043E\u0441\u0442\u00BB: \u0440\u0435\u043B\u044C\u0441 \u0432\u0445\u043E\u0434\u0438\u0442 \u0432 \u043F\u0430\u0437 \u0441\u043E\u0441\u0435\u0434\u0430 \u0441\u0432\u0435\u0440\u0445\u0443. \u0417\u0430\u0437\u043E\u0440 ",

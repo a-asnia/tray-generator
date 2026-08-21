@@ -1,6 +1,7 @@
-// Случай из скриншота пользователя: ужатие контейнера в СЕРЕДИНЕ сетки
-// 3×3. Вся его колонка должна ужаться вместе, соседние колонки —
-// прилипнуть и вырасти; щелей и «висящих» контейнеров быть не должно.
+// Ужатие контейнера в СЕРЕДИНЕ сборки 3×3. Ширина — личный размер:
+// ужимается только он, а соседи ПО РЯДУ забирают освободившееся место,
+// так что ряд остаётся у края. Глубина общая у ряда — ужимается весь ряд,
+// соседние ряды прилипают. Щелей и «висящих» контейнеров быть не должно.
 const { createServer } = require("node:http");
 const { readFileSync } = require("node:fs");
 const { chromium } = require("playwright");
@@ -43,11 +44,13 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
     await el.press("Enter");
     await page.waitForTimeout(300);
   };
-  const colInfo = (st) => {
-    const cols = {};
-    for (const c of st.containers) (cols[c.gx] = cols[c.gx] || []).push(c.W);
-    return cols;
+  const rowInfo = (st) => {
+    const rows = {};
+    for (const c of st.containers) (rows[c.gy] = rows[c.gy] || []).push(c);
+    for (const k of Object.keys(rows)) rows[k].sort((a, b) => a.gx - b.gx);
+    return rows;
   };
+  const rowW = (rows, g) => rows[g].reduce((s, c) => s + c.W, 0);
 
   // сетка 3×3 через «Заполнить раскладку» (лимит 40×40 по умолчанию)
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
@@ -64,20 +67,19 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await setNum("Ширина", 100);
 
   st = await state();
-  const cols = colInfo(st);
-  const colW = (g) => Math.max(...cols[g]);
-  // вся средняя колонка ужалась одинаково — щелей нет
-  ok(`вся колонка 1 стала 100 (${cols[1].join(", ")})`, cols[1].every((w) => near(w, 100)));
-  // соседняя узкая колонка (60) впитала освободившиеся 70 мм
-  ok(`колонка 2 выросла до 130 (${colW(2)})`, near(colW(2), 130));
-  ok(`колонка 0 на лимите принтера (${colW(0)})`, near(colW(0), 170));
-  const total = colW(0) + colW(1) + colW(2);
-  ok(`общая ширина сохранилась (${total} = 400)`, near(total, 400));
+  let rows = rowInfo(st);
+  const mid = rows[1];
+  ok(`ужался только выбранный (${mid.map((c) => c.W).join(", ")})`, near(mid[1].W, 100));
+  ok("соседние ряды не тронуты",
+    near(rowW(rows, 0), 400) && near(rowW(rows, 2), 400));
+  ok(`ряд остался у края (${rowW(rows, 1)} = 400)`, near(rowW(rows, 1), 400));
+  ok("соседи по ряду впитали освободившееся", mid.some((c) => c.W > 60.05));
   ok("новых контейнеров не понадобилось", st.containers.length === 9);
 
   // теперь глубина: ужать центр по глубине — весь средний ряд ужимается
   await setNum("Глубина", 100);
   st = await state();
+  rows = rowInfo(st);
   const midRow = st.containers.filter((c) => c.gy === 1).map((c) => c.D);
   ok(`весь ряд 1 стал 100 по глубине (${midRow.join(", ")})`, midRow.every((d) => near(d, 100)));
   const rowD = (g) => Math.max(...st.containers.filter((c) => c.gy === g).map((c) => c.D));

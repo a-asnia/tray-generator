@@ -50,7 +50,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   // пристыковать второй контейнер (лимит 37 см: остаток 200 мм — один сосед)
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await setNum("Раскладка по X", 37);
-  await page.locator('button:text-is("+")').nth(2).click(); // восточный сосед (в средней строке сетки)
+  await page.locator('button:text-is("+")').first().click(); // сосед в конце ряда
   await page.waitForTimeout(400);
   let st = await state();
   ok("два контейнера", st.containers.length === 2);

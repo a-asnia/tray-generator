@@ -54,7 +54,7 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.locator("button", { hasText: "Зафиксировать эту ячейку" }).click();
   await page.waitForTimeout(400);
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
-  await page.locator('button:text-is("+")').nth(2).click();
+  await page.locator('button:text-is("+")').first().click();
   await page.waitForTimeout(500);
   const before = await state();
   const N = before.containers.length;
