@@ -12,8 +12,8 @@ import { layout, defWall, getWall, getCellLvl, lineOf, cellKeys, endLabels, wall
 import { buildContainer } from "./model/build.js";
 import { assemble } from "./model/assembly.js";
 import { presetContainer, PRESETS, GORKA_DEF, applyStairsWalls, fillStairsLevels } from "./model/presets.js";
-import { snapLayout } from "./model/laymagnet.js";
-import { moveContainer, fitAssembly, rowsOf, renumber } from "./model/laymove.js";
+import { snapLayout, fillAll } from "./model/laymagnet.js";
+import { moveContainer, fitAssembly, resizeBox, autoSpot, boxOf, snapMove, collides, MIN_BOX } from "./model/laymove.js";
 import { cardHolderSolids, CARDH } from "./model/cardholder.js";
 import { makeContainer, SAVED, setNextId, exportProject, importProject } from "./state/storage.js";
 import { useTrayScene } from "./scene/useTrayScene.js";
@@ -222,114 +222,15 @@ export default function TrayGenerator() {
   };
 
   // ── Внешний габарит контейнера ──
-  // Ширина — ЛИЧНЫЙ размер: в ряду контейнеры могут быть разной ширины.
-  // Глубина общая у ряда (иначе между рядами щели), поэтому применяется ко
-  // всему ряду. Магнит соседей держит общий габарит сборки: что забрал
-  // один, отдают соседи по ряду (по ширине) или соседние ряды (по глубине);
-  // контейнеры с замками не трогаются.
+  // Раскладка свободная: у контейнера свои ширина и глубина, левый ближний
+  // угол стоит на месте, двигается противоположная грань. При включённом
+  // магните прилипшие к этой грани соседи едут за ней (при росте — всегда,
+  // иначе коробки наехали бы друг на друга). Жёсткая рамка стола
+  // соблюдается всегда.
   const applyOuterDim = (patch) => {
-    // «Зафиксировать внешний размер» — намертво: габарит не меняется ни
-    // от ползунков, ни от изменения ячеек внутри, ни магнитом соседей
     if (cur.lockOuter) return;
-    const isW = "W" in patch;
-    const axis = isW ? "W" : "D";
-    const maxAxis = isW ? limits.maxW : limits.maxD;
-    const layLim = (isW ? limits.layW : limits.layD) * 10;
-    const r1 = (v) => Math.round(v * 10) / 10;
-    const want0 = Math.max(minOuterDim(cur, axis), Math.min(patch[axis], maxAxis), 30);
-    const myId = cur.id, myGy = cur.gy, wasSize = cur[axis];
-    const magnetOn = magnet;
-    // раздача разницы между «донорами»: delta > 0 — забрать у них,
-    // delta < 0 — раздать им. Возвращает остаток, который забрать не вышло.
-    const spread = (targets, lo, hi, delta) => {
-      for (let pass = 0; pass < 4 && Math.abs(delta) > 0.05; pass++) {
-        const open = [...targets.keys()].filter((k) =>
-          delta > 0 ? targets.get(k) > lo(k) + 0.01 : targets.get(k) < hi(k) - 0.01);
-        if (!open.length) break;
-        const share = delta / open.length;
-        for (const k of open) {
-          const v = Math.max(lo(k), Math.min(hi(k), r1(targets.get(k) - share)));
-          delta = r1(delta - (targets.get(k) - v));
-          targets.set(k, v);
-        }
-      }
-      return delta;
-    };
-
-    setContainers((cs) => {
-      const rows = rowsOf(cs);
-      const myRow = rows.find((r) => r.gy === myGy);
-      if (!myRow) return cs;
-      if (isW) {
-        let want = want0;
-        const others = myRow.list.filter((c) => c.id !== myId);
-        const free = others.filter((c) => !c.lockOuter && !c.lockCell);
-        // без магнита (или когда в ряду больше некому отдавать и забирать)
-        // ряд просто становится шире или уже — но не за рамку стола
-        if (!magnetOn || !free.length) {
-          if (layLim > 0) {
-            const used = others.reduce((s, c) => s + c.W, 0);
-            want = Math.min(want, Math.max(30, r1(layLim - used)));
-          }
-          return cs.map((c) => (c.id === myId ? { ...c, W: r1(want) } : c));
-        }
-        const targets = new Map(free.map((c) => [c.id, c.W]));
-        const byId = new Map(free.map((c) => [c.id, c]));
-        const rest = spread(
-          targets,
-          (k) => Math.max(30, minOuterDim(byId.get(k), "W")),
-          () => maxAxis,
-          r1(want - wasSize)
-        );
-        // Заданный размер контейнер получает всегда — магнит лишь
-        // компенсирует его соседями. Если соседям расти больше некуда
-        // (лимит принтера), освободившееся место закрывает новый контейнер
-        // сразу за ужатым; мелкий остаток оставляем как есть.
-        let extra = null;
-        if (rest <= -30) extra = { ...makeContainer(null, cur.gx + 1, myGy), W: r1(-rest), D: myRow.depth };
-        const shifted = cs.map((c) => {
-          if (c.id === myId) return { ...c, W: want };
-          if (targets.has(c.id) && Math.abs(targets.get(c.id) - c.W) > 0.01) return { ...c, W: targets.get(c.id) };
-          return c;
-        });
-        if (!extra) return shifted;
-        return renumber([
-          ...shifted.map((c) => (c.gy === myGy && c.gx > cur.gx ? { ...c, gx: c.gx + 1 } : c)),
-          extra,
-        ]);
-      }
-      // ── глубина: общая у ряда ──
-      let want = Math.max(want0, ...myRow.list.map((c) => minOuterDim(c, "D")));
-      const otherRows = rows.filter((r) => r.gy !== myGy && r.list.every((c) => !c.lockOuter && !c.lockCell));
-      if (!magnetOn && layLim > 0) {
-        const used = rows.filter((r) => r.gy !== myGy).reduce((s, r) => s + r.depth, 0);
-        want = Math.min(want, Math.max(30, r1(layLim - used)));
-      }
-      let targets = new Map();
-      let newRow = null;
-      if (magnetOn && otherRows.length) {
-        targets = new Map(otherRows.map((r) => [r.gy, r.depth]));
-        const rowById = new Map(otherRows.map((r) => [r.gy, r]));
-        const rest = spread(
-          targets,
-          (k) => Math.max(30, ...rowById.get(k).list.map((c) => minOuterDim(c, "D"))),
-          () => maxAxis,
-          r1(want - myRow.depth)
-        );
-        // соседним рядам расти некуда — освободившуюся полосу закрывает
-        // новый ряд с теми же ширинами
-        if (rest <= -30) newRow = { depth: r1(-rest), widths: myRow.list.map((c) => c.W) };
-      }
-      const out = cs.map((c) => {
-        if (c.lockOuter) return c;
-        if (c.gy === myGy) return Math.abs(c.D - want) > 0.01 ? { ...c, D: r1(want) } : c;
-        if (targets.has(c.gy) && Math.abs(targets.get(c.gy) - c.D) > 0.01) return { ...c, D: targets.get(c.gy) };
-        return c;
-      });
-      if (!newRow) return out;
-      const added = newRow.widths.map((W, gx) => ({ ...makeContainer(null, gx, myGy + 1), W, D: newRow.depth }));
-      return renumber([...out.map((c) => (c.gy > myGy ? { ...c, gy: c.gy + 1 } : c)), ...added]);
-    });
+    const idx = sel;
+    setContainers((cs) => resizeBox(cs, idx, patch, limits, magnet));
   };
 
   // сброс к значениям по умолчанию: без диалогов и перезагрузки,
@@ -722,53 +623,51 @@ export default function TrayGenerator() {
     });
   };
 
-  // ── карта раскладки ──
-  // Сборка — это ряды: внутри ряда контейнеры стоят слева направо и ширина
-  // у каждого своя, общая у ряда только глубина. Карта рисует ряды в
-  // масштабе, поэтому видно фактические пропорции.
-  const mapRows = rowsOf(containers);
-  const idxOf = (c) => containers.indexOf(c);
+  // ── план раскладки ──
+  // Свободная 2D-карта: рамка стола в масштабе, контейнеры — как стоят на
+  // самом деле. Никаких рядов и клеток — тащи куда хочешь, края прилипают
+  // к соседям и к рамке.
   const layWmm = Math.max(60, limits.layW * 10);
-  const scale = Math.min(0.85, 250 / Math.max(layWmm, ...mapRows.map((r) => r.width)));
-  const nextRowGy = mapRows.length ? mapRows[mapRows.length - 1].gy + 1 : 0;
-  const firstRowGy = mapRows.length ? mapRows[0].gy : 0;
+  const layDmm = Math.max(60, limits.layD * 10);
+  const bW = Math.max(layWmm, ...containers.map((c) => c.px + c.W));
+  const bD = Math.max(layDmm, ...containers.map((c) => c.pz + c.D));
+  const scale = Math.min(0.8, 262 / bW, 300 / bD);
+  const planRef = useRef(null);
 
-  // Новый контейнер в конце ряда: берёт остаток до края лимита раскладки
-  // (в пределах лимита принтера), глубину — у своего ряда.
-  const addToRow = (gy) => {
-    const row = mapRows.find((r) => r.gy === gy);
-    const rem = Math.round((limits.layW * 10 - (row ? row.width : 0)) * 10) / 10;
-    const W = Math.max(30, Math.min(limits.maxW, rem >= 30 ? rem : limits.maxW));
-    const usedD = mapRows.reduce((sum, r) => sum + r.depth, 0);
-    const D = row ? row.depth
-      : Math.max(30, Math.min(limits.maxD, Math.round((limits.layD * 10 - usedD) * 10) / 10 || limits.maxD));
-    const nc = { ...makeContainer(null, row ? row.list.length : 0, gy), W, D };
+  // «+ контейнер»: встаёт в самый большой свободный прямоугольник рамки
+  const addContainer = () => {
+    const spot = autoSpot(containers, limits);
+    if (!spot) return;
+    const nc = { ...makeContainer(null, spot.px, spot.pz), W: spot.W, D: spot.D };
     setContainers((cs) => [...cs, nc]);
     setSel(containers.length);
     setSelection(null);
   };
+  const canAdd = !!autoSpot(containers, limits);
 
-  // ── перетаскивание контейнеров по карте ──
-  // Тянем мышью или пальцем: подсвечивается место вставки (щель между
-  // контейнерами, конец ряда или новый ряд). Нажатие без сдвига —
-  // обычный выбор контейнера.
-  const dropUnder = (x, y) => {
-    const el = document.elementFromPoint(x, y);
-    const t = el && el.closest && el.closest("[data-drop]");
-    if (!t) return null;
-    const [gy, pos] = t.getAttribute("data-drop").split(":").map(Number);
-    if (!Number.isFinite(gy) || !Number.isFinite(pos)) return null;
-    if (t.hasAttribute("data-box")) {
-      const r = t.getBoundingClientRect();
-      return { gy, pos: x > r.left + r.width / 2 ? pos + 1 : pos };
-    }
-    return { gy, pos };
+  // ── перетаскивание по плану ──
+  // Позиция считается в мм из позиции курсора на плане; прилипание и
+  // проверку пересечений делает модель (snapMove/collides). Нажатие без
+  // сдвига — обычный выбор контейнера.
+  const planPos = (e, d) => {
+    const r = planRef.current?.getBoundingClientRect();
+    if (!r) return null;
+    return {
+      px: (e.clientX - r.left) / scale - d.offX,
+      pz: (e.clientY - r.top) / scale - d.offZ,
+    };
   };
   const dragStart = (e, idx) => {
     if (e.button) return;
-    // захват указателя: тянуть можно и за пределами исходной кнопки
     if (e.currentTarget.setPointerCapture) e.currentTarget.setPointerCapture(e.pointerId);
-    dragRef.current = { idx, x0: e.clientX, y0: e.clientY, moved: false };
+    const r = planRef.current?.getBoundingClientRect();
+    const c = containers[idx];
+    dragRef.current = {
+      idx, x0: e.clientX, y0: e.clientY, moved: false,
+      // за какую точку контейнера схватились (мм от его угла)
+      offX: r ? (e.clientX - r.left) / scale - c.px : c.W / 2,
+      offZ: r ? (e.clientY - r.top) / scale - c.pz : c.D / 2,
+    };
   };
   const dragMove = (e) => {
     const d = dragRef.current;
@@ -776,7 +675,10 @@ export default function TrayGenerator() {
     // порог в 5 px: дрожание руки не должно превращать клик в перенос
     if (!d.moved && Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0) < 5) return;
     d.moved = true;
-    setDrag({ idx: d.idx, over: dropUnder(e.clientX, e.clientY), x: e.clientX, y: e.clientY });
+    const p = planPos(e, d);
+    if (!p) return;
+    const snapped = snapMove(containers, d.idx, p.px, p.pz, limits);
+    setDrag({ idx: d.idx, ...snapped, bad: collides(containers, d.idx, snapped.px, snapped.pz) });
   };
   const dragEnd = (e) => {
     const d = dragRef.current;
@@ -784,14 +686,12 @@ export default function TrayGenerator() {
     setDrag(null);
     if (!d) return;
     if (!d.moved) { setSel(d.idx); setSelection(null); return; }
-    // мышь отпущена после переноса: следующий click (если браузер его
-    // всё-таки родит) не должен добавлять контейнер кнопкой «+»
     dragBlockClick.current = true;
     setTimeout(() => { dragBlockClick.current = false; }, 0);
-    const to = dropUnder(e.clientX, e.clientY);
-    if (!to) return;
-    setContainers((cs) => moveContainer(cs, d.idx, to.gy, to.pos));
-    setSel(d.idx); // порядок в списке не меняется — номер остаётся прежним
+    const p = planPos(e, d);
+    if (!p) return;
+    setContainers((cs) => moveContainer(cs, d.idx, p.px, p.pz, limits));
+    setSel(d.idx);
     setSelection(null);
   };
   const dragCancel = () => { dragRef.current = null; setDrag(null); };
@@ -802,111 +702,53 @@ export default function TrayGenerator() {
     return () => window.removeEventListener("keydown", esc);
   }, [drag]);
 
-  const overIs = (gy, pos) => drag && drag.over && drag.over.gy === gy && drag.over.pos === pos;
-  // щель между контейнерами — мишень вставки
-  const slot = (gy, pos) => (
+  const mapView = (
     <div
-      key={`s${gy}:${pos}`}
-      data-drop={`${gy}:${pos}`}
+      ref={planRef}
       style={{
-        width: drag ? 12 : 4, alignSelf: "stretch", borderRadius: 3,
-        background: overIs(gy, pos) ? SEL : drag ? "#E2E8F0" : "transparent",
-      }}
-    />
-  );
-  const rowStrip = (gy, label) => (
-    <div
-      key={`r${gy}`}
-      data-drop={`${gy}:0`}
-      style={{
-        height: drag ? 20 : 0, marginTop: 2, borderRadius: 6, fontSize: 11, color: "#8A97A8",
-        display: drag ? "flex" : "none", alignItems: "center", justifyContent: "center",
-        border: `1px dashed ${overIs(gy, 0) ? SEL : "#C6D0DC"}`,
-        background: overIs(gy, 0) ? "#DBEAFE" : "transparent",
+        position: "relative",
+        width: Math.round(bW * scale) + 2,
+        height: Math.round(bD * scale) + 2,
+        background: "#F8FAFC", borderRadius: 6,
       }}
     >
-      {label}
-    </div>
-  );
-
-  const mapView = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      {rowStrip(firstRowGy - 1, "новый ряд сверху")}
-      {mapRows.map((r) => (
-        <div key={r.gy} style={{ display: "flex", alignItems: "stretch", gap: 0 }}>
-          {slot(r.gy, 0)}
-          {r.list.map((c, k) => {
-            const idx = idxOf(c);
-            const isDragged = drag?.idx === idx;
-            return [
-              <button
-                key={`b${c.id}`}
-                data-drop={`${r.gy}:${k}`}
-                data-box={idx}
-                title={`Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`}
-                onPointerDown={(e) => dragStart(e, idx)}
-                onPointerMove={dragMove}
-                onPointerUp={dragEnd}
-                onPointerCancel={dragCancel}
-                style={{
-                  width: Math.max(30, Math.round(c.W * scale)),
-                  height: Math.max(26, Math.round(r.depth * scale)),
-                  borderRadius: 8, fontSize: 12, fontWeight: 700,
-                  cursor: drag ? "grabbing" : "grab", touchAction: "none",
-                  border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                  background: idx === sel ? "#FFF3EB" : "#fff",
-                  color: idx === sel ? ACCENT : "#3D4A5C",
-                  opacity: isDragged ? 0.35 : 1,
-                }}
-              >
-                №{idx + 1}
-              </button>,
-              slot(r.gy, k + 1),
-            ];
-          })}
+      {/* рамка стола — жёсткий лимит раскладки */}
+      <div style={{
+        position: "absolute", left: 0, top: 0,
+        width: Math.round(layWmm * scale), height: Math.round(layDmm * scale),
+        border: "1.5px dashed #A9B4C2", borderRadius: 4, boxSizing: "border-box",
+      }} />
+      {containers.map((c, idx) => {
+        const isDragged = drag?.idx === idx;
+        const px = isDragged ? drag.px : c.px;
+        const pz = isDragged ? drag.pz : c.pz;
+        return (
           <button
-            key={`a${r.gy}`}
-            onClick={() => {
-              if (dragBlockClick.current) return;
-              const to = r.align === "right" ? undefined : "right";
-              setContainers((cs) => cs.map((c) => (c.gy === r.gy ? { ...c, rowAlign: to } : c)));
-            }}
-            title={r.align === "right" ? "Ряд прижат вправо — прижать влево" : "Ряд прижат влево — прижать вправо"}
+            key={c.id}
+            title={`Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`}
+            onPointerDown={(e) => dragStart(e, idx)}
+            onPointerMove={dragMove}
+            onPointerUp={dragEnd}
+            onPointerCancel={dragCancel}
             style={{
-              width: 22, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
-              fontSize: 12, cursor: "pointer", border: "1px solid #E4E9EF",
-              background: "transparent", color: "#8A97A8",
+              position: "absolute",
+              left: Math.round(px * scale), top: Math.round(pz * scale),
+              width: Math.max(18, Math.round(c.W * scale)),
+              height: Math.max(16, Math.round(c.D * scale)),
+              borderRadius: 6, fontSize: 11.5, fontWeight: 700, padding: 0,
+              cursor: drag ? "grabbing" : "grab", touchAction: "none", boxSizing: "border-box",
+              border: isDragged && drag.bad ? "2px solid #DC2626"
+                : idx === sel ? `2px solid ${ACCENT}` : "1px solid #C9D2DD",
+              background: isDragged && drag.bad ? "#FEE2E2" : idx === sel ? "#FFF3EB" : "#fff",
+              color: idx === sel ? ACCENT : "#3D4A5C",
+              opacity: isDragged ? 0.75 : 1,
+              zIndex: isDragged ? 5 : 1,
             }}
           >
-            {r.align === "right" ? "⇥" : "⇤"}
+            №{idx + 1}
           </button>
-          <button
-            key={`p${r.gy}`}
-            data-drop={`${r.gy}:${r.list.length}`}
-            onClick={() => { if (!dragBlockClick.current) addToRow(r.gy); }}
-            title="Добавить контейнер в этот ряд"
-            style={{
-              width: 30, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
-              fontSize: 15, cursor: "pointer", touchAction: "none",
-              border: `1px dashed ${overIs(r.gy, r.list.length) ? SEL : "#A9B4C2"}`,
-              background: overIs(r.gy, r.list.length) ? "#DBEAFE" : "transparent",
-              color: overIs(r.gy, r.list.length) ? SEL : "#8A97A8",
-            }}
-          >
-            +
-          </button>
-        </div>
-      ))}
-      {rowStrip(nextRowGy, "новый ряд снизу")}
-      <button
-        onClick={() => { if (!dragBlockClick.current) addToRow(nextRowGy); }}
-        style={{
-          marginTop: 4, padding: "5px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
-          border: "1px dashed #A9B4C2", background: "transparent", color: "#6B7A8D", width: "100%",
-        }}
-      >
-        + ряд
-      </button>
+        );
+      })}
     </div>
   );
 
@@ -1293,32 +1135,33 @@ export default function TrayGenerator() {
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          Сборка — это ряды: ширина у каждого контейнера своя, общая у ряда только глубина. <b>+</b> добавляет контейнер в конец ряда, <b>⇤/⇥</b> прижимает короткий ряд к левому или правому краю.
+          Раскладка свободная: контейнеры любых размеров стоят где угодно внутри рамки стола и <b>таскаются мышью</b> — края прилипают к соседям и к рамке (Esc отменяет, красным — место занято).
         </p>
         {mapView}
-        {drag && (
-          <div style={{
-            position: "fixed", left: drag.x + 12, top: drag.y + 8, zIndex: 50, pointerEvents: "none",
-            padding: "3px 8px", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
-            background: SEL, color: "#fff", boxShadow: "0 4px 12px rgba(20,40,70,0.25)",
-          }}>
-            №{drag.idx + 1}
-          </div>
-        )}
-        <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
-          Контейнеры <b>таскаются мышью</b>: подсвечивается место вставки — щель в ряду, конец ряда или новый ряд (Esc отменяет). Ширину контейнер сохраняет, глубину берёт у ряда.
-        </p>
-        <button
-          onClick={fillLayout}
-          style={{
-            width: "100%", marginTop: 8, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
-            cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
-          }}
-        >
-          Заполнить раскладку
-        </button>
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <button
+            onClick={addContainer}
+            disabled={!canAdd}
+            style={{
+              flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
+              cursor: canAdd ? "pointer" : "default", border: `1.5px solid ${canAdd ? ACCENT : "#D6DDE6"}`,
+              background: "#fff", color: canAdd ? ACCENT : "#B6C0CC",
+            }}
+          >
+            + контейнер
+          </button>
+          <button
+            onClick={fillLayout}
+            style={{
+              flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
+              cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
+            }}
+          >
+            Заполнить раскладку
+          </button>
+        </div>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 }}>
-          Дотянет ряды до правого края и достроит ряды до дальнего края лимита.
+          «+» ставит контейнер в самое большое свободное место; «Заполнить» закрывает контейнерами всё свободное место рамки.
         </p>
         <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
           {containers.length > 1 && (
@@ -1359,10 +1202,10 @@ export default function TrayGenerator() {
           </label>
         </div>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
-          Магнит соседей: ширину меняет только выбранный контейнер, а соседи по ряду забирают освободившееся место (или уступают своё); глубина общая у ряда — её компенсируют соседние ряды.
+          Магнит соседей: соседи, прилипшие к грани контейнера, едут за ней при изменении его размера — сборка остаётся плотной.
         </p>
         <p style={{ fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 }}>
-          Магнит раскладки: ряды дотягиваются до правого края лимита, стопка рядов — до дальнего; пустое место от 30 мм закрывают новые контейнеры и ряды.
+          Магнит раскладки: щели уже 30 мм закрываются растяжкой контейнеров, свободное место побольше — новыми контейнерами.
         </p>
 
         <SectionTitle>Соединители</SectionTitle>

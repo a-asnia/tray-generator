@@ -1,202 +1,277 @@
-// ── Раскладка контейнеров: ряды со свободными ширинами ──
-// Сборка — это стопка РЯДОВ. Внутри ряда контейнеры стоят слева направо
-// вплотную, и ширина у каждого своя: 160 + 160 в одном ряду и 118 в
-// другом — нормальная раскладка, колонки между рядами не связаны.
-// Общая для ряда только глубина: иначе между рядами появились бы щели.
-//
-// Адресация: gy — номер ряда, gx — место в ряду (порядок слева направо).
+// ── Свободная раскладка контейнеров ──
+// Никаких рядов и колонок: каждый контейнер занимает прямоугольник на
+// столе с собственными шириной и глубиной. Позиция — левый ближний угол
+// (px, pz) в миллиметрах от угла рамки стола. Контейнеры двигаются куда
+// угодно, прилипают краями к соседям и к рамке; пересекаться и выходить
+// за рамку стола им нельзя.
 
 import { minOuterDim } from "./layout.js";
 
-const mvR1 = (v) => Math.round(v * 10) / 10;
+const lmR1 = (v) => Math.round(v * 10) / 10; // имя уникально: сборка склеивает модули в один скрипт
 export const MIN_BOX = 30; // минимальный габарит контейнера, мм
+export const SNAP = 8;     // радиус прилипания краёв, мм
 
-// Ряды сборки: [{ gy, list (по порядку gx), depth, width }]
-export function rowsOf(containers) {
-  const gys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
-  return gys.map((gy) => {
-    const list = containers.filter((c) => c.gy === gy).sort((a, b) => a.gx - b.gx);
-    return {
-      gy,
-      list,
-      depth: Math.max(MIN_BOX, ...list.map((c) => c.D)),
-      width: list.reduce((s, c) => s + c.W, 0),
-      // ряд короче самого широкого прижимается к левому краю или к правому
-      align: list[0] && list[0].rowAlign === "right" ? "right" : "left",
-    };
-  });
+export const boxOf = (c) => ({ x0: c.px, x1: c.px + c.W, z0: c.pz, z1: c.pz + c.D });
+
+// пересечение по площади (касание краями — не пересечение)
+export const overlaps = (a, b, eps = 0.05) =>
+  a.x0 < b.x1 - eps && b.x0 < a.x1 - eps && a.z0 < b.z1 - eps && b.z0 < a.z1 - eps;
+
+export const collides = (cs, idx, px, pz) => {
+  const me = { x0: px, x1: px + cs[idx].W, z0: pz, z1: pz + cs[idx].D };
+  return cs.some((c, k) => k !== idx && overlaps(me, boxOf(c)));
+};
+
+// габарит сборки (позиции считаются уже нормированными от нуля)
+export function bounds(cs) {
+  if (!cs.length) return { w: 0, d: 0 };
+  let w = 0, d = 0;
+  for (const c of cs) { w = Math.max(w, c.px + c.W); d = Math.max(d, c.pz + c.D); }
+  return { w: lmR1(w), d: lmR1(d) };
 }
 
-// Позиции контейнеров на столе: ряды идут от ближнего к дальнему, внутри
-// ряда — слева направо вплотную; ряды выровнены по левому краю.
-export function placeContainers(containers) {
-  const rows = rowsOf(containers);
-  const totalD = rows.reduce((s, r) => s + r.depth, 0);
-  const totalW = Math.max(0, ...rows.map((r) => r.width));
-  const pos = new Map(); // id → { ox, oz, row }
-  let z = 0;
-  for (const r of rows) {
-    let x = r.align === "right" ? totalW - r.width : 0;
-    for (const c of r.list) {
-      pos.set(c.id, { ox: x + c.W / 2 - totalW / 2, oz: z + r.depth / 2 - totalD / 2, row: r });
-      x += c.W;
-    }
-    z += r.depth;
-  }
-  // порядок items совпадает с порядком списка контейнеров: номера
-  // контейнеров в панели — это индексы в нём
-  const items = containers.map((c) => ({ c, ...(pos.get(c.id) || { ox: 0, oz: 0, row: rows[0] }) }));
-  return { items, rows, totalW, totalD };
-}
-
-// Соседи по сборке: в ряду — предыдущий и следующий (стыкуются полностью),
-// между рядами — все, чьи пролёты по X пересекаются. Возвращает по каждой
-// стороне список { c, at (позиция в списке items), a, b } — абсолютный
-// перехлёст, по которому считаются замки.
-export function neighborsOf(placed, idx) {
-  const me = placed.items[idx];
-  const x0 = me.ox - me.c.W / 2, x1 = me.ox + me.c.W / 2;
-  const out = { W: [], E: [], N: [], S: [] };
-  placed.items.forEach((o, k) => {
-    if (k === idx) return;
-    if (o.c.gy === me.c.gy) {
-      if (o.c.gx === me.c.gx - 1) out.W.push({ item: o, k });
-      if (o.c.gx === me.c.gx + 1) out.E.push({ item: o, k });
-      return;
-    }
-    if (o.c.gy !== me.c.gy - 1 && o.c.gy !== me.c.gy + 1) return;
-    const a = Math.max(x0, o.ox - o.c.W / 2), b = Math.min(x1, o.ox + o.c.W / 2);
-    if (b - a < 0.5) return; // касание углом — не соседство
-    (o.c.gy < me.c.gy ? out.N : out.S).push({ item: o, k, a, b });
-  });
-  return out;
-}
-
-// Подгонка контейнера под ряд: общая только глубина, ширина остаётся своей.
-export function fitToRow(c, depth) {
-  if (c.lockOuter) return c;
-  const D2 = mvR1(Math.max(MIN_BOX, depth ?? c.D, minOuterDim(c, "D")));
-  if (Math.abs(D2 - c.D) < 0.05) return c;
-  // внутренние размеры не переписываем: решатель растянет ряды сам
-  return { ...c, D: D2 };
-}
-
-// Нумерация: ряды подряд с нуля, места в ряду — подряд слева направо.
+// сдвиг сборки в угол рамки: минимальные px и pz становятся нулём.
 // Ссылки на неизменившиеся контейнеры сохраняются (жив кэш геометрии).
-export function renumber(containers) {
-  const rows = rowsOf(containers);
-  const out = [];
-  rows.forEach((r, gy) => {
-    r.list.forEach((c, gx) => out.push(c.gy === gy && c.gx === gx ? c : { ...c, gx, gy }));
+export function normPositions(cs) {
+  if (!cs.length) return cs;
+  const dx = Math.min(...cs.map((c) => c.px));
+  const dz = Math.min(...cs.map((c) => c.pz));
+  if (Math.abs(dx) < 0.05 && Math.abs(dz) < 0.05) return cs;
+  return cs.map((c) => ({ ...c, px: lmR1(c.px - dx), pz: lmR1(c.pz - dz) }));
+}
+
+// Прилипание: ближайший к (px, pz) вариант, где края контейнера совпадают
+// с краями соседей или рамки. По каждой оси — независимо.
+export function snapMove(cs, idx, px, pz, limits) {
+  const me = cs[idx];
+  const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+  const xs = [0], zs = [0];
+  if (limW > 0) xs.push(limW - me.W);
+  if (limD > 0) zs.push(limD - me.D);
+  cs.forEach((c, k) => {
+    if (k === idx) return;
+    const b = boxOf(c);
+    xs.push(b.x1, b.x0 - me.W, b.x0, b.x1 - me.W); // впритык и заподлицо
+    zs.push(b.z1, b.z0 - me.D, b.z0, b.z1 - me.D);
   });
-  // порядок в массиве сохраняем прежним: номера контейнеров не скачут
-  return containers.map((c) => out.find((o) => o.id === c.id) || c);
+  const pick = (v, cands) => {
+    let best = v, dist = SNAP;
+    for (const c of cands) {
+      const d = Math.abs(c - v);
+      if (d < dist) { dist = d; best = c; }
+    }
+    return best;
+  };
+  let nx = pick(px, xs), nz = pick(pz, zs);
+  // рамка стола — жёсткая: за неё не выехать
+  if (limW > 0) nx = Math.min(nx, limW - me.W);
+  if (limD > 0) nz = Math.min(nz, limD - me.D);
+  nx = Math.max(0, nx); nz = Math.max(0, nz);
+  return { px: lmR1(nx), pz: lmR1(nz) };
 }
 
-// Выравнивание глубины внутри затронутых рядов (клетка ряда держит глубину)
-function tidyRows(containers, gys) {
-  const depth = new Map(rowsOf(containers).map((r) => [r.gy, r.depth]));
-  return containers.map((c) => (gys.has(c.gy) ? fitToRow(c, depth.get(c.gy)) : c));
-}
-
-// ── Перенос контейнера ──
-// gy — ряд назначения (может быть новым: −1 перед первым, n после последнего),
-// pos — место в ряду (0…длина). Возвращает новый список либо прежний.
-export function moveContainer(containers, idx, gy, pos) {
-  const src = containers[idx];
-  if (!src || !Number.isFinite(gy) || !Number.isFinite(pos)) return containers;
-  const rows = rowsOf(containers);
-  const row = rows.find((r) => r.gy === gy);
-  const sameRow = src.gy === gy;
-  if (sameRow && row) {
-    const cur = row.list.indexOf(src);
-    if (pos === cur || pos === cur + 1) return containers; // ничего не меняется
+// Перенос контейнера в точку (px, pz — левый ближний угол). Прилипает к
+// краям; если место занято, пробует варианты без прилипания по одной из
+// осей. Совсем некуда — возвращает прежний список (перенос отменён).
+export function moveContainer(cs, idx, px, pz, limits) {
+  const me = cs[idx];
+  if (!me || !Number.isFinite(px) || !Number.isFinite(pz)) return cs;
+  const s = snapMove(cs, idx, px, pz, limits);
+  const cands = [
+    [s.px, s.pz],
+    [s.px, Math.max(0, lmR1(pz))],
+    [Math.max(0, lmR1(px)), s.pz],
+    [Math.max(0, lmR1(px)), Math.max(0, lmR1(pz))],
+  ];
+  for (const [nx, nz] of cands) {
+    const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+    if (limW > 0 && nx + me.W > limW + 0.05) continue;
+    if (limD > 0 && nz + me.D > limD + 0.05) continue;
+    if (collides(cs, idx, nx, nz)) continue;
+    if (Math.abs(nx - me.px) < 0.05 && Math.abs(nz - me.pz) < 0.05) return cs;
+    // позицию пользователь выбрал сам — к углу рамки ничего не прижимаем
+    return cs.map((c, k) => (k === idx ? { ...c, px: lmR1(nx), pz: lmR1(nz) } : c));
   }
-  const depth = row ? row.depth : src.D;
-  // порядок в новом ряду: вынимаем контейнер и вставляем на место pos
-  const target = (row ? row.list.filter((c) => c !== src) : []);
-  const at = Math.max(0, Math.min(target.length, sameRow && row && row.list.indexOf(src) < pos ? pos - 1 : pos));
-  target.splice(at, 0, src);
-  const orderIn = new Map(target.map((c, k) => [c.id, k]));
-  // старый ряд ужимается: места пересчитываются подряд
-  const restOld = rows.find((r) => r.gy === src.gy);
-  const oldOrder = new Map((restOld ? restOld.list.filter((c) => c !== src) : []).map((c, k) => [c.id, k]));
-  let next = containers.map((c) => {
-    if (c.id === src.id) return { ...fitToRow(c, depth), gx: orderIn.get(c.id), gy };
-    if (c.gy === gy) return { ...c, gx: orderIn.get(c.id) };
-    if (c.gy === src.gy) return { ...c, gx: oldOrder.get(c.id) };
-    return c;
-  });
-  next = renumber(next);
-  const touched = new Set([next[idx].gy]);
-  return tidyRows(next, touched);
+  return cs;
+}
+
+// ── Свободные прямоугольники рамки ──
+// Сетка по координатам краёв; из пустых клеток жадно собираются
+// максимальные прямоугольники. Для десятков контейнеров это мгновенно.
+export function freeRects(cs, limits) {
+  const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+  if (!(limW > 0) || !(limD > 0)) return [];
+  const uniq = (arr) => [...new Set(arr.map(lmR1))].filter((v) => v > -0.01 && v < 1e6).sort((a, b) => a - b);
+  const xs = uniq([0, limW, ...cs.flatMap((c) => [c.px, c.px + c.W])].map((v) => Math.min(Math.max(v, 0), limW)));
+  const zs = uniq([0, limD, ...cs.flatMap((c) => [c.pz, c.pz + c.D])].map((v) => Math.min(Math.max(v, 0), limD)));
+  const busy = (x0, x1, z0, z1) =>
+    cs.some((c) => overlaps({ x0, x1, z0, z1 }, boxOf(c)));
+  const cellBusy = [];
+  for (let j = 0; j + 1 < zs.length; j++) {
+    cellBusy.push([]);
+    for (let i = 0; i + 1 < xs.length; i++)
+      cellBusy[j].push(busy(xs[i], xs[i + 1], zs[j], zs[j + 1]));
+  }
+  const nx = xs.length - 1, nz = zs.length - 1;
+  const rowFree = (j, i0, i1) => { // клетки [i0, i1) ряда j свободны
+    for (let k = i0; k < i1; k++) if (cellBusy[j][k]) return false;
+    return true;
+  };
+  const rects = [];
+  for (let j = 0; j < nz; j++)
+    for (let i = 0; i < nx; i++) {
+      if (cellBusy[j][i]) continue;
+      let iMax = i;
+      while (iMax < nx && !cellBusy[j][iMax]) iMax++;
+      // для каждой ширины-префикса тянем вниз, пока все клетки свободны
+      for (let ie = i + 1; ie <= iMax; ie++) {
+        let je = j + 1;
+        while (je < nz && rowFree(je, i, ie)) je++;
+        const w = lmR1(xs[ie] - xs[i]), d = lmR1(zs[je] - zs[j]);
+        if (w >= MIN_BOX - 0.1 && d >= MIN_BOX - 0.1)
+          rects.push({ x: xs[i], z: zs[j], w, d });
+      }
+    }
+  // покрупнее вперёд; дубликаты не мешают
+  return rects.sort((a, b) => b.w * b.d - a.w * a.d);
+}
+
+// Куда поставить новый контейнер: самый большой свободный прямоугольник,
+// размер — сколько влезает (не больше лимита принтера). null — места нет.
+export function autoSpot(cs, limits) {
+  const rects = freeRects(cs, limits);
+  if (!rects.length) return null;
+  const rc = rects[0];
+  return {
+    px: rc.x, pz: rc.z,
+    W: lmR1(Math.min(rc.w, limits.maxW)),
+    D: lmR1(Math.min(rc.d, limits.maxD)),
+  };
 }
 
 // ── Жёсткая рамка стола ──
-// Лимит раскладки не превышается никогда: ряд шире рамки ужимается по
-// ширине (пропорционально, но не ниже 30 мм и не за счёт контейнеров с
-// замком габарита), стопка рядов глубже рамки — по глубине.
-// Идемпотентно: на помещающейся сборке возвращает null.
-export function fitAssembly(containers, limits) {
-  if (!containers || !containers.length || !limits) return null;
-  let out = containers;
-  const shrink = (sizes, frozen, total) => {
-    // sizes: Map key→размер; frozen: Set ключей, которые не ужимаются
-    let excess = mvR1([...sizes.values()].reduce((s, v) => s + v, 0) - total);
-    if (excess <= 0.05) return null;
-    const next = new Map(sizes);
-    for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
-      const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
-      const room = open.reduce((s, k) => s + next.get(k) - MIN_BOX, 0);
-      if (room <= 0.05) break;
-      const take = Math.min(excess, room);
-      for (const k of open) {
-        const v = mvR1(Math.max(MIN_BOX, next.get(k) - (take * (next.get(k) - MIN_BOX)) / room));
-        excess = mvR1(excess - (next.get(k) - v));
-        next.set(k, v);
-      }
+// Сборка не выходит за лимит раскладки никогда. Габариты ужимаются до
+// рамки (замок габарита не трогается), позиции зажимаются внутрь.
+// Пересечения (после ужатия рамки или битого проекта) разрешаются
+// перекладкой: наехавший контейнер переезжает в ближайший свободный
+// прямоугольник, где помещается; совсем некуда — ужимается под самое
+// большое свободное место. Идемпотентно: без изменений возвращает null.
+export function fitAssembly(cs, limits) {
+  if (!cs || !cs.length || !limits) return null;
+  const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
+  const out = cs.map((c) => {
+    let n = c;
+    const set = (patch) => { n = n === c ? { ...c, ...patch } : Object.assign(n, patch); };
+    if (!c.lockOuter) {
+      if (limW > 0 && n.W > limW) set({ W: lmR1(Math.max(MIN_BOX, limW)) });
+      if (limD > 0 && n.D > limD) set({ D: lmR1(Math.max(MIN_BOX, limD)) });
     }
-    while (excess > 0.05) {
-      const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
-      if (!open.length) break;
-      const k = open.reduce((a, b) => (next.get(b) > next.get(a) ? b : a));
-      const v = mvR1(Math.max(MIN_BOX, next.get(k) - excess));
-      excess = mvR1(excess - (next.get(k) - v));
-      next.set(k, v);
+    if (limW > 0 && n.px + n.W > limW + 0.05) set({ px: lmR1(Math.max(0, limW - n.W)) });
+    if (limD > 0 && n.pz + n.D > limD + 0.05) set({ pz: lmR1(Math.max(0, limD - n.D)) });
+    if (n.px < -0.05) set({ px: 0 });
+    if (n.pz < -0.05) set({ pz: 0 });
+    return n;
+  });
+  // раскладываем заново только наехавших: замки первыми (им не ужаться),
+  // на месте стоящие не трогаем
+  const order = out.map((_, k) => k).sort((a, b) => (out[a].lockOuter ? 0 : 1) - (out[b].lockOuter ? 0 : 1) || a - b);
+  const placed = [];
+  const parked = [];
+  for (const k of order) {
+    const c = out[k];
+    const me = boxOf(c);
+    if (!placed.some((q) => overlaps(me, boxOf(q)))) { placed.push(c); continue; }
+    // ищем свободный прямоугольник, куда контейнер влезает как есть;
+    // позиция внутри — как можно ближе к прежней
+    const rects = freeRects(placed, limits);
+    const fit = rects.filter((rc) => rc.w >= c.W - 0.01 && rc.d >= c.D - 0.01);
+    const posIn = (rc, w, d) => ({
+      px: lmR1(Math.min(Math.max(c.px, rc.x), rc.x + rc.w - w)),
+      pz: lmR1(Math.min(Math.max(c.pz, rc.z), rc.z + rc.d - d)),
+    });
+    if (fit.length) {
+      const best = fit.reduce((A, B) => {
+        const pa = posIn(A, c.W, c.D), pb = posIn(B, c.W, c.D);
+        const da = Math.abs(pa.px - c.px) + Math.abs(pa.pz - c.pz);
+        const db = Math.abs(pb.px - c.px) + Math.abs(pb.pz - c.pz);
+        return db < da ? B : A;
+      });
+      out[k] = { ...c, ...posIn(best, c.W, c.D) };
+    } else if (!c.lockOuter && rects.length) {
+      // не влезает никуда — ужимается под самое большое свободное место
+      const rc = rects[0];
+      const W = lmR1(Math.max(MIN_BOX, Math.min(c.W, rc.w)));
+      const D = lmR1(Math.max(MIN_BOX, Math.min(c.D, rc.d)));
+      out[k] = { ...c, W, D, ...posIn(rc, W, D) };
+    } else {
+      // свободного места нет вовсе — контейнер физически не помещается.
+      // Пересекаться нельзя никогда, поэтому он паркуется СНАРУЖИ рамки,
+      // справа от неё (на плане это видно; перетащить обратно можно, как
+      // только место освободится)
+      parked.push(k);
+      continue;
     }
-    return next;
-  };
-
-  // 1. ширина: каждый ряд отдельно
-  const limW = (limits.layW || 0) * 10;
-  if (limW > 0) {
-    for (const r of rowsOf(out)) {
-      const sizes = new Map(r.list.map((c) => [c.id, c.W]));
-      const frozen = new Set(r.list.filter((c) => c.lockOuter).map((c) => c.id));
-      const fixed = shrink(sizes, frozen, limW);
-      if (!fixed) continue;
-      out = out.map((c) => (fixed.has(c.id) && c.W > fixed.get(c.id) + 0.05 ? { ...c, W: fixed.get(c.id) } : c));
-    }
+    placed.push(out[k]);
   }
-  // 2. глубина: стопка рядов
-  const limD = (limits.layD || 0) * 10;
-  if (limD > 0) {
-    const rows = rowsOf(out);
-    const sizes = new Map(rows.map((r) => [r.gy, r.depth]));
-    const frozen = new Set(rows.filter((r) => r.list.some((c) => c.lockOuter)).map((r) => r.gy));
-    const fixed = shrink(sizes, frozen, limD);
-    if (fixed)
-      out = out.map((c) => (!c.lockOuter && c.D > fixed.get(c.gy) + 0.05 ? { ...c, D: fixed.get(c.gy) } : c));
+  let parkZ = 0;
+  // парковка правее и рамки, и всего, что торчит из неё (замок шире рамки)
+  const parkX = lmR1(Math.max(limW, bounds(placed).w) + 8);
+  for (const k of parked) {
+    out[k] = { ...out[k], px: parkX, pz: lmR1(parkZ) };
+    parkZ += out[k].D + 8;
   }
-  return out === containers ? null : out;
+  const changed = out.some((c, k) => c !== cs[k]);
+  return changed ? out : null;
 }
 
-// совместимость: габариты «клеток» (ширина по месту в ряду, глубина ряда)
-export function gridDims(containers) {
-  const colW = {}, rowD = {};
-  for (const c of containers) {
-    colW[c.gx] = Math.max(colW[c.gx] ?? 0, c.W);
-    rowD[c.gy] = Math.max(rowD[c.gy] ?? 0, c.D);
+// ── Приклеенные соседи при изменении размера ──
+// Правая грань контейнера двигается (меняется ширина) — контейнеры,
+// прилипшие к ней (левая грань на ней, пересечение по глубине), едут
+// следом, и так по цепочке. То же для глубины и дальней грани.
+// Возвращает список с новыми позициями последователей.
+export function dragFollowers(cs, idx, axis, delta) {
+  if (Math.abs(delta) < 0.05) return cs;
+  const [p, s, o0, o1] = axis === "W" ? ["px", "W", "z0", "z1"] : ["pz", "D", "x0", "x1"];
+  const moved = new Map(); // индекс → сдвиг
+  const queue = [idx];
+  const edgeOf = (c) => (axis === "W" ? c.px + c.W : c.pz + c.D);
+  while (queue.length) {
+    const i = queue.shift();
+    const base = cs[i];
+    const edge = edgeOf(base); // позиции ещё не сдвинуты — грань старая
+    const bb = boxOf(base);
+    cs.forEach((c, k) => {
+      if (k === i || moved.has(k) || k === idx) return;
+      const cb = boxOf(c);
+      const lead = axis === "W" ? cb.x0 : cb.z0;
+      const across = Math.min(bb[o1], cb[o1]) - Math.max(bb[o0], cb[o0]);
+      if (Math.abs(lead - edge) < 0.06 && across > 0.5) {
+        moved.set(k, delta);
+        queue.push(k);
+      }
+    });
   }
-  return { colW, rowD };
+  if (!moved.size) return cs;
+  return cs.map((c, k) => (moved.has(k) ? { ...c, [p]: lmR1(c[p] + moved.get(k)) } : c));
+}
+
+// Изменение габарита контейнера в свободной раскладке. Левый ближний угол
+// стоит на месте, двигается правая (дальняя) грань. Прилипшие соседи при
+// включённом магните едут за гранью; при росте они едут всегда — иначе
+// коробки наехали бы друг на друга. Затем всё зажимается в рамку.
+export function resizeBox(cs, idx, patch, limits, magnetOn) {
+  const me = cs[idx];
+  if (!me || me.lockOuter) return cs;
+  let out = cs;
+  for (const axis of ["W", "D"]) {
+    if (!(axis in patch)) continue;
+    const maxAx = axis === "W" ? limits.maxW : limits.maxD;
+    const want = lmR1(Math.max(minOuterDim(out[idx], axis), MIN_BOX, Math.min(patch[axis], maxAx)));
+    const delta = lmR1(want - out[idx][axis]);
+    if (Math.abs(delta) < 0.05) continue;
+    if (magnetOn || delta > 0) out = dragFollowers(out, idx, axis, delta);
+    out = out.map((c, k) => (k === idx ? { ...c, [axis]: want } : c));
+  }
+  if (out === cs) return cs;
+  return fitAssembly(out, limits) || out;
 }

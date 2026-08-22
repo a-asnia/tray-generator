@@ -9,9 +9,10 @@ import { layout } from "../model/layout.js";
 let nextId = 2;
 export const setNextId = (v) => { nextId = v; };
 
-export const makeContainer = (src, gx, gy) => ({
+export const makeContainer = (src, px = 0, pz = 0) => ({
   id: nextId++,
-  gx, gy,
+  // позиция на столе: левый ближний угол в мм от угла рамки раскладки
+  px, pz,
   W: src?.W ?? 170, D: src?.D ?? 170, H: src?.H ?? 30,
   cols: src?.cols ?? 1, rows: src?.rows ?? 1,
   gridMode: src?.gridMode ?? "count", cellWt: src?.cellWt ?? 40, cellDt: src?.cellDt ?? 40,
@@ -62,8 +63,10 @@ const sanitizeWall = (w) => {
 
 const sanitizeContainer = (c0) => {
   const c = { ...c0 };
-  c.gx = int(c.gx, 0, -999, 999);
-  c.gy = int(c.gy, 0, -999, 999);
+  // позиция свободной раскладки; отсутствует в старых проектах — тогда
+  // её восстановит migratePositions по прежним клеткам gx/gy
+  if (Number.isFinite(+c.px)) c.px = num(c.px, 0, 0, 10000); else delete c.px;
+  if (Number.isFinite(+c.pz)) c.pz = num(c.pz, 0, 0, 10000); else delete c.pz;
   c.W = num(c.W, 170, 10, 2000);
   c.D = num(c.D, 170, 10, 2000);
   c.H = num(c.H, 30, 1, 500);
@@ -76,8 +79,7 @@ const sanitizeContainer = (c0) => {
   c.floor = num(c.floor, 1.6, 0.2, 40);
   if (c.cornerR !== undefined) c.cornerR = num(c.cornerR, 2, 0, 20);
   c.gridMode = c.gridMode === "size" ? "size" : "count";
-  // прижим ряда: к левому краю сборки (по умолчанию) или к правому
-  if (c.rowAlign === "right") c.rowAlign = "right"; else delete c.rowAlign;
+  delete c.rowAlign; // рудимент рядной раскладки
   c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
   c.cells = Object.fromEntries(
     Object.entries(obj(c.cells)).map(([k, v]) => {
@@ -133,6 +135,25 @@ const sanitizeContainer = (c0) => {
   return c;
 };
 
+// ── Миграция старых проектов на свободную раскладку ──
+// Раньше раскладка была сеткой/рядами с клетками (gx, gy). Позиции в мм
+// восстанавливаются из неё: ряды по gy (глубина ряда — максимум), внутри
+// ряда контейнеры слева направо по gx вплотную.
+export function migratePositions(containers) {
+  if (containers.every((c) => Number.isFinite(c.px) && Number.isFinite(c.pz))) return containers;
+  const gys = [...new Set(containers.map((c) => c.gy ?? 0))].sort((a, b) => a - b);
+  const out = containers.map((c) => ({ ...c }));
+  let z = 0;
+  for (const gy of gys) {
+    const row = out.filter((c) => (c.gy ?? 0) === gy).sort((a, b) => (a.gx ?? 0) - (b.gx ?? 0));
+    let x = 0;
+    for (const c of row) { c.px = x; c.pz = z; x += c.W; }
+    z += Math.max(30, ...row.map((c) => c.D));
+  }
+  for (const c of out) { delete c.gx; delete c.gy; }
+  return out;
+}
+
 // Приведение сохранённого/импортированного проекта к текущей модели:
 // добавляет недостающие поля, чинит невозможные значения и мигрирует
 // старые форматы. Возвращает null, если данные не похожи на проект.
@@ -141,8 +162,9 @@ export function normalizeProject(d) {
     if (!d || !Array.isArray(d.containers) || !d.containers.length) return null;
     d = { ...d };
     d.containers = d.containers.map((c) =>
-      sanitizeContainer({ ...makeContainer(null, c?.gx ?? 0, c?.gy ?? 0), ...obj(c) })
+      sanitizeContainer({ ...makeContainer(null, 0, 0), ...obj(c) })
     );
+    d.containers = migratePositions(d.containers);
     // миграция старых сохранений: режим «размер ячейки» убран из UI —
     // переводим в «количество», сохраняя фактическую сетку; глобальный
     // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило

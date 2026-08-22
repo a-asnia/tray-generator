@@ -30,8 +30,7 @@ const setNum = async (label, v) => {
   const el = page.locator(String.raw`div:has(> div > label:has-text("${label}")) input[type="number"]`).first();
   await el.fill(String(v)); await el.press("Enter"); await page.waitForTimeout(300);
 };
-const spanW = (cs) => [...new Set(cs.map((c) => c.gx))]
-  .reduce((s, g) => s + Math.max(...cs.filter((o) => o.gx === g).map((o) => o.W)), 0);
+const spanW = (cs) => Math.max(...cs.map((c) => c.px + c.W)); // правый край сборки
 
 // секции открыты сразу после загрузки
 ok("секции не свёрнуты по умолчанию",
@@ -74,7 +73,7 @@ await page.waitForTimeout(400);
 // Ctrl+Z отменяет добавление контейнера
 await page.locator("button", { hasText: /^Раскладка$/ }).click();
 await page.waitForTimeout(300);
-await page.locator('button:text-is("+")').first().click();
+await page.locator('button:text-is("+ контейнер")').click();
 await page.waitForTimeout(700);
 ok("контейнеры добавились", (await st()).containers.length > 1);
 await page.keyboard.press("Control+z");
@@ -113,7 +112,7 @@ await page.waitForTimeout(300);
 await setNum("Раскладка по X", 20); // 200 мм при контейнере 170
 let cs = (await st()).containers;
 ok(`сборка влезает в лимит (${spanW(cs)} ≤ 200)`, spanW(cs) <= 200.05);
-await page.locator('button:text-is("+")').first().click();
+await page.locator('button:text-is("+ контейнер")').click();
 await page.waitForTimeout(700);
 cs = (await st()).containers;
 ok("контейнер всё равно добавился", cs.length > 1);

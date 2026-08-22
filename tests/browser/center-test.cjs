@@ -1,7 +1,5 @@
-// Ужатие контейнера в СЕРЕДИНЕ сборки 3×3. Ширина — личный размер:
-// ужимается только он, а соседи ПО РЯДУ забирают освободившееся место,
-// так что ряд остаётся у края. Глубина общая у ряда — ужимается весь ряд,
-// соседние ряды прилипают. Щелей и «висящих» контейнеров быть не должно.
+// Ужатие контейнера в СЕРЕДИНЕ заполненной сборки: меняется только он,
+// приклеенные к его грани соседи едут следом, наезды запрещены всегда.
 const { createServer } = require("node:http");
 const { readFileSync } = require("node:fs");
 const { chromium } = require("playwright");
@@ -44,46 +42,46 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
     await el.press("Enter");
     await page.waitForTimeout(300);
   };
-  const rowInfo = (st) => {
-    const rows = {};
-    for (const c of st.containers) (rows[c.gy] = rows[c.gy] || []).push(c);
-    for (const k of Object.keys(rows)) rows[k].sort((a, b) => a.gx - b.gx);
-    return rows;
-  };
-  const rowW = (rows, g) => rows[g].reduce((s, c) => s + c.W, 0);
+  const noOverlap = (cs) => cs.every((a, i) => cs.every((b, j) => i >= j ||
+    a.px + a.W <= b.px + 0.05 || b.px + b.W <= a.px + 0.05 ||
+    a.pz + a.D <= b.pz + 0.05 || b.pz + b.D <= a.pz + 0.05));
 
-  // сетка 3×3 через «Заполнить раскладку» (лимит 40×40 по умолчанию)
+  // заполнить рамку 40×40 контейнерами (свободная укладка)
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await page.locator("button", { hasText: "Заполнить раскладку" }).click();
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(800);
   let st = await state();
-  ok(`сетка 3×3 (${st.containers.length} контейнеров)`, st.containers.length === 9);
+  ok(`рамка заполнена (${st.containers.length} контейнеров)`, st.containers.length >= 6);
+  ok("наездов нет", noOverlap(st.containers));
+  ok("всё в рамке", st.containers.every((c) => c.px + c.W <= 400.05 && c.pz + c.D <= 400.05));
 
-  // выбрать ЦЕНТРАЛЬНЫЙ контейнер (gx=1, gy=1) и ужать его ширину
-  const centerIdx = st.containers.findIndex((c) => c.gx === 1 && c.gy === 1);
-  ok("центральный контейнер найден", centerIdx >= 0);
+  // выбрать контейнер В СЕРЕДИНЕ (не касается левого края) и ужать его:
+  // приклеенные справа соседи едут следом, никто не наезжает
+  const centerIdx = st.containers.findIndex((c) => c.px > 10 && c.px + c.W < 390);
+  ok("контейнер в середине найден", centerIdx >= 0);
+  const before = st.containers.map((c) => ({ px: c.px, pz: c.pz, W: c.W, D: c.D }));
   await page.locator("button", { hasText: `№${centerIdx + 1}` }).click();
   await goCont();
-  await setNum("Ширина", 100);
+  const w0 = before[centerIdx].W;
+  await setNum("Ширина", w0 - 40);
 
   st = await state();
-  let rows = rowInfo(st);
-  const mid = rows[1];
-  ok(`ужался только выбранный (${mid.map((c) => c.W).join(", ")})`, near(mid[1].W, 100));
-  ok("соседние ряды не тронуты",
-    near(rowW(rows, 0), 400) && near(rowW(rows, 2), 400));
-  ok(`ряд остался у края (${rowW(rows, 1)} = 400)`, near(rowW(rows, 1), 400));
-  ok("соседи по ряду впитали освободившееся", mid.some((c) => c.W > 60.05));
-  ok("новых контейнеров не понадобилось", st.containers.length === 9);
+  ok(`ужался только выбранный (${st.containers[centerIdx].W})`, near(st.containers[centerIdx].W, w0 - 40));
+  ok("чужие размеры не тронуты",
+    st.containers.every((c, k) => k === centerIdx || near(c.W, before[k].W)));
+  const glued = before.filter((b, k) => k !== centerIdx &&
+    near(b.px, before[centerIdx].px + w0) &&
+    b.pz < before[centerIdx].pz + before[centerIdx].D - 0.5 && b.pz + b.D > before[centerIdx].pz + 0.5).length;
+  const moved = st.containers.filter((c, k) => k !== centerIdx && !near(c.px, before[k].px)).length;
+  ok(`приклеенные соседи поехали (${moved} из ${glued})`, glued === 0 || moved >= glued);
+  ok("наездов после ужатия нет", noOverlap(st.containers));
 
-  // теперь глубина: ужать центр по глубине — весь средний ряд ужимается
-  await setNum("Глубина", 100);
+  // глубина: то же по оси Z
+  const d0 = st.containers[centerIdx].D;
+  await setNum("Глубина", d0 - 30);
   st = await state();
-  rows = rowInfo(st);
-  const midRow = st.containers.filter((c) => c.gy === 1).map((c) => c.D);
-  ok(`весь ряд 1 стал 100 по глубине (${midRow.join(", ")})`, midRow.every((d) => near(d, 100)));
-  const rowD = (g) => Math.max(...st.containers.filter((c) => c.gy === g).map((c) => c.D));
-  ok(`суммарная глубина сохранилась (${rowD(0) + rowD(1) + rowD(2)} = 400)`, near(rowD(0) + rowD(1) + rowD(2), 400));
+  ok(`глубина ужалась (${st.containers[centerIdx].D})`, near(st.containers[centerIdx].D, d0 - 30));
+  ok("наездов нет и после глубины", noOverlap(st.containers));
 
   await page.screenshot({ path: "/tmp/center.png" });
 

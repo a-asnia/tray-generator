@@ -6,7 +6,7 @@
 // ГПСЧ детерминированный: упавший сценарий воспроизводится по номеру.
 import { buildContainer } from "../src/model/build.js";
 import { layout, remapCells } from "../src/model/layout.js";
-import { moveContainer, fitAssembly, rowsOf } from "../src/model/laymove.js";
+import { moveContainer, fitAssembly, resizeBox, boxOf, overlaps, bounds } from "../src/model/laymove.js";
 import { assemble } from "../src/model/assembly.js";
 import { snapLayout } from "../src/model/laymagnet.js";
 import { presetContainer, PRESETS, GORKA_DEF } from "../src/model/presets.js";
@@ -19,8 +19,9 @@ const LIM = { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 };
 
 const rng = (seed) => () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
 
-const mk = (r, gx, gy) => ({
-  id: gx * 10 + gy + 1, gx, gy,
+let nid = 1;
+const mk = (r, px, pz) => ({
+  id: nid++, px, pz,
   W: 40 + Math.round(r() * 130), D: 40 + Math.round(r() * 130), H: 15 + Math.round(r() * 100),
   cols: 1 + Math.floor(r() * 4), rows: 1 + Math.floor(r() * 4),
   gridMode: r() < 0.2 ? "size" : "count", cellWt: 20 + Math.round(r() * 30), cellDt: 20 + Math.round(r() * 30),
@@ -31,14 +32,14 @@ const mk = (r, gx, gy) => ({
 });
 
 const invariants = (label, cs, limits) => {
-  const seen = new Set();
+  for (let i = 0; i < cs.length; i++)
+    for (let j = i + 1; j < cs.length; j++)
+      if (overlaps(boxOf(cs[i]), boxOf(cs[j])))
+        bad(`${label}: контейнеры пересеклись`, ` → №${i + 1} и №${j + 1}`);
   for (const c of cs) {
-    const k = `${c.gx},${c.gy}`;
-    if (seen.has(k)) bad(`${label}: два контейнера на одном месте ${k}`);
-    seen.add(k);
-    if (!(c.W >= 29.9 && c.W <= limits.maxW + 0.01)) bad(`${label}: ширина вне лимита`, ` → ${c.W}`);
-    if (!(c.D >= 29.9 && c.D <= limits.maxD + 0.01)) bad(`${label}: глубина вне лимита`, ` → ${c.D}`);
-    if (!Number.isFinite(c.gx) || !Number.isFinite(c.gy)) bad(`${label}: битые координаты клетки`);
+    if (!(c.W >= 29.9 && (c.lockOuter || c.W <= limits.maxW + 0.01))) bad(`${label}: ширина вне лимита`, ` → ${c.W}`);
+    if (!(c.D >= 29.9 && (c.lockOuter || c.D <= limits.maxD + 0.01))) bad(`${label}: глубина вне лимита`, ` → ${c.D}`);
+    if (!Number.isFinite(c.px) || !Number.isFinite(c.pz)) bad(`${label}: битая позиция`);
     const L = layout(c);
     const sumW = L.rowCols[0].reduce((s, v) => s + v, 0) + (L.rowCols[0].length - 1) * c.wall + 2 * c.wallOut;
     if (Math.abs(sumW - c.W) > 0.5) bad(`${label}: ряд не сходится с шириной`, ` → ${sumW.toFixed(2)} против ${c.W}`);
@@ -62,17 +63,15 @@ const geometryOk = (label, cs) => {
 };
 
 const fits = (label, cs, limits) => {
-  const rows = rowsOf(cs);
-  // ниже суммы замков и минимумов сборку не ужать — это не нарушение
-  for (const r of rows) {
-    const floor = r.list.reduce((s, c) => s + (c.lockOuter ? c.W : 30), 0);
-    if (r.width > limits.layW * 10 + 0.05 && r.width > floor + 0.05)
-      bad(`${label}: ряд шире лимита`, ` → ${r.width} > ${limits.layW * 10}`);
+  // рамка жёсткая для всех, кто стоит внутри; не поместившиеся физически
+  // паркуются ЦЕЛИКОМ снаружи (px за правым краем) — это допустимо
+  const limW = limits.layW * 10, limD = limits.layD * 10;
+  for (const c of cs) {
+    if (c.lockOuter) continue;
+    if (c.px >= limW - 0.05) continue; // припаркован за рамкой
+    if (c.px + c.W > limW + 0.05 || c.pz + c.D > limD + 0.05 || c.px < -0.05 || c.pz < -0.05)
+      bad(`${label}: контейнер торчит из рамки`, ` → ${c.px},${c.pz} ${c.W}×${c.D} при ${limW}×${limD}`);
   }
-  const sd = rows.reduce((s, r) => s + r.depth, 0);
-  const floorD = rows.reduce((s, r) => s + (r.list.some((c) => c.lockOuter) ? r.depth : 30), 0);
-  if (sd > limits.layD * 10 + 0.05 && sd > floorD + 0.05)
-    bad(`${label}: сборка глубже лимита`, ` → ${sd} > ${limits.layD * 10}`);
 };
 
 // сборка строится и соседи стыкуются без разъездов
@@ -96,15 +95,16 @@ for (let run = 0; run < RUNS; run++) {
   const r = rng(run * 7919 + 13);
   const n = 1 + Math.floor(r() * 5);
   let cs = [];
-  for (let k = 0; k < n; k++) cs.push(mk(r, k % 3, Math.floor(k / 3)));
+  for (let k = 0; k < n; k++) cs.push(mk(r, (k % 3) * 171, Math.floor(k / 3) * 171));
+  cs = fitAssembly(cs, LIM) || cs;
   let limits = { ...LIM, layW: 20 + Math.round(r() * 30), layD: 20 + Math.round(r() * 30) };
   const label = `сценарий ${run}`;
 
   for (let step = 0; step < 8; step++) {
-    const op = Math.floor(r() * 6);
+    const op = Math.floor(r() * 7);
     if (op === 0) {
       const i = Math.floor(r() * cs.length);
-      cs = moveContainer(cs, i, Math.floor(r() * 4) - 1, Math.floor(r() * 4));
+      cs = moveContainer(cs, i, r() * 500, r() * 500, limits);
     } else if (op === 1) {
       cs = fitAssembly(cs, limits) || cs;
     } else if (op === 2) {
@@ -113,6 +113,9 @@ for (let run = 0; run < RUNS; run++) {
       const i = Math.floor(r() * cs.length);
       const kind = PRESETS[Math.floor(r() * PRESETS.length)][0];
       cs = cs.map((c, k) => (k === i ? presetContainer(c, kind, limits, GORKA_DEF) : c));
+    } else if (op === 6) { // изменение размера с приклейкой
+      const i = Math.floor(r() * cs.length);
+      cs = resizeBox(cs, i, { W: 40 + Math.round(r() * 130) }, limits, r() < 0.5);
     } else if (op === 4) {
       const i = Math.floor(r() * cs.length);
       cs = cs.map((c, k) => {

@@ -67,21 +67,21 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.waitForTimeout(300);
   ok("степпер колонок работает на новом месте", (await state()).containers[0].cols === 2);
 
-  // «Заполнить раскладку»: лимит 40×40 см → сетка 3×3 (170+170+60)
+  // «Заполнить раскладку»: рамка 40×40 см закрывается контейнерами целиком
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await setNum("Раскладка по X", 40);
   await setNum("Раскладка по Y", 40);
   await page.locator("button", { hasText: "Заполнить раскладку" }).click();
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(800);
   const st = await state();
-  const cols = [...new Set(st.containers.map((c) => c.gx))].sort((a, b) => a - b);
-  const rows = [...new Set(st.containers.map((c) => c.gy))].sort((a, b) => a - b);
   ok(`заполнилось 9 контейнеров (${st.containers.length})`, st.containers.length === 9);
-  ok("сетка 3×3", cols.length === 3 && rows.length === 3);
-  const wOf = (gx) => Math.max(...st.containers.filter((c) => c.gx === gx).map((c) => c.W));
-  ok(`колонки 170+170+60 (${cols.map(wOf).join("+")})`, near(wOf(cols[0]), 170) && near(wOf(cols[1]), 170) && near(wOf(cols[2]), 60));
-  const totalW = cols.reduce((s, g) => s + wOf(g), 0);
-  ok(`сумма ширин в лимите (${totalW} ≤ 400)`, totalW <= 400.5);
+  const noOv = st.containers.every((a, i) => st.containers.every((b, j) => i >= j ||
+    a.px + a.W <= b.px + 0.05 || b.px + b.W <= a.px + 0.05 ||
+    a.pz + a.D <= b.pz + 0.05 || b.pz + b.D <= a.pz + 0.05));
+  ok("наездов нет", noOv);
+  const area = st.containers.reduce((s2, c) => s2 + c.W * c.D, 0);
+  ok(`рамка закрыта целиком (${area} = 160000)`, near(area, 160000, 1));
+  ok("всё в рамке", st.containers.every((c) => c.px + c.W <= 400.05 && c.pz + c.D <= 400.05));
   ok("исходный контейнер не изменился", near(st.containers[0].W, 170) && st.containers[0].cols === 2);
   // повторное нажатие ничего не добавляет
   await page.locator("button", { hasText: "Заполнить раскладку" }).click();

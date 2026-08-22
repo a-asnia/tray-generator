@@ -1,141 +1,132 @@
-// Раскладка рядами: ширина у каждого контейнера своя, глубина общая у ряда.
-// Проверяем перенос между рядами и внутри ряда, позиции на столе и жёсткую
-// рамку стола.
-import { moveContainer, fitAssembly, placeContainers, rowsOf, fitToRow, renumber } from "../src/model/laymove.js";
-import { layout } from "../src/model/layout.js";
+// Свободная раскладка: контейнеры любых размеров стоят где угодно,
+// прилипают краями, не пересекаются и не выходят за рамку стола.
+import {
+  moveContainer, snapMove, collides, fitAssembly, freeRects, autoSpot,
+  resizeBox, normPositions, bounds, boxOf, overlaps,
+} from "../src/model/laymove.js";
 
 const mk = (o = {}) => ({
-  id: o.id ?? 1, gx: 0, gy: 0, W: 170, D: 170, H: 30, cols: 1, rows: 1,
+  id: o.id ?? 1, px: 0, pz: 0, W: 100, D: 100, H: 30, cols: 1, rows: 1,
   gridMode: "count", cellWt: 40, cellDt: 40, wall: 1.6, wallOut: 2.9, floor: 1.6,
   walls: {}, cells: {}, rowColWs: null, rowDs: null,
   lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
   lockOuter: false, lockCell: false, ...o,
 });
+const LIM = { maxW: 170, maxD: 170, maxH: 175, layW: 32, layD: 32 }; // 320×320
 let fail = 0;
 const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
 const near = (a, b, e = 0.05) => Math.abs(a - b) < e;
 const at = (cs, id) => cs.find((c) => c.id === id);
+const noOverlaps = (cs) => cs.every((a, i) => cs.every((b, j) => i >= j || !overlaps(boxOf(a), boxOf(b))));
 
-// ── ряды со свободными ширинами ──
+// ── сценарий пользователя: 160+160 сзади, 117.8×160.8 в углу спереди ──
 {
   const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 160, D: 120 }),
-    mk({ id: 2, gy: 0, gx: 1, W: 160, D: 120 }),
-    mk({ id: 3, gy: 1, gx: 0, W: 118, D: 161 }),
+    mk({ id: 1, px: 0, pz: 0, W: 160, D: 80 }),
+    mk({ id: 2, px: 160, pz: 0, W: 160, D: 80 }),
+    mk({ id: 3, px: 0, pz: 80, W: 117.8, D: 160.8 }),
   ];
-  const rows = rowsOf(cs);
-  ok("рядов два", rows.length === 2);
-  ok("ширина ряда — сумма контейнеров", near(rows[0].width, 320) && near(rows[1].width, 118));
-  ok("глубина ряда — максимум по ряду", near(rows[0].depth, 120) && near(rows[1].depth, 161));
-  const p = placeContainers(cs);
-  ok("сборка 320×281", near(p.totalW, 320) && near(p.totalD, 281));
-  ok("порядок items совпадает со списком", p.items.every((it, i) => it.c === cs[i]));
-  ok("контейнеры ряда стоят вплотную",
-    near(p.items[0].ox + 80, p.items[1].ox - 80));
-  ok("ряды выровнены по левому краю",
-    near(p.items[0].ox - 80, p.items[2].ox - 59));
-  ok("ряды стыкуются по глубине",
-    near(p.items[0].oz + 60, p.items[2].oz - 80.5));
-  ok("узкий контейнер сохранил ширину (не растянут под соседей)", cs[2].W === 118);
+  ok("контейнеры любых размеров сосуществуют", noOverlaps(cs));
+  const b = bounds(cs);
+  ok("габарит сборки честный", near(b.w, 320) && near(b.d, 240.8));
+  // никакой нормализации размеров: никто никого не растягивает
+  ok("узкий контейнер остался 117.8", cs[2].W === 117.8 && cs[2].D === 160.8);
 }
 
-// ── перенос между рядами ──
+// ── прилипание краёв ──
+{
+  const cs = [mk({ id: 1, px: 0, pz: 0, W: 100, D: 100 }), mk({ id: 2, px: 200, pz: 0, W: 80, D: 90 })];
+  // тащим №2 почти вплотную к №1 — прилипает ровно к грани
+  const s = snapMove(cs, 1, 104, 3, LIM);
+  ok("прилипание к правой грани соседа", near(s.px, 100), ` → ${s.px}`);
+  ok("прилипание к рамке по z", near(s.pz, 0), ` → ${s.pz}`);
+  // перенос в занятое место отменяется
+  const same = moveContainer(cs, 1, 10, 10, LIM);
+  ok("перенос в занятое место отменён", same === cs);
+  // перенос в свободное — работает, позиции нормированы
+  const n = moveContainer(cs, 1, 104, 150, LIM);
+  ok("перенос со снапом", near(at(n, 2).px, 100) && near(at(n, 2).pz, 150));
+  ok("пересечений нет", noOverlaps(n));
+}
+
+// ── за рамку не выехать, позиция не «нормализуется» насильно ──
+{
+  const cs = [mk({ id: 1, px: 0, pz: 0 })];
+  const n = moveContainer(cs, 0, 500, 500, LIM);
+  ok("рамка стола жёсткая", near(at(n, 1).px, 220) && near(at(n, 1).pz, 220),
+    ` → ${at(n, 1).px},${at(n, 1).pz}`);
+  // одинокий контейнер можно поставить в середину — никто не утащит в угол
+  const mid = moveContainer(cs, 0, 100, 120, LIM);
+  ok("позиция в середине рамки сохраняется", near(at(mid, 1).px, 100) && near(at(mid, 1).pz, 120));
+}
+
+// ── свободные прямоугольники и автопостановка ──
 {
   const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 100, D: 100 }),
-    mk({ id: 2, gy: 0, gx: 1, W: 120, D: 100 }),
-    mk({ id: 3, gy: 1, gx: 0, W: 90, D: 150 }),
+    mk({ id: 1, px: 0, pz: 0, W: 160, D: 80 }),
+    mk({ id: 2, px: 160, pz: 0, W: 160, D: 80 }),
+    mk({ id: 3, px: 0, pz: 80, W: 117.8, D: 160.8 }),
   ];
-  const n = moveContainer(cs, 1, 1, 0); // №2 в начало второго ряда
-  ok("контейнер сменил ряд", at(n, 2).gy === 1 && at(n, 2).gx === 0);
-  ok("сосед по новому ряду сдвинулся", at(n, 3).gx === 1);
-  ok("ширина при переносе сохранилась", near(at(n, 2).W, 120));
-  ok("глубину взял у нового ряда", near(at(n, 2).D, 150));
-  ok("старый ряд перенумерован", at(n, 1).gx === 0 && at(n, 1).gy === 0);
+  const rects = freeRects(cs, LIM);
+  ok("свободные прямоугольники найдены", rects.length > 0);
+  ok("прямоугольники не пересекают контейнеры",
+    rects.every((rc) => cs.every((c) => !overlaps({ x0: rc.x, x1: rc.x + rc.w, z0: rc.z, z1: rc.z + rc.d }, boxOf(c)))));
+  const spot = autoSpot(cs, LIM);
+  ok("новое место найдено", !!spot && spot.W >= 30 && spot.D >= 30);
+  const cs2 = [...cs, mk({ id: 4, px: spot.px, pz: spot.pz, W: spot.W, D: spot.D })];
+  ok("новый контейнер никого не задел и в рамке", noOverlaps(cs2) &&
+    spot.px + spot.W <= 320.05 && spot.pz + spot.D <= 320.05);
+  // полная рамка — мест нет
+  const full = [mk({ id: 1, px: 0, pz: 0, W: 160, D: 160 }), mk({ id: 2, px: 160, pz: 0, W: 160, D: 160 }),
+    mk({ id: 3, px: 0, pz: 160, W: 160, D: 160 }), mk({ id: 4, px: 160, pz: 160, W: 160, D: 160 })];
+  ok("в полной рамке мест нет", autoSpot(full, LIM) === null);
 }
 
-// ── перестановка внутри ряда ──
+// ── жёсткая рамка при ужатии лимита ──
+{
+  const cs = [mk({ id: 1, px: 0, pz: 0, W: 170, D: 100 }), mk({ id: 2, px: 170, pz: 0, W: 150, D: 100 })];
+  const lim2 = { ...LIM, layW: 20 }; // 200 мм
+  const n = fitAssembly(cs, lim2);
+  ok("сборка ужалась в рамку", n && n.every((c) => c.px + c.W <= 200.05), n ? ` → ${n.map((c) => c.px + c.W).join("/")}` : "");
+  ok("пересечений после ужатия нет", n && noOverlaps(n));
+  ok("идемпотентно", fitAssembly(n, lim2) === null);
+  // замок габарита не ужимается
+  const csL = [mk({ id: 1, px: 0, pz: 0, W: 170, D: 100, lockOuter: true })];
+  const nl = fitAssembly(csL, { ...LIM, layW: 10 });
+  ok("замок габарита не тронут", (nl || csL)[0].W === 170);
+}
+
+// ── изменение размера с приклеенными соседями ──
 {
   const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 100, D: 100 }),
-    mk({ id: 2, gy: 0, gx: 1, W: 120, D: 100 }),
-    mk({ id: 3, gy: 0, gx: 2, W: 60, D: 100 }),
+    mk({ id: 1, px: 0, pz: 0, W: 100, D: 100 }),
+    mk({ id: 2, px: 100, pz: 0, W: 80, D: 100 }),  // прилип справа
+    mk({ id: 3, px: 0, pz: 200, W: 80, D: 80 }),   // не прилип
   ];
-  const n = moveContainer(cs, 2, 0, 0); // №3 в начало ряда
-  ok("порядок в ряду поменялся", at(n, 3).gx === 0 && at(n, 1).gx === 1 && at(n, 2).gx === 2);
-  ok("ширины не тронуты", near(at(n, 1).W, 100) && near(at(n, 2).W, 120) && near(at(n, 3).W, 60));
-  ok("перенос на своё же место ничего не делает", moveContainer(cs, 1, 0, 1) === cs);
-  ok("перенос сразу за собой — тоже", moveContainer(cs, 1, 0, 2) === cs);
+  const grown = resizeBox(cs, 0, { W: 130 }, LIM, true);
+  ok("контейнер вырос", near(at(grown, 1).W, 130));
+  ok("прилипший сосед уехал за гранью", near(at(grown, 2).px, 130), ` → ${at(grown, 2).px}`);
+  ok("неприлипший не тронут", near(at(grown, 3).pz, 200));
+  const shrunk = resizeBox(grown, 0, { W: 90 }, LIM, true);
+  ok("при ужатии с магнитом сосед приехал назад", near(at(shrunk, 2).px, 90), ` → ${at(shrunk, 2).px}`);
+  const shrunkNoMag = resizeBox(grown, 0, { W: 90 }, LIM, false);
+  ok("без магнита при ужатии остаётся щель", near(at(shrunkNoMag, 2).px, 130));
+  ok("рост без магнита всё равно раздвигает (никаких наездов)",
+    noOverlaps(resizeBox(cs, 0, { W: 150 }, LIM, false)));
+  // рост у рамки: соседа выдавливать некуда — он ужимается
+  const tight = [mk({ id: 1, px: 0, pz: 0, W: 160, D: 100 }), mk({ id: 2, px: 160, pz: 0, W: 160, D: 100 })];
+  const g2 = resizeBox(tight, 0, { W: 170 }, LIM, true);
+  ok("у рамки сосед ужался, пересечений нет", noOverlaps(g2) && g2.every((c) => c.px + c.W <= 320.05));
 }
 
-// ── новый ряд и схлопывание пустого ──
+// ── нормализация позиций ──
 {
-  const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 100, D: 100 }),
-    mk({ id: 2, gy: 0, gx: 1, W: 100, D: 100 }),
-  ];
-  const n = moveContainer(cs, 1, 1, 0); // во второй (новый) ряд
-  ok("создан второй ряд", rowsOf(n).length === 2);
-  const back = moveContainer(n, 1, 0, 1); // и обратно
-  ok("пустой ряд схлопнулся", rowsOf(back).length === 1);
-  ok("нумерация подряд", back.every((c) => c.gy === 0) && [0, 1].every((k) => back.some((c) => c.gx === k)));
+  const cs = [mk({ id: 1, px: 40, pz: 30 }), mk({ id: 2, px: 140, pz: 30 })];
+  const n = normPositions(cs);
+  ok("норма (для 3D-сцены) прижимает к нулю", near(Math.min(...n.map((c) => c.px)), 0));
+  ok("взаимное положение сохранено", near(at(n, 2).px - at(n, 1).px, 100));
+  ok("норма без сдвига возвращает тот же список", normPositions(n) === n);
 }
 
-// ── глубина ряда и замки ──
-{
-  const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 100, D: 100, lockOuter: true }),
-    mk({ id: 2, gy: 1, gx: 0, W: 100, D: 150 }),
-  ];
-  const n = moveContainer(cs, 0, 1, 0);
-  ok("замок габарита пережил перенос", near(at(n, 1).D, 100) && near(at(n, 1).W, 100));
-  ok("незамкнутый сосед по ряду тоже не тронут (ряд держит максимум)", near(at(n, 2).D, 150));
-  ok("подгонка под ряд не трогает замкнутый", fitToRow(cs[0], 200) === cs[0]);
-}
-
-// ── жёсткая рамка стола ──
-{
-  const lim = { maxW: 170, maxD: 170, maxH: 175, layW: 30, layD: 30 }; // 300×300
-  const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 170, D: 170 }),
-    mk({ id: 2, gy: 0, gx: 1, W: 170, D: 170 }),
-    mk({ id: 3, gy: 1, gx: 0, W: 100, D: 170 }),
-  ];
-  const n = fitAssembly(cs, lim);
-  const rows = rowsOf(n);
-  ok("широкий ряд ужат в рамку", rows[0].width <= 300.05, ` (${rows[0].width})`);
-  ok("узкий ряд не тронут", near(at(n, 3).W, 100));
-  ok("глубина стопки в рамке", rows.reduce((s, r) => s + r.depth, 0) <= 300.05);
-  ok("идемпотентно", fitAssembly(n, lim) === null);
-}
-{
-  const lim = { maxW: 170, maxD: 170, maxH: 175, layW: 20, layD: 40 };
-  const cs = [
-    mk({ id: 1, gy: 0, gx: 0, W: 170, D: 100, lockOuter: true }),
-    mk({ id: 2, gy: 0, gx: 1, W: 170, D: 100 }),
-  ];
-  const n = fitAssembly(cs, lim);
-  ok("замок габарита не подрезан", near(at(n, 1).W, 170));
-  ok("сжатие забрал сосед", near(at(n, 2).W, 30));
-}
-
-// ── внутренняя раскладка переживает подгонку ──
-{
-  const c = mk({ W: 120, D: 100, cols: 3, rows: 2, cells: { "1:0": { lvl: 12 } } });
-  const f = fitToRow(c, 140);
-  ok("подгонка изменила только глубину", f.D === 140 && f.W === 120 && f.rows === 2);
-  ok("настройки ячеек на месте", f.cells["1:0"].lvl === 12);
-  const L = layout(f);
-  ok("ряды разъехались по новой глубине",
-    near(L.rowDs.reduce((s, v) => s + v, 0), 140 - 2 * f.wallOut - f.wall));
-}
-
-// ── renumber не плодит новые объекты зря ──
-{
-  const cs = [mk({ id: 1, gy: 0, gx: 0 }), mk({ id: 2, gy: 0, gx: 1 })];
-  const n = renumber(cs);
-  ok("нетронутые контейнеры сохранили ссылку", n[0] === cs[0] && n[1] === cs[1]);
-}
-
-console.log(fail === 0 ? "\nLAYOUT ROWS TESTS PASSED" : `\n${fail} FAILURES`);
+console.log(fail === 0 ? "\nFREE LAYOUT TESTS PASSED" : `\n${fail} FAILURES`);
 process.exit(fail ? 1 : 0);

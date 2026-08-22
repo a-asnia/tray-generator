@@ -53,12 +53,8 @@ await setNum("Раскладка по X", 30);
 await page.waitForTimeout(700);
 let s2 = await st();
 ok(`место закрыто новым контейнером (${s2.containers.length} шт.)`, s2.containers.length === 2);
-const sumW = (() => {
-  const g = {};
-  for (const c of s2.containers) g[c.gx] = Math.max(g[c.gx] || 0, c.W);
-  return Object.values(g).reduce((a, b) => a + b, 0);
-})();
-ok(`сборка дотянута до края (${sumW.toFixed(0)} = 300)`, Math.abs(sumW - 300) < 0.05);
+const edge = Math.max(...s2.containers.map((c) => c.px + c.W));
+ok(`сборка дотянута до края (${edge.toFixed(0)} = 300)`, Math.abs(edge - 300) < 0.05);
 
 // настройка переживает перезагрузку
 await page.reload({ waitUntil: "load" });

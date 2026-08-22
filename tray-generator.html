@@ -2778,9 +2778,10 @@ function presetContainer(c, kind, limits, opts = {}) {
 // ══════════════════════════════════════════════════════════════
 let nextId = 2;
 const setNextId = (v) => { nextId = v; };
-const makeContainer = (src, gx, gy) => ({
+const makeContainer = (src, px = 0, pz = 0) => ({
     id: nextId++,
-    gx, gy,
+    // позиция на столе: левый ближний угол в мм от угла рамки раскладки
+    px, pz,
     W: src?.W ?? 170, D: src?.D ?? 170, H: src?.H ?? 30,
     cols: src?.cols ?? 1, rows: src?.rows ?? 1,
     gridMode: src?.gridMode ?? "count", cellWt: src?.cellWt ?? 40, cellDt: src?.cellDt ?? 40,
@@ -2839,8 +2840,16 @@ const sanitizeWall = (w) => {
 };
 const sanitizeContainer = (c0) => {
     const c = { ...c0 };
-    c.gx = int(c.gx, 0, -999, 999);
-    c.gy = int(c.gy, 0, -999, 999);
+    // позиция свободной раскладки; отсутствует в старых проектах — тогда
+    // её восстановит migratePositions по прежним клеткам gx/gy
+    if (Number.isFinite(+c.px))
+        c.px = num(c.px, 0, 0, 10000);
+    else
+        delete c.px;
+    if (Number.isFinite(+c.pz))
+        c.pz = num(c.pz, 0, 0, 10000);
+    else
+        delete c.pz;
     c.W = num(c.W, 170, 10, 2000);
     c.D = num(c.D, 170, 10, 2000);
     c.H = num(c.H, 30, 1, 500);
@@ -2854,11 +2863,7 @@ const sanitizeContainer = (c0) => {
     if (c.cornerR !== undefined)
         c.cornerR = num(c.cornerR, 2, 0, 20);
     c.gridMode = c.gridMode === "size" ? "size" : "count";
-    // прижим ряда: к левому краю сборки (по умолчанию) или к правому
-    if (c.rowAlign === "right")
-        c.rowAlign = "right";
-    else
-        delete c.rowAlign;
+    delete c.rowAlign; // рудимент рядной раскладки
     c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
     c.cells = Object.fromEntries(Object.entries(obj(c.cells)).map(([k, v]) => {
         const o = obj(v), out = {};
@@ -2917,6 +2922,32 @@ const sanitizeContainer = (c0) => {
         c.stairsBase = num(c.stairsBase, 0, 0, 500);
     return c;
 };
+// ── Миграция старых проектов на свободную раскладку ──
+// Раньше раскладка была сеткой/рядами с клетками (gx, gy). Позиции в мм
+// восстанавливаются из неё: ряды по gy (глубина ряда — максимум), внутри
+// ряда контейнеры слева направо по gx вплотную.
+function migratePositions(containers) {
+    if (containers.every((c) => Number.isFinite(c.px) && Number.isFinite(c.pz)))
+        return containers;
+    const gys = [...new Set(containers.map((c) => c.gy ?? 0))].sort((a, b) => a - b);
+    const out = containers.map((c) => ({ ...c }));
+    let z = 0;
+    for (const gy of gys) {
+        const row = out.filter((c) => (c.gy ?? 0) === gy).sort((a, b) => (a.gx ?? 0) - (b.gx ?? 0));
+        let x = 0;
+        for (const c of row) {
+            c.px = x;
+            c.pz = z;
+            x += c.W;
+        }
+        z += Math.max(30, ...row.map((c) => c.D));
+    }
+    for (const c of out) {
+        delete c.gx;
+        delete c.gy;
+    }
+    return out;
+}
 // Приведение сохранённого/импортированного проекта к текущей модели:
 // добавляет недостающие поля, чинит невозможные значения и мигрирует
 // старые форматы. Возвращает null, если данные не похожи на проект.
@@ -2925,7 +2956,8 @@ function normalizeProject(d) {
         if (!d || !Array.isArray(d.containers) || !d.containers.length)
             return null;
         d = { ...d };
-        d.containers = d.containers.map((c) => sanitizeContainer({ ...makeContainer(null, c?.gx ?? 0, c?.gy ?? 0), ...obj(c) }));
+        d.containers = d.containers.map((c) => sanitizeContainer({ ...makeContainer(null, 0, 0), ...obj(c) }));
+        d.containers = migratePositions(d.containers);
         // миграция старых сохранений: режим «размер ячейки» убран из UI —
         // переводим в «количество», сохраняя фактическую сетку; глобальный
         // замок ячейки убран вместе с кнопкой — снимаем, чтобы не заклинило
@@ -3023,319 +3055,410 @@ function importProject(file, onDone) {
 }
 // ── src/model/laymagnet.js ──
 // ── «Магнит раскладки» ──
-// При включённой галке сборка липнет к краю лимита раскладки: ряд, не
-// достающий до правого края, дотягивается последним контейнером (в
-// пределах лимита принтера), а большое пустое место (от 30 мм) закрывается
-// новым контейнером. То же по глубине: последний ряд дотягивается до
-// дальнего края или добавляется новый ряд. Контейнеры с замками не
-// растягиваются. Возвращает новый список либо null, если менять нечего
-// (идемпотентно — повторный вызов на результате всегда даёт null).
-const round1 = (v) => Math.round(v * 10) / 10;
+// При включённой галке сборка липнет к краям лимита: узкая щель между
+// контейнером и краем (или соседом), куда ничего не поставить, закрывается
+// растяжкой самого контейнера (в пределах лимита принтера), а свободное
+// место побольше (от 30 мм) заполняется новыми контейнерами — каждый
+// встаёт в самый большой свободный прямоугольник. Контейнеры с замками не
+// растягиваются. Возвращает новый список либо null (идемпотентно).
+const lgR1 = (v) => Math.round(v * 10) / 10; // имя уникально: сборка склеивает модули в один скрипт
 function snapLayout(containers, limits) {
     if (!containers || !containers.length || !limits)
         return null;
     let cs = containers.map((c) => ({ ...c }));
     let changed = false;
-    const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
-    // ── ширина рядов ──
-    if (limW > 0)
-        for (const r of rowsOf(cs)) {
-            let rem = round1(limW - r.width);
-            if (rem < 0.05)
+    for (let pass = 0; pass < 12; pass++) {
+        let step = false;
+        // 1. узкие щели (< 30 мм): растяжка контейнера, к чьей грани щель
+        //    примыкает — правее или дальше него пусто до края щели
+        const stripFree = (x0, x1, z0, z1, skip) => x1 - x0 > 0.05 && z1 - z0 > 0.05 &&
+            !cs.some((c, k) => k !== skip && overlaps({ x0, x1, z0, z1 }, boxOf(c)));
+        const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
+        for (let k = 0; k < cs.length && !step; k++) {
+            const c = cs[k];
+            if (c.lockOuter || c.lockCell)
                 continue;
-            const last = r.list[r.list.length - 1];
-            const free = last && !last.lockOuter && !last.lockCell;
-            // весь зазор закрывается растяжкой — растягиваем и всё
-            if (free && last.W + rem <= limits.maxW + 0.01) {
-                cs.find((c) => c.id === last.id).W = round1(last.W + rem);
-                changed = true;
-                continue;
+            const b = boxOf(c);
+            // до правого края рамки
+            if (limW > 0) {
+                const gap = lgR1(limW - b.x1);
+                if (gap > 0.05 && gap < MIN_BOX && c.W + gap <= limits.maxW + 0.01 &&
+                    stripFree(b.x1, limW, b.z0, b.z1, k)) {
+                    c.W = lgR1(c.W + gap);
+                    step = true;
+                    continue;
+                }
             }
-            // иначе зазор закрывают новые контейнеры этого ряда
-            let gx = r.list.length;
-            let tail = null;
-            while (rem >= MIN_BOX) {
-                const size = rem > limits.maxW + 0.01
-                    ? (rem - limits.maxW < MIN_BOX ? round1(rem / 2) : limits.maxW)
-                    : round1(rem);
-                const nc = makeContainer(null, gx, r.gy);
-                nc.W = size;
-                nc.D = r.depth;
+            // до дальнего края рамки
+            if (limD > 0) {
+                const gap = lgR1(limD - b.z1);
+                if (gap > 0.05 && gap < MIN_BOX && c.D + gap <= limits.maxD + 0.01 &&
+                    stripFree(b.x0, b.x1, b.z1, limD, k)) {
+                    c.D = lgR1(c.D + gap);
+                    step = true;
+                    continue;
+                }
+            }
+            // до ближайшего соседа справа / сзади
+            for (const o of cs) {
+                const ob = boxOf(o);
+                if (ob.x0 > b.x1 + 0.05 && ob.z0 < b.z1 - 0.5 && ob.z1 > b.z0 + 0.5) {
+                    const gap = lgR1(ob.x0 - b.x1);
+                    if (gap < MIN_BOX && c.W + gap <= limits.maxW + 0.01 &&
+                        stripFree(b.x1, ob.x0, b.z0, b.z1, k)) {
+                        c.W = lgR1(c.W + gap);
+                        step = true;
+                        break;
+                    }
+                }
+                if (ob.z0 > b.z1 + 0.05 && ob.x0 < b.x1 - 0.5 && ob.x1 > b.x0 + 0.5) {
+                    const gap = lgR1(ob.z0 - b.z1);
+                    if (gap < MIN_BOX && c.D + gap <= limits.maxD + 0.01 &&
+                        stripFree(b.x0, b.x1, b.z1, ob.z0, k)) {
+                        c.D = lgR1(c.D + gap);
+                        step = true;
+                        break;
+                    }
+                }
+            }
+        }
+        // 2. большое свободное место — новый контейнер в самый большой
+        //    свободный прямоугольник
+        if (!step) {
+            const spot = autoSpot(cs, limits);
+            if (spot) {
+                const nc = makeContainer(null, spot.px, spot.pz);
+                nc.W = spot.W;
+                nc.D = spot.D;
                 cs.push(nc);
-                tail = nc;
-                rem = round1(rem - size);
-                gx++;
-                changed = true;
-            }
-            // хвост меньше контейнера добирает крайний — ряд встаёт ровно у края
-            if (rem >= 0.05) {
-                const t = tail || (free ? cs.find((c) => c.id === last.id) : null);
-                if (t && t.W + rem <= limits.maxW + 0.01) {
-                    t.W = round1(t.W + rem);
-                    changed = true;
-                }
+                step = true;
             }
         }
-    // ── глубина стопки ──
-    if (limD > 0) {
-        const rows = rowsOf(cs);
-        const totalD = rows.reduce((s, r) => s + r.depth, 0);
-        let rem = round1(limD - totalD);
-        if (rem >= 0.05) {
-            const last = rows[rows.length - 1];
-            const free = last.list.every((c) => !c.lockOuter && !c.lockCell);
-            if (free && last.depth + rem <= limits.maxD + 0.01) {
-                for (const c of last.list)
-                    cs.find((x) => x.id === c.id).D = round1(last.depth + rem);
-                return cs;
-            }
-            let gy = rows[rows.length - 1].gy + 1;
-            let tailRow = null;
-            while (rem >= MIN_BOX) {
-                const size = rem > limits.maxD + 0.01
-                    ? (rem - limits.maxD < MIN_BOX ? round1(rem / 2) : limits.maxD)
-                    : round1(rem);
-                // новый ряд повторяет ширины предыдущего — сборка остаётся ровной
-                const src = rowsOf(cs).slice(-1)[0].list;
-                tailRow = [];
-                src.forEach((c, gx) => {
-                    const nc = makeContainer(null, gx, gy);
-                    nc.W = c.W;
-                    nc.D = size;
-                    cs.push(nc);
-                    tailRow.push(nc);
-                });
-                rem = round1(rem - size);
-                gy++;
-                changed = true;
-            }
-            // хвост по глубине добирает последний ряд
-            if (rem >= 0.05) {
-                const list = tailRow || (free ? last.list.map((c) => cs.find((x) => x.id === c.id)) : null);
-                if (list && list[0].D + rem <= limits.maxD + 0.01) {
-                    for (const t of list)
-                        t.D = round1(t.D + rem);
-                    changed = true;
-                }
-            }
-        }
+        if (!step)
+            break;
+        changed = true;
     }
     return changed ? cs : null;
 }
+// «Заполнить раскладку» пользуется тем же магнитом разово
+const fillAll = (cs, limits) => snapLayout(cs, limits) || cs;
+{ freeRects };
 // ── src/model/laymove.js ──
-// ── Раскладка контейнеров: ряды со свободными ширинами ──
-// Сборка — это стопка РЯДОВ. Внутри ряда контейнеры стоят слева направо
-// вплотную, и ширина у каждого своя: 160 + 160 в одном ряду и 118 в
-// другом — нормальная раскладка, колонки между рядами не связаны.
-// Общая для ряда только глубина: иначе между рядами появились бы щели.
-//
-// Адресация: gy — номер ряда, gx — место в ряду (порядок слева направо).
-const mvR1 = (v) => Math.round(v * 10) / 10;
+// ── Свободная раскладка контейнеров ──
+// Никаких рядов и колонок: каждый контейнер занимает прямоугольник на
+// столе с собственными шириной и глубиной. Позиция — левый ближний угол
+// (px, pz) в миллиметрах от угла рамки стола. Контейнеры двигаются куда
+// угодно, прилипают краями к соседям и к рамке; пересекаться и выходить
+// за рамку стола им нельзя.
+const lmR1 = (v) => Math.round(v * 10) / 10; // имя уникально: сборка склеивает модули в один скрипт
 const MIN_BOX = 30; // минимальный габарит контейнера, мм
-// Ряды сборки: [{ gy, list (по порядку gx), depth, width }]
-function rowsOf(containers) {
-    const gys = [...new Set(containers.map((c) => c.gy))].sort((a, b) => a - b);
-    return gys.map((gy) => {
-        const list = containers.filter((c) => c.gy === gy).sort((a, b) => a.gx - b.gx);
-        return {
-            gy,
-            list,
-            depth: Math.max(MIN_BOX, ...list.map((c) => c.D)),
-            width: list.reduce((s, c) => s + c.W, 0),
-            // ряд короче самого широкого прижимается к левому краю или к правому
-            align: list[0] && list[0].rowAlign === "right" ? "right" : "left",
-        };
-    });
-}
-// Позиции контейнеров на столе: ряды идут от ближнего к дальнему, внутри
-// ряда — слева направо вплотную; ряды выровнены по левому краю.
-function placeContainers(containers) {
-    const rows = rowsOf(containers);
-    const totalD = rows.reduce((s, r) => s + r.depth, 0);
-    const totalW = Math.max(0, ...rows.map((r) => r.width));
-    const pos = new Map(); // id → { ox, oz, row }
-    let z = 0;
-    for (const r of rows) {
-        let x = r.align === "right" ? totalW - r.width : 0;
-        for (const c of r.list) {
-            pos.set(c.id, { ox: x + c.W / 2 - totalW / 2, oz: z + r.depth / 2 - totalD / 2, row: r });
-            x += c.W;
-        }
-        z += r.depth;
+const SNAP = 8; // радиус прилипания краёв, мм
+const boxOf = (c) => ({ x0: c.px, x1: c.px + c.W, z0: c.pz, z1: c.pz + c.D });
+// пересечение по площади (касание краями — не пересечение)
+const overlaps = (a, b, eps = 0.05) => a.x0 < b.x1 - eps && b.x0 < a.x1 - eps && a.z0 < b.z1 - eps && b.z0 < a.z1 - eps;
+const collides = (cs, idx, px, pz) => {
+    const me = { x0: px, x1: px + cs[idx].W, z0: pz, z1: pz + cs[idx].D };
+    return cs.some((c, k) => k !== idx && overlaps(me, boxOf(c)));
+};
+// габарит сборки (позиции считаются уже нормированными от нуля)
+function bounds(cs) {
+    if (!cs.length)
+        return { w: 0, d: 0 };
+    let w = 0, d = 0;
+    for (const c of cs) {
+        w = Math.max(w, c.px + c.W);
+        d = Math.max(d, c.pz + c.D);
     }
-    // порядок items совпадает с порядком списка контейнеров: номера
-    // контейнеров в панели — это индексы в нём
-    const items = containers.map((c) => ({ c, ...(pos.get(c.id) || { ox: 0, oz: 0, row: rows[0] }) }));
-    return { items, rows, totalW, totalD };
+    return { w: lmR1(w), d: lmR1(d) };
 }
-// Соседи по сборке: в ряду — предыдущий и следующий (стыкуются полностью),
-// между рядами — все, чьи пролёты по X пересекаются. Возвращает по каждой
-// стороне список { c, at (позиция в списке items), a, b } — абсолютный
-// перехлёст, по которому считаются замки.
-function neighborsOf(placed, idx) {
-    const me = placed.items[idx];
-    const x0 = me.ox - me.c.W / 2, x1 = me.ox + me.c.W / 2;
-    const out = { W: [], E: [], N: [], S: [] };
-    placed.items.forEach((o, k) => {
+// сдвиг сборки в угол рамки: минимальные px и pz становятся нулём.
+// Ссылки на неизменившиеся контейнеры сохраняются (жив кэш геометрии).
+function normPositions(cs) {
+    if (!cs.length)
+        return cs;
+    const dx = Math.min(...cs.map((c) => c.px));
+    const dz = Math.min(...cs.map((c) => c.pz));
+    if (Math.abs(dx) < 0.05 && Math.abs(dz) < 0.05)
+        return cs;
+    return cs.map((c) => ({ ...c, px: lmR1(c.px - dx), pz: lmR1(c.pz - dz) }));
+}
+// Прилипание: ближайший к (px, pz) вариант, где края контейнера совпадают
+// с краями соседей или рамки. По каждой оси — независимо.
+function snapMove(cs, idx, px, pz, limits) {
+    const me = cs[idx];
+    const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+    const xs = [0], zs = [0];
+    if (limW > 0)
+        xs.push(limW - me.W);
+    if (limD > 0)
+        zs.push(limD - me.D);
+    cs.forEach((c, k) => {
         if (k === idx)
             return;
-        if (o.c.gy === me.c.gy) {
-            if (o.c.gx === me.c.gx - 1)
-                out.W.push({ item: o, k });
-            if (o.c.gx === me.c.gx + 1)
-                out.E.push({ item: o, k });
-            return;
-        }
-        if (o.c.gy !== me.c.gy - 1 && o.c.gy !== me.c.gy + 1)
-            return;
-        const a = Math.max(x0, o.ox - o.c.W / 2), b = Math.min(x1, o.ox + o.c.W / 2);
-        if (b - a < 0.5)
-            return; // касание углом — не соседство
-        (o.c.gy < me.c.gy ? out.N : out.S).push({ item: o, k, a, b });
+        const b = boxOf(c);
+        xs.push(b.x1, b.x0 - me.W, b.x0, b.x1 - me.W); // впритык и заподлицо
+        zs.push(b.z1, b.z0 - me.D, b.z0, b.z1 - me.D);
     });
-    return out;
-}
-// Подгонка контейнера под ряд: общая только глубина, ширина остаётся своей.
-function fitToRow(c, depth) {
-    if (c.lockOuter)
-        return c;
-    const D2 = mvR1(Math.max(MIN_BOX, depth ?? c.D, minOuterDim(c, "D")));
-    if (Math.abs(D2 - c.D) < 0.05)
-        return c;
-    // внутренние размеры не переписываем: решатель растянет ряды сам
-    return { ...c, D: D2 };
-}
-// Нумерация: ряды подряд с нуля, места в ряду — подряд слева направо.
-// Ссылки на неизменившиеся контейнеры сохраняются (жив кэш геометрии).
-function renumber(containers) {
-    const rows = rowsOf(containers);
-    const out = [];
-    rows.forEach((r, gy) => {
-        r.list.forEach((c, gx) => out.push(c.gy === gy && c.gx === gx ? c : { ...c, gx, gy }));
-    });
-    // порядок в массиве сохраняем прежним: номера контейнеров не скачут
-    return containers.map((c) => out.find((o) => o.id === c.id) || c);
-}
-// Выравнивание глубины внутри затронутых рядов (клетка ряда держит глубину)
-function tidyRows(containers, gys) {
-    const depth = new Map(rowsOf(containers).map((r) => [r.gy, r.depth]));
-    return containers.map((c) => (gys.has(c.gy) ? fitToRow(c, depth.get(c.gy)) : c));
-}
-// ── Перенос контейнера ──
-// gy — ряд назначения (может быть новым: −1 перед первым, n после последнего),
-// pos — место в ряду (0…длина). Возвращает новый список либо прежний.
-function moveContainer(containers, idx, gy, pos) {
-    const src = containers[idx];
-    if (!src || !Number.isFinite(gy) || !Number.isFinite(pos))
-        return containers;
-    const rows = rowsOf(containers);
-    const row = rows.find((r) => r.gy === gy);
-    const sameRow = src.gy === gy;
-    if (sameRow && row) {
-        const cur = row.list.indexOf(src);
-        if (pos === cur || pos === cur + 1)
-            return containers; // ничего не меняется
-    }
-    const depth = row ? row.depth : src.D;
-    // порядок в новом ряду: вынимаем контейнер и вставляем на место pos
-    const target = (row ? row.list.filter((c) => c !== src) : []);
-    const at = Math.max(0, Math.min(target.length, sameRow && row && row.list.indexOf(src) < pos ? pos - 1 : pos));
-    target.splice(at, 0, src);
-    const orderIn = new Map(target.map((c, k) => [c.id, k]));
-    // старый ряд ужимается: места пересчитываются подряд
-    const restOld = rows.find((r) => r.gy === src.gy);
-    const oldOrder = new Map((restOld ? restOld.list.filter((c) => c !== src) : []).map((c, k) => [c.id, k]));
-    let next = containers.map((c) => {
-        if (c.id === src.id)
-            return { ...fitToRow(c, depth), gx: orderIn.get(c.id), gy };
-        if (c.gy === gy)
-            return { ...c, gx: orderIn.get(c.id) };
-        if (c.gy === src.gy)
-            return { ...c, gx: oldOrder.get(c.id) };
-        return c;
-    });
-    next = renumber(next);
-    const touched = new Set([next[idx].gy]);
-    return tidyRows(next, touched);
-}
-// ── Жёсткая рамка стола ──
-// Лимит раскладки не превышается никогда: ряд шире рамки ужимается по
-// ширине (пропорционально, но не ниже 30 мм и не за счёт контейнеров с
-// замком габарита), стопка рядов глубже рамки — по глубине.
-// Идемпотентно: на помещающейся сборке возвращает null.
-function fitAssembly(containers, limits) {
-    if (!containers || !containers.length || !limits)
-        return null;
-    let out = containers;
-    const shrink = (sizes, frozen, total) => {
-        // sizes: Map key→размер; frozen: Set ключей, которые не ужимаются
-        let excess = mvR1([...sizes.values()].reduce((s, v) => s + v, 0) - total);
-        if (excess <= 0.05)
-            return null;
-        const next = new Map(sizes);
-        for (let pass = 0; pass < 6 && excess > 0.05; pass++) {
-            const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
-            const room = open.reduce((s, k) => s + next.get(k) - MIN_BOX, 0);
-            if (room <= 0.05)
-                break;
-            const take = Math.min(excess, room);
-            for (const k of open) {
-                const v = mvR1(Math.max(MIN_BOX, next.get(k) - (take * (next.get(k) - MIN_BOX)) / room));
-                excess = mvR1(excess - (next.get(k) - v));
-                next.set(k, v);
+    const pick = (v, cands) => {
+        let best = v, dist = SNAP;
+        for (const c of cands) {
+            const d = Math.abs(c - v);
+            if (d < dist) {
+                dist = d;
+                best = c;
             }
         }
-        while (excess > 0.05) {
-            const open = [...next.keys()].filter((k) => !frozen.has(k) && next.get(k) > MIN_BOX + 0.05);
-            if (!open.length)
-                break;
-            const k = open.reduce((a, b) => (next.get(b) > next.get(a) ? b : a));
-            const v = mvR1(Math.max(MIN_BOX, next.get(k) - excess));
-            excess = mvR1(excess - (next.get(k) - v));
-            next.set(k, v);
-        }
-        return next;
+        return best;
     };
-    // 1. ширина: каждый ряд отдельно
-    const limW = (limits.layW || 0) * 10;
-    if (limW > 0) {
-        for (const r of rowsOf(out)) {
-            const sizes = new Map(r.list.map((c) => [c.id, c.W]));
-            const frozen = new Set(r.list.filter((c) => c.lockOuter).map((c) => c.id));
-            const fixed = shrink(sizes, frozen, limW);
-            if (!fixed)
-                continue;
-            out = out.map((c) => (fixed.has(c.id) && c.W > fixed.get(c.id) + 0.05 ? { ...c, W: fixed.get(c.id) } : c));
-        }
-    }
-    // 2. глубина: стопка рядов
-    const limD = (limits.layD || 0) * 10;
-    if (limD > 0) {
-        const rows = rowsOf(out);
-        const sizes = new Map(rows.map((r) => [r.gy, r.depth]));
-        const frozen = new Set(rows.filter((r) => r.list.some((c) => c.lockOuter)).map((r) => r.gy));
-        const fixed = shrink(sizes, frozen, limD);
-        if (fixed)
-            out = out.map((c) => (!c.lockOuter && c.D > fixed.get(c.gy) + 0.05 ? { ...c, D: fixed.get(c.gy) } : c));
-    }
-    return out === containers ? null : out;
+    let nx = pick(px, xs), nz = pick(pz, zs);
+    // рамка стола — жёсткая: за неё не выехать
+    if (limW > 0)
+        nx = Math.min(nx, limW - me.W);
+    if (limD > 0)
+        nz = Math.min(nz, limD - me.D);
+    nx = Math.max(0, nx);
+    nz = Math.max(0, nz);
+    return { px: lmR1(nx), pz: lmR1(nz) };
 }
-// совместимость: габариты «клеток» (ширина по месту в ряду, глубина ряда)
-function gridDims(containers) {
-    const colW = {}, rowD = {};
-    for (const c of containers) {
-        colW[c.gx] = Math.max(colW[c.gx] ?? 0, c.W);
-        rowD[c.gy] = Math.max(rowD[c.gy] ?? 0, c.D);
+// Перенос контейнера в точку (px, pz — левый ближний угол). Прилипает к
+// краям; если место занято, пробует варианты без прилипания по одной из
+// осей. Совсем некуда — возвращает прежний список (перенос отменён).
+function moveContainer(cs, idx, px, pz, limits) {
+    const me = cs[idx];
+    if (!me || !Number.isFinite(px) || !Number.isFinite(pz))
+        return cs;
+    const s = snapMove(cs, idx, px, pz, limits);
+    const cands = [
+        [s.px, s.pz],
+        [s.px, Math.max(0, lmR1(pz))],
+        [Math.max(0, lmR1(px)), s.pz],
+        [Math.max(0, lmR1(px)), Math.max(0, lmR1(pz))],
+    ];
+    for (const [nx, nz] of cands) {
+        const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+        if (limW > 0 && nx + me.W > limW + 0.05)
+            continue;
+        if (limD > 0 && nz + me.D > limD + 0.05)
+            continue;
+        if (collides(cs, idx, nx, nz))
+            continue;
+        if (Math.abs(nx - me.px) < 0.05 && Math.abs(nz - me.pz) < 0.05)
+            return cs;
+        // позицию пользователь выбрал сам — к углу рамки ничего не прижимаем
+        return cs.map((c, k) => (k === idx ? { ...c, px: lmR1(nx), pz: lmR1(nz) } : c));
     }
-    return { colW, rowD };
+    return cs;
+}
+// ── Свободные прямоугольники рамки ──
+// Сетка по координатам краёв; из пустых клеток жадно собираются
+// максимальные прямоугольники. Для десятков контейнеров это мгновенно.
+function freeRects(cs, limits) {
+    const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+    if (!(limW > 0) || !(limD > 0))
+        return [];
+    const uniq = (arr) => [...new Set(arr.map(lmR1))].filter((v) => v > -0.01 && v < 1e6).sort((a, b) => a - b);
+    const xs = uniq([0, limW, ...cs.flatMap((c) => [c.px, c.px + c.W])].map((v) => Math.min(Math.max(v, 0), limW)));
+    const zs = uniq([0, limD, ...cs.flatMap((c) => [c.pz, c.pz + c.D])].map((v) => Math.min(Math.max(v, 0), limD)));
+    const busy = (x0, x1, z0, z1) => cs.some((c) => overlaps({ x0, x1, z0, z1 }, boxOf(c)));
+    const cellBusy = [];
+    for (let j = 0; j + 1 < zs.length; j++) {
+        cellBusy.push([]);
+        for (let i = 0; i + 1 < xs.length; i++)
+            cellBusy[j].push(busy(xs[i], xs[i + 1], zs[j], zs[j + 1]));
+    }
+    const nx = xs.length - 1, nz = zs.length - 1;
+    const rowFree = (j, i0, i1) => {
+        for (let k = i0; k < i1; k++)
+            if (cellBusy[j][k])
+                return false;
+        return true;
+    };
+    const rects = [];
+    for (let j = 0; j < nz; j++)
+        for (let i = 0; i < nx; i++) {
+            if (cellBusy[j][i])
+                continue;
+            let iMax = i;
+            while (iMax < nx && !cellBusy[j][iMax])
+                iMax++;
+            // для каждой ширины-префикса тянем вниз, пока все клетки свободны
+            for (let ie = i + 1; ie <= iMax; ie++) {
+                let je = j + 1;
+                while (je < nz && rowFree(je, i, ie))
+                    je++;
+                const w = lmR1(xs[ie] - xs[i]), d = lmR1(zs[je] - zs[j]);
+                if (w >= MIN_BOX - 0.1 && d >= MIN_BOX - 0.1)
+                    rects.push({ x: xs[i], z: zs[j], w, d });
+            }
+        }
+    // покрупнее вперёд; дубликаты не мешают
+    return rects.sort((a, b) => b.w * b.d - a.w * a.d);
+}
+// Куда поставить новый контейнер: самый большой свободный прямоугольник,
+// размер — сколько влезает (не больше лимита принтера). null — места нет.
+function autoSpot(cs, limits) {
+    const rects = freeRects(cs, limits);
+    if (!rects.length)
+        return null;
+    const rc = rects[0];
+    return {
+        px: rc.x, pz: rc.z,
+        W: lmR1(Math.min(rc.w, limits.maxW)),
+        D: lmR1(Math.min(rc.d, limits.maxD)),
+    };
+}
+// ── Жёсткая рамка стола ──
+// Сборка не выходит за лимит раскладки никогда. Габариты ужимаются до
+// рамки (замок габарита не трогается), позиции зажимаются внутрь.
+// Пересечения (после ужатия рамки или битого проекта) разрешаются
+// перекладкой: наехавший контейнер переезжает в ближайший свободный
+// прямоугольник, где помещается; совсем некуда — ужимается под самое
+// большое свободное место. Идемпотентно: без изменений возвращает null.
+function fitAssembly(cs, limits) {
+    if (!cs || !cs.length || !limits)
+        return null;
+    const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
+    const out = cs.map((c) => {
+        let n = c;
+        const set = (patch) => { n = n === c ? { ...c, ...patch } : Object.assign(n, patch); };
+        if (!c.lockOuter) {
+            if (limW > 0 && n.W > limW)
+                set({ W: lmR1(Math.max(MIN_BOX, limW)) });
+            if (limD > 0 && n.D > limD)
+                set({ D: lmR1(Math.max(MIN_BOX, limD)) });
+        }
+        if (limW > 0 && n.px + n.W > limW + 0.05)
+            set({ px: lmR1(Math.max(0, limW - n.W)) });
+        if (limD > 0 && n.pz + n.D > limD + 0.05)
+            set({ pz: lmR1(Math.max(0, limD - n.D)) });
+        if (n.px < -0.05)
+            set({ px: 0 });
+        if (n.pz < -0.05)
+            set({ pz: 0 });
+        return n;
+    });
+    // раскладываем заново только наехавших: замки первыми (им не ужаться),
+    // на месте стоящие не трогаем
+    const order = out.map((_, k) => k).sort((a, b) => (out[a].lockOuter ? 0 : 1) - (out[b].lockOuter ? 0 : 1) || a - b);
+    const placed = [];
+    const parked = [];
+    for (const k of order) {
+        const c = out[k];
+        const me = boxOf(c);
+        if (!placed.some((q) => overlaps(me, boxOf(q)))) {
+            placed.push(c);
+            continue;
+        }
+        // ищем свободный прямоугольник, куда контейнер влезает как есть;
+        // позиция внутри — как можно ближе к прежней
+        const rects = freeRects(placed, limits);
+        const fit = rects.filter((rc) => rc.w >= c.W - 0.01 && rc.d >= c.D - 0.01);
+        const posIn = (rc, w, d) => ({
+            px: lmR1(Math.min(Math.max(c.px, rc.x), rc.x + rc.w - w)),
+            pz: lmR1(Math.min(Math.max(c.pz, rc.z), rc.z + rc.d - d)),
+        });
+        if (fit.length) {
+            const best = fit.reduce((A, B) => {
+                const pa = posIn(A, c.W, c.D), pb = posIn(B, c.W, c.D);
+                const da = Math.abs(pa.px - c.px) + Math.abs(pa.pz - c.pz);
+                const db = Math.abs(pb.px - c.px) + Math.abs(pb.pz - c.pz);
+                return db < da ? B : A;
+            });
+            out[k] = { ...c, ...posIn(best, c.W, c.D) };
+        }
+        else if (!c.lockOuter && rects.length) {
+            // не влезает никуда — ужимается под самое большое свободное место
+            const rc = rects[0];
+            const W = lmR1(Math.max(MIN_BOX, Math.min(c.W, rc.w)));
+            const D = lmR1(Math.max(MIN_BOX, Math.min(c.D, rc.d)));
+            out[k] = { ...c, W, D, ...posIn(rc, W, D) };
+        }
+        else {
+            // свободного места нет вовсе — контейнер физически не помещается.
+            // Пересекаться нельзя никогда, поэтому он паркуется СНАРУЖИ рамки,
+            // справа от неё (на плане это видно; перетащить обратно можно, как
+            // только место освободится)
+            parked.push(k);
+            continue;
+        }
+        placed.push(out[k]);
+    }
+    let parkZ = 0;
+    // парковка правее и рамки, и всего, что торчит из неё (замок шире рамки)
+    const parkX = lmR1(Math.max(limW, bounds(placed).w) + 8);
+    for (const k of parked) {
+        out[k] = { ...out[k], px: parkX, pz: lmR1(parkZ) };
+        parkZ += out[k].D + 8;
+    }
+    const changed = out.some((c, k) => c !== cs[k]);
+    return changed ? out : null;
+}
+// ── Приклеенные соседи при изменении размера ──
+// Правая грань контейнера двигается (меняется ширина) — контейнеры,
+// прилипшие к ней (левая грань на ней, пересечение по глубине), едут
+// следом, и так по цепочке. То же для глубины и дальней грани.
+// Возвращает список с новыми позициями последователей.
+function dragFollowers(cs, idx, axis, delta) {
+    if (Math.abs(delta) < 0.05)
+        return cs;
+    const [p, s, o0, o1] = axis === "W" ? ["px", "W", "z0", "z1"] : ["pz", "D", "x0", "x1"];
+    const moved = new Map(); // индекс → сдвиг
+    const queue = [idx];
+    const edgeOf = (c) => (axis === "W" ? c.px + c.W : c.pz + c.D);
+    while (queue.length) {
+        const i = queue.shift();
+        const base = cs[i];
+        const edge = edgeOf(base); // позиции ещё не сдвинуты — грань старая
+        const bb = boxOf(base);
+        cs.forEach((c, k) => {
+            if (k === i || moved.has(k) || k === idx)
+                return;
+            const cb = boxOf(c);
+            const lead = axis === "W" ? cb.x0 : cb.z0;
+            const across = Math.min(bb[o1], cb[o1]) - Math.max(bb[o0], cb[o0]);
+            if (Math.abs(lead - edge) < 0.06 && across > 0.5) {
+                moved.set(k, delta);
+                queue.push(k);
+            }
+        });
+    }
+    if (!moved.size)
+        return cs;
+    return cs.map((c, k) => (moved.has(k) ? { ...c, [p]: lmR1(c[p] + moved.get(k)) } : c));
+}
+// Изменение габарита контейнера в свободной раскладке. Левый ближний угол
+// стоит на месте, двигается правая (дальняя) грань. Прилипшие соседи при
+// включённом магните едут за гранью; при росте они едут всегда — иначе
+// коробки наехали бы друг на друга. Затем всё зажимается в рамку.
+function resizeBox(cs, idx, patch, limits, magnetOn) {
+    const me = cs[idx];
+    if (!me || me.lockOuter)
+        return cs;
+    let out = cs;
+    for (const axis of ["W", "D"]) {
+        if (!(axis in patch))
+            continue;
+        const maxAx = axis === "W" ? limits.maxW : limits.maxD;
+        const want = lmR1(Math.max(minOuterDim(out[idx], axis), MIN_BOX, Math.min(patch[axis], maxAx)));
+        const delta = lmR1(want - out[idx][axis]);
+        if (Math.abs(delta) < 0.05)
+            continue;
+        if (magnetOn || delta > 0)
+            out = dragFollowers(out, idx, axis, delta);
+        out = out.map((c, k) => (k === idx ? { ...c, [axis]: want } : c));
+    }
+    if (out === cs)
+        return cs;
+    return fitAssembly(out, limits) || out;
 }
 // ── src/model/assembly.js ──
 // ── Сборка: кто с кем стыкуется и где стоят замки ──
-// Раскладка — ряды со свободными ширинами (см. laymove.js), поэтому
-// сосед сверху или снизу может быть не один, а стыковаться лишь частью
-// стенки. Замки ставятся по ФАКТИЧЕСКОМУ перехлёсту двух контейнеров и
-// только там, где зона годится обоим (низкая или ступенчатая стенка —
-// замка нет ни у кого, иначе рельс упрётся в сплошную стенку соседа).
+// Раскладка свободная (см. laymove.js): соседи — это контейнеры, чьи
+// грани фактически соприкасаются, и касаться могут любым перехлёстом
+// (над одним широким может стоять два узких). Замки ставятся по
+// фактическому перехлёсту пары и только там, где зона годится обоим
+// (низкая или ступенчатая стенка — замка нет ни у кого, иначе рельс
+// упёрся бы в сплошную стенку соседа).
 // Кто в паре несёт рельс (наружный выступ), а кто паз. По умолчанию —
 // западный/северный. Горка всегда несёт рельс: паз в её ступенчатых
 // стенках не помещается, а рельс встаёт на ровный участок лесенки.
@@ -3343,8 +3466,10 @@ const railCarrier = (a, b) => {
     const aS = a.preset === "stairs", bS = b.preset === "stairs";
     return aS === bS ? true : aS;
 };
-// Позиции замков на стыке двух контейнеров. Считаются в АБСОЛЮТНЫХ
-// координатах по перехлёсту, затем переводятся в систему каждого из них.
+const TOUCH = 0.06; // насколько точно грани должны совпасть
+const MIN_JOINT = 30; // короче этого перехлёста замок не ставится
+// Позиции замков на стыке двух контейнеров: считаются в абсолютной
+// координате вдоль стыка, затем переводятся в систему каждого.
 const jointVs = (A, B, sideA, sideB, a, b) => {
     const mid = (a + b) / 2;
     const centerA = sideA === "E" || sideA === "W" ? A.oz : A.ox;
@@ -3354,53 +3479,53 @@ const jointVs = (A, B, sideA, sideB, a, b) => {
         .filter((abs) => lockOk(A.c, sideA, abs - centerA) && lockOk(B.c, sideB, abs - centerB))
         .map((abs) => ({ a: abs - centerA, b: abs - centerB }));
 };
-// Полная сборка: позиции и описания соединителей для каждого контейнера.
+// Полная сборка: позиции (по центру стола) и соединители по касаниям.
 function assemble(containers, connect = true) {
-    const placed = placeContainers(containers);
-    const conns = placed.items.map(() => ({ N: [], S: [], W: [], E: [] }));
+    const cs = normPositions(containers);
+    const { w: totalW, d: totalD } = bounds(cs);
+    const items = cs.map((c, i) => ({
+        c: containers[i],
+        ox: c.px + c.W / 2 - totalW / 2,
+        oz: c.pz + c.D / 2 - totalD / 2,
+        conn: { N: [], S: [], W: [], E: [] },
+    }));
     if (connect)
-        placed.items.forEach((me, i) => {
-            const nb = neighborsOf(placed, i);
-            // вдоль ряда стыкуются целиком: перехлёст — общая глубина ряда
-            for (const [side, other, oside] of [["E", nb.E, "W"], ["W", nb.W, "E"]]) {
-                for (const { item, k } of other) {
-                    if (k < i && side === "W")
-                        continue; // пару считаем один раз
-                    const a = Math.max(me.oz - me.c.D / 2, item.oz - item.c.D / 2);
-                    const b = Math.min(me.oz + me.c.D / 2, item.oz + item.c.D / 2);
-                    if (b - a < 0.5)
-                        continue;
-                    const male = side === "E" ? railCarrier(me.c, item.c) : !railCarrier(item.c, me.c);
-                    const vs = jointVs(me, item, side, oside, a, b);
+        for (let i = 0; i < cs.length; i++)
+            for (let j = i + 1; j < cs.length; j++) {
+                const A = items[i], B = items[j];
+                const a = boxOf(cs[i]), b = boxOf(cs[j]);
+                const zA = Math.max(a.z0, b.z0), zB = Math.min(a.z1, b.z1);
+                const xA = Math.max(a.x0, b.x0), xB = Math.min(a.x1, b.x1);
+                const pair = (sideA, sideB, lo, hi) => {
+                    // от абсолютных координат стола к координатам сборки (центр в нуле)
+                    const off = sideA === "E" || sideA === "W" ? -totalD / 2 : -totalW / 2;
+                    const male = sideA === "E" || sideA === "S"
+                        ? railCarrier(cs[i], cs[j])
+                        : !railCarrier(cs[j], cs[i]);
+                    const vs = jointVs(A, B, sideA, sideB, lo + off, hi + off);
                     if (!vs.length)
-                        continue;
-                    conns[i][side].push({ male, vs: vs.map((v) => v.a) });
-                    conns[k][oside].push({ male: !male, vs: vs.map((v) => v.b) });
+                        return;
+                    A.conn[sideA].push({ male, vs: vs.map((v) => v.a) });
+                    B.conn[sideB].push({ male: !male, vs: vs.map((v) => v.b) });
+                };
+                if (zB - zA >= MIN_JOINT) {
+                    if (Math.abs(a.x1 - b.x0) < TOUCH)
+                        pair("E", "W", zA, zB);
+                    else if (Math.abs(b.x1 - a.x0) < TOUCH)
+                        pair("W", "E", zA, zB);
+                }
+                if (xB - xA >= MIN_JOINT) {
+                    if (Math.abs(a.z1 - b.z0) < TOUCH)
+                        pair("S", "N", xA, xB);
+                    else if (Math.abs(b.z1 - a.z0) < TOUCH)
+                        pair("N", "S", xA, xB);
                 }
             }
-            // между рядами: сосед может накрывать лишь часть стенки, и соседей
-            // на одной стороне бывает несколько
-            for (const { item, k, a, b } of nb.S) {
-                const male = railCarrier(me.c, item.c);
-                const vs = jointVs(me, item, "S", "N", a, b);
-                if (!vs.length)
-                    continue;
-                conns[i].S.push({ male, vs: vs.map((v) => v.a) });
-                conns[k].N.push({ male: !male, vs: vs.map((v) => v.b) });
-            }
-        });
-    const items = placed.items.map((it, i) => ({
-        c: it.c,
-        ox: it.ox,
-        oz: it.oz,
-        conn: {
-            N: conns[i].N.length ? conns[i].N : null,
-            S: conns[i].S.length ? conns[i].S : null,
-            W: conns[i].W.length ? conns[i].W : null,
-            E: conns[i].E.length ? conns[i].E : null,
-        },
-    }));
-    return { items, totalW: placed.totalW, totalD: placed.totalD, rows: placed.rows };
+    for (const it of items)
+        for (const side of ["N", "S", "W", "E"])
+            if (!it.conn[side].length)
+                it.conn[side] = null;
+    return { items, totalW, totalD };
 }
 // ── src/ui/theme.js ──
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -4092,114 +4217,16 @@ function TrayGenerator() {
         updCur(withRemap());
     };
     // ── Внешний габарит контейнера ──
-    // Ширина — ЛИЧНЫЙ размер: в ряду контейнеры могут быть разной ширины.
-    // Глубина общая у ряда (иначе между рядами щели), поэтому применяется ко
-    // всему ряду. Магнит соседей держит общий габарит сборки: что забрал
-    // один, отдают соседи по ряду (по ширине) или соседние ряды (по глубине);
-    // контейнеры с замками не трогаются.
+    // Раскладка свободная: у контейнера свои ширина и глубина, левый ближний
+    // угол стоит на месте, двигается противоположная грань. При включённом
+    // магните прилипшие к этой грани соседи едут за ней (при росте — всегда,
+    // иначе коробки наехали бы друг на друга). Жёсткая рамка стола
+    // соблюдается всегда.
     const applyOuterDim = (patch) => {
-        // «Зафиксировать внешний размер» — намертво: габарит не меняется ни
-        // от ползунков, ни от изменения ячеек внутри, ни магнитом соседей
         if (cur.lockOuter)
             return;
-        const isW = "W" in patch;
-        const axis = isW ? "W" : "D";
-        const maxAxis = isW ? limits.maxW : limits.maxD;
-        const layLim = (isW ? limits.layW : limits.layD) * 10;
-        const r1 = (v) => Math.round(v * 10) / 10;
-        const want0 = Math.max(minOuterDim(cur, axis), Math.min(patch[axis], maxAxis), 30);
-        const myId = cur.id, myGy = cur.gy, wasSize = cur[axis];
-        const magnetOn = magnet;
-        // раздача разницы между «донорами»: delta > 0 — забрать у них,
-        // delta < 0 — раздать им. Возвращает остаток, который забрать не вышло.
-        const spread = (targets, lo, hi, delta) => {
-            for (let pass = 0; pass < 4 && Math.abs(delta) > 0.05; pass++) {
-                const open = [...targets.keys()].filter((k) => delta > 0 ? targets.get(k) > lo(k) + 0.01 : targets.get(k) < hi(k) - 0.01);
-                if (!open.length)
-                    break;
-                const share = delta / open.length;
-                for (const k of open) {
-                    const v = Math.max(lo(k), Math.min(hi(k), r1(targets.get(k) - share)));
-                    delta = r1(delta - (targets.get(k) - v));
-                    targets.set(k, v);
-                }
-            }
-            return delta;
-        };
-        setContainers((cs) => {
-            const rows = rowsOf(cs);
-            const myRow = rows.find((r) => r.gy === myGy);
-            if (!myRow)
-                return cs;
-            if (isW) {
-                let want = want0;
-                const others = myRow.list.filter((c) => c.id !== myId);
-                const free = others.filter((c) => !c.lockOuter && !c.lockCell);
-                // без магнита (или когда в ряду больше некому отдавать и забирать)
-                // ряд просто становится шире или уже — но не за рамку стола
-                if (!magnetOn || !free.length) {
-                    if (layLim > 0) {
-                        const used = others.reduce((s, c) => s + c.W, 0);
-                        want = Math.min(want, Math.max(30, r1(layLim - used)));
-                    }
-                    return cs.map((c) => (c.id === myId ? { ...c, W: r1(want) } : c));
-                }
-                const targets = new Map(free.map((c) => [c.id, c.W]));
-                const byId = new Map(free.map((c) => [c.id, c]));
-                const rest = spread(targets, (k) => Math.max(30, minOuterDim(byId.get(k), "W")), () => maxAxis, r1(want - wasSize));
-                // Заданный размер контейнер получает всегда — магнит лишь
-                // компенсирует его соседями. Если соседям расти больше некуда
-                // (лимит принтера), освободившееся место закрывает новый контейнер
-                // сразу за ужатым; мелкий остаток оставляем как есть.
-                let extra = null;
-                if (rest <= -30)
-                    extra = { ...makeContainer(null, cur.gx + 1, myGy), W: r1(-rest), D: myRow.depth };
-                const shifted = cs.map((c) => {
-                    if (c.id === myId)
-                        return { ...c, W: want };
-                    if (targets.has(c.id) && Math.abs(targets.get(c.id) - c.W) > 0.01)
-                        return { ...c, W: targets.get(c.id) };
-                    return c;
-                });
-                if (!extra)
-                    return shifted;
-                return renumber([
-                    ...shifted.map((c) => (c.gy === myGy && c.gx > cur.gx ? { ...c, gx: c.gx + 1 } : c)),
-                    extra,
-                ]);
-            }
-            // ── глубина: общая у ряда ──
-            let want = Math.max(want0, ...myRow.list.map((c) => minOuterDim(c, "D")));
-            const otherRows = rows.filter((r) => r.gy !== myGy && r.list.every((c) => !c.lockOuter && !c.lockCell));
-            if (!magnetOn && layLim > 0) {
-                const used = rows.filter((r) => r.gy !== myGy).reduce((s, r) => s + r.depth, 0);
-                want = Math.min(want, Math.max(30, r1(layLim - used)));
-            }
-            let targets = new Map();
-            let newRow = null;
-            if (magnetOn && otherRows.length) {
-                targets = new Map(otherRows.map((r) => [r.gy, r.depth]));
-                const rowById = new Map(otherRows.map((r) => [r.gy, r]));
-                const rest = spread(targets, (k) => Math.max(30, ...rowById.get(k).list.map((c) => minOuterDim(c, "D"))), () => maxAxis, r1(want - myRow.depth));
-                // соседним рядам расти некуда — освободившуюся полосу закрывает
-                // новый ряд с теми же ширинами
-                if (rest <= -30)
-                    newRow = { depth: r1(-rest), widths: myRow.list.map((c) => c.W) };
-            }
-            const out = cs.map((c) => {
-                if (c.lockOuter)
-                    return c;
-                if (c.gy === myGy)
-                    return Math.abs(c.D - want) > 0.01 ? { ...c, D: r1(want) } : c;
-                if (targets.has(c.gy) && Math.abs(targets.get(c.gy) - c.D) > 0.01)
-                    return { ...c, D: targets.get(c.gy) };
-                return c;
-            });
-            if (!newRow)
-                return out;
-            const added = newRow.widths.map((W, gx) => ({ ...makeContainer(null, gx, myGy + 1), W, D: newRow.depth }));
-            return renumber([...out.map((c) => (c.gy > myGy ? { ...c, gy: c.gy + 1 } : c)), ...added]);
-        });
+        const idx = sel;
+        setContainers((cs) => resizeBox(cs, idx, patch, limits, magnet));
     };
     // сброс к значениям по умолчанию: без диалогов и перезагрузки,
     // двойное нажатие как защита от случайного клика
@@ -4621,55 +4648,53 @@ function TrayGenerator() {
             flashIo(`Проект открыт: ${proj.containers.length} контейнер(ов)`, 4000);
         });
     };
-    // ── карта раскладки ──
-    // Сборка — это ряды: внутри ряда контейнеры стоят слева направо и ширина
-    // у каждого своя, общая у ряда только глубина. Карта рисует ряды в
-    // масштабе, поэтому видно фактические пропорции.
-    const mapRows = rowsOf(containers);
-    const idxOf = (c) => containers.indexOf(c);
+    // ── план раскладки ──
+    // Свободная 2D-карта: рамка стола в масштабе, контейнеры — как стоят на
+    // самом деле. Никаких рядов и клеток — тащи куда хочешь, края прилипают
+    // к соседям и к рамке.
     const layWmm = Math.max(60, limits.layW * 10);
-    const scale = Math.min(0.85, 250 / Math.max(layWmm, ...mapRows.map((r) => r.width)));
-    const nextRowGy = mapRows.length ? mapRows[mapRows.length - 1].gy + 1 : 0;
-    const firstRowGy = mapRows.length ? mapRows[0].gy : 0;
-    // Новый контейнер в конце ряда: берёт остаток до края лимита раскладки
-    // (в пределах лимита принтера), глубину — у своего ряда.
-    const addToRow = (gy) => {
-        const row = mapRows.find((r) => r.gy === gy);
-        const rem = Math.round((limits.layW * 10 - (row ? row.width : 0)) * 10) / 10;
-        const W = Math.max(30, Math.min(limits.maxW, rem >= 30 ? rem : limits.maxW));
-        const usedD = mapRows.reduce((sum, r) => sum + r.depth, 0);
-        const D = row ? row.depth
-            : Math.max(30, Math.min(limits.maxD, Math.round((limits.layD * 10 - usedD) * 10) / 10 || limits.maxD));
-        const nc = { ...makeContainer(null, row ? row.list.length : 0, gy), W, D };
+    const layDmm = Math.max(60, limits.layD * 10);
+    const bW = Math.max(layWmm, ...containers.map((c) => c.px + c.W));
+    const bD = Math.max(layDmm, ...containers.map((c) => c.pz + c.D));
+    const scale = Math.min(0.8, 262 / bW, 300 / bD);
+    const planRef = useRef(null);
+    // «+ контейнер»: встаёт в самый большой свободный прямоугольник рамки
+    const addContainer = () => {
+        const spot = autoSpot(containers, limits);
+        if (!spot)
+            return;
+        const nc = { ...makeContainer(null, spot.px, spot.pz), W: spot.W, D: spot.D };
         setContainers((cs) => [...cs, nc]);
         setSel(containers.length);
         setSelection(null);
     };
-    // ── перетаскивание контейнеров по карте ──
-    // Тянем мышью или пальцем: подсвечивается место вставки (щель между
-    // контейнерами, конец ряда или новый ряд). Нажатие без сдвига —
-    // обычный выбор контейнера.
-    const dropUnder = (x, y) => {
-        const el = document.elementFromPoint(x, y);
-        const t = el && el.closest && el.closest("[data-drop]");
-        if (!t)
+    const canAdd = !!autoSpot(containers, limits);
+    // ── перетаскивание по плану ──
+    // Позиция считается в мм из позиции курсора на плане; прилипание и
+    // проверку пересечений делает модель (snapMove/collides). Нажатие без
+    // сдвига — обычный выбор контейнера.
+    const planPos = (e, d) => {
+        const r = planRef.current?.getBoundingClientRect();
+        if (!r)
             return null;
-        const [gy, pos] = t.getAttribute("data-drop").split(":").map(Number);
-        if (!Number.isFinite(gy) || !Number.isFinite(pos))
-            return null;
-        if (t.hasAttribute("data-box")) {
-            const r = t.getBoundingClientRect();
-            return { gy, pos: x > r.left + r.width / 2 ? pos + 1 : pos };
-        }
-        return { gy, pos };
+        return {
+            px: (e.clientX - r.left) / scale - d.offX,
+            pz: (e.clientY - r.top) / scale - d.offZ,
+        };
     };
     const dragStart = (e, idx) => {
         if (e.button)
             return;
-        // захват указателя: тянуть можно и за пределами исходной кнопки
         if (e.currentTarget.setPointerCapture)
             e.currentTarget.setPointerCapture(e.pointerId);
-        dragRef.current = { idx, x0: e.clientX, y0: e.clientY, moved: false };
+        const r = planRef.current?.getBoundingClientRect();
+        const c = containers[idx];
+        dragRef.current = {
+            idx, x0: e.clientX, y0: e.clientY, moved: false,
+            // за какую точку контейнера схватились (мм от его угла)
+            offX: r ? (e.clientX - r.left) / scale - c.px : c.W / 2,
+            offZ: r ? (e.clientY - r.top) / scale - c.pz : c.D / 2,
+        };
     };
     const dragMove = (e) => {
         const d = dragRef.current;
@@ -4679,7 +4704,11 @@ function TrayGenerator() {
         if (!d.moved && Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0) < 5)
             return;
         d.moved = true;
-        setDrag({ idx: d.idx, over: dropUnder(e.clientX, e.clientY), x: e.clientX, y: e.clientY });
+        const p = planPos(e, d);
+        if (!p)
+            return;
+        const snapped = snapMove(containers, d.idx, p.px, p.pz, limits);
+        setDrag({ idx: d.idx, ...snapped, bad: collides(containers, d.idx, snapped.px, snapped.pz) });
     };
     const dragEnd = (e) => {
         const d = dragRef.current;
@@ -4692,15 +4721,13 @@ function TrayGenerator() {
             setSelection(null);
             return;
         }
-        // мышь отпущена после переноса: следующий click (если браузер его
-        // всё-таки родит) не должен добавлять контейнер кнопкой «+»
         dragBlockClick.current = true;
         setTimeout(() => { dragBlockClick.current = false; }, 0);
-        const to = dropUnder(e.clientX, e.clientY);
-        if (!to)
+        const p = planPos(e, d);
+        if (!p)
             return;
-        setContainers((cs) => moveContainer(cs, d.idx, to.gy, to.pos));
-        setSel(d.idx); // порядок в списке не меняется — номер остаётся прежним
+        setContainers((cs) => moveContainer(cs, d.idx, p.px, p.pz, limits));
+        setSel(d.idx);
         setSelection(null);
     };
     const dragCancel = () => { dragRef.current = null; setDrag(null); };
@@ -4712,65 +4739,38 @@ function TrayGenerator() {
         window.addEventListener("keydown", esc);
         return () => window.removeEventListener("keydown", esc);
     }, [drag]);
-    const overIs = (gy, pos) => drag && drag.over && drag.over.gy === gy && drag.over.pos === pos;
-    // щель между контейнерами — мишень вставки
-    const slot = (gy, pos) => (React.createElement("div", { key: `s${gy}:${pos}`, "data-drop": `${gy}:${pos}`, style: {
-            width: drag ? 12 : 4, alignSelf: "stretch", borderRadius: 3,
-            background: overIs(gy, pos) ? SEL : drag ? "#E2E8F0" : "transparent",
-        } }));
-    const rowStrip = (gy, label) => (React.createElement("div", { key: `r${gy}`, "data-drop": `${gy}:0`, style: {
-            height: drag ? 20 : 0, marginTop: 2, borderRadius: 6, fontSize: 11, color: "#8A97A8",
-            display: drag ? "flex" : "none", alignItems: "center", justifyContent: "center",
-            border: `1px dashed ${overIs(gy, 0) ? SEL : "#C6D0DC"}`,
-            background: overIs(gy, 0) ? "#DBEAFE" : "transparent",
-        } }, label));
-    const mapView = (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3 } },
-        rowStrip(firstRowGy - 1, "новый ряд сверху"),
-        mapRows.map((r) => (React.createElement("div", { key: r.gy, style: { display: "flex", alignItems: "stretch", gap: 0 } },
-            slot(r.gy, 0),
-            r.list.map((c, k) => {
-                const idx = idxOf(c);
-                const isDragged = drag?.idx === idx;
-                return [
-                    React.createElement("button", { key: `b${c.id}`, "data-drop": `${r.gy}:${k}`, "data-box": idx, title: `Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`, onPointerDown: (e) => dragStart(e, idx), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
-                            width: Math.max(30, Math.round(c.W * scale)),
-                            height: Math.max(26, Math.round(r.depth * scale)),
-                            borderRadius: 8, fontSize: 12, fontWeight: 700,
-                            cursor: drag ? "grabbing" : "grab", touchAction: "none",
-                            border: idx === sel ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                            background: idx === sel ? "#FFF3EB" : "#fff",
-                            color: idx === sel ? ACCENT : "#3D4A5C",
-                            opacity: isDragged ? 0.35 : 1,
-                        } },
-                        "\u2116",
-                        idx + 1),
-                    slot(r.gy, k + 1),
-                ];
-            }),
-            React.createElement("button", { key: `a${r.gy}`, onClick: () => {
-                    if (dragBlockClick.current)
-                        return;
-                    const to = r.align === "right" ? undefined : "right";
-                    setContainers((cs) => cs.map((c) => (c.gy === r.gy ? { ...c, rowAlign: to } : c)));
-                }, title: r.align === "right" ? "Ряд прижат вправо — прижать влево" : "Ряд прижат влево — прижать вправо", style: {
-                    width: 22, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
-                    fontSize: 12, cursor: "pointer", border: "1px solid #E4E9EF",
-                    background: "transparent", color: "#8A97A8",
-                } }, r.align === "right" ? "⇥" : "⇤"),
-            React.createElement("button", { key: `p${r.gy}`, "data-drop": `${r.gy}:${r.list.length}`, onClick: () => { if (!dragBlockClick.current)
-                    addToRow(r.gy); }, title: "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432 \u044D\u0442\u043E\u0442 \u0440\u044F\u0434", style: {
-                    width: 30, height: Math.max(26, Math.round(r.depth * scale)), borderRadius: 8,
-                    fontSize: 15, cursor: "pointer", touchAction: "none",
-                    border: `1px dashed ${overIs(r.gy, r.list.length) ? SEL : "#A9B4C2"}`,
-                    background: overIs(r.gy, r.list.length) ? "#DBEAFE" : "transparent",
-                    color: overIs(r.gy, r.list.length) ? SEL : "#8A97A8",
-                } }, "+")))),
-        rowStrip(nextRowGy, "новый ряд снизу"),
-        React.createElement("button", { onClick: () => { if (!dragBlockClick.current)
-                addToRow(nextRowGy); }, style: {
-                marginTop: 4, padding: "5px 0", borderRadius: 8, fontSize: 12.5, cursor: "pointer",
-                border: "1px dashed #A9B4C2", background: "transparent", color: "#6B7A8D", width: "100%",
-            } }, "+ \u0440\u044F\u0434")));
+    const mapView = (React.createElement("div", { ref: planRef, style: {
+            position: "relative",
+            width: Math.round(bW * scale) + 2,
+            height: Math.round(bD * scale) + 2,
+            background: "#F8FAFC", borderRadius: 6,
+        } },
+        React.createElement("div", { style: {
+                position: "absolute", left: 0, top: 0,
+                width: Math.round(layWmm * scale), height: Math.round(layDmm * scale),
+                border: "1.5px dashed #A9B4C2", borderRadius: 4, boxSizing: "border-box",
+            } }),
+        containers.map((c, idx) => {
+            const isDragged = drag?.idx === idx;
+            const px = isDragged ? drag.px : c.px;
+            const pz = isDragged ? drag.pz : c.pz;
+            return (React.createElement("button", { key: c.id, title: `Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`, onPointerDown: (e) => dragStart(e, idx), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
+                    position: "absolute",
+                    left: Math.round(px * scale), top: Math.round(pz * scale),
+                    width: Math.max(18, Math.round(c.W * scale)),
+                    height: Math.max(16, Math.round(c.D * scale)),
+                    borderRadius: 6, fontSize: 11.5, fontWeight: 700, padding: 0,
+                    cursor: drag ? "grabbing" : "grab", touchAction: "none", boxSizing: "border-box",
+                    border: isDragged && drag.bad ? "2px solid #DC2626"
+                        : idx === sel ? `2px solid ${ACCENT}` : "1px solid #C9D2DD",
+                    background: isDragged && drag.bad ? "#FEE2E2" : idx === sel ? "#FFF3EB" : "#fff",
+                    color: idx === sel ? ACCENT : "#3D4A5C",
+                    opacity: isDragged ? 0.75 : 1,
+                    zIndex: isDragged ? 5 : 1,
+                } },
+                "\u2116",
+                idx + 1));
+        })));
     // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
     let editorWall = null, editorCell = null;
     if (selection?.type === "wall") {
@@ -4974,28 +4974,21 @@ function TrayGenerator() {
             tab === "layout" && (React.createElement("div", null,
                 React.createElement(SectionTitle, null, "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430"),
                 React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
-                    "\u0421\u0431\u043E\u0440\u043A\u0430 \u2014 \u044D\u0442\u043E \u0440\u044F\u0434\u044B: \u0448\u0438\u0440\u0438\u043D\u0430 \u0443 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430 \u0441\u0432\u043E\u044F, \u043E\u0431\u0449\u0430\u044F \u0443 \u0440\u044F\u0434\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0433\u043B\u0443\u0431\u0438\u043D\u0430. ",
-                    React.createElement("b", null, "+"),
-                    " \u0434\u043E\u0431\u0430\u0432\u043B\u044F\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432 \u043A\u043E\u043D\u0435\u0446 \u0440\u044F\u0434\u0430, ",
-                    React.createElement("b", null, "\u21E4/\u21E5"),
-                    " \u043F\u0440\u0438\u0436\u0438\u043C\u0430\u0435\u0442 \u043A\u043E\u0440\u043E\u0442\u043A\u0438\u0439 \u0440\u044F\u0434 \u043A \u043B\u0435\u0432\u043E\u043C\u0443 \u0438\u043B\u0438 \u043F\u0440\u0430\u0432\u043E\u043C\u0443 \u043A\u0440\u0430\u044E."),
-                mapView,
-                drag && (React.createElement("div", { style: {
-                        position: "fixed", left: drag.x + 12, top: drag.y + 8, zIndex: 50, pointerEvents: "none",
-                        padding: "3px 8px", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
-                        background: SEL, color: "#fff", boxShadow: "0 4px 12px rgba(20,40,70,0.25)",
-                    } },
-                    "\u2116",
-                    drag.idx + 1)),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } },
-                    "\u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B ",
+                    "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u0430\u044F: \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043B\u044E\u0431\u044B\u0445 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u0441\u0442\u043E\u044F\u0442 \u0433\u0434\u0435 \u0443\u0433\u043E\u0434\u043D\u043E \u0432\u043D\u0443\u0442\u0440\u0438 \u0440\u0430\u043C\u043A\u0438 \u0441\u0442\u043E\u043B\u0430 \u0438 ",
                     React.createElement("b", null, "\u0442\u0430\u0441\u043A\u0430\u044E\u0442\u0441\u044F \u043C\u044B\u0448\u044C\u044E"),
-                    ": \u043F\u043E\u0434\u0441\u0432\u0435\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u043C\u0435\u0441\u0442\u043E \u0432\u0441\u0442\u0430\u0432\u043A\u0438 \u2014 \u0449\u0435\u043B\u044C \u0432 \u0440\u044F\u0434\u0443, \u043A\u043E\u043D\u0435\u0446 \u0440\u044F\u0434\u0430 \u0438\u043B\u0438 \u043D\u043E\u0432\u044B\u0439 \u0440\u044F\u0434 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442). \u0428\u0438\u0440\u0438\u043D\u0443 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u0435\u0442, \u0433\u043B\u0443\u0431\u0438\u043D\u0443 \u0431\u0435\u0440\u0451\u0442 \u0443 \u0440\u044F\u0434\u0430."),
-                React.createElement("button", { onClick: fillLayout, style: {
-                        width: "100%", marginTop: 8, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
-                        cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
-                    } }, "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0443"),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 } }, "\u0414\u043E\u0442\u044F\u043D\u0435\u0442 \u0440\u044F\u0434\u044B \u0434\u043E \u043F\u0440\u0430\u0432\u043E\u0433\u043E \u043A\u0440\u0430\u044F \u0438 \u0434\u043E\u0441\u0442\u0440\u043E\u0438\u0442 \u0440\u044F\u0434\u044B \u0434\u043E \u0434\u0430\u043B\u044C\u043D\u0435\u0433\u043E \u043A\u0440\u0430\u044F \u043B\u0438\u043C\u0438\u0442\u0430."),
+                    " \u2014 \u043A\u0440\u0430\u044F \u043F\u0440\u0438\u043B\u0438\u043F\u0430\u044E\u0442 \u043A \u0441\u043E\u0441\u0435\u0434\u044F\u043C \u0438 \u043A \u0440\u0430\u043C\u043A\u0435 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442, \u043A\u0440\u0430\u0441\u043D\u044B\u043C \u2014 \u043C\u0435\u0441\u0442\u043E \u0437\u0430\u043D\u044F\u0442\u043E)."),
+                mapView,
+                React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+                    React.createElement("button", { onClick: addContainer, disabled: !canAdd, style: {
+                            flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
+                            cursor: canAdd ? "pointer" : "default", border: `1.5px solid ${canAdd ? ACCENT : "#D6DDE6"}`,
+                            background: "#fff", color: canAdd ? ACCENT : "#B6C0CC",
+                        } }, "+ \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440"),
+                    React.createElement("button", { onClick: fillLayout, style: {
+                            flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 13, fontWeight: 700,
+                            cursor: "pointer", border: `1.5px solid ${ACCENT}`, background: "#fff", color: ACCENT,
+                        } }, "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0443")),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "4px 0 0", lineHeight: 1.4 } }, "\u00AB+\u00BB \u0441\u0442\u0430\u0432\u0438\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440 \u0432 \u0441\u0430\u043C\u043E\u0435 \u0431\u043E\u043B\u044C\u0448\u043E\u0435 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E; \u00AB\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u044C\u00BB \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430\u043C\u0438 \u0432\u0441\u0451 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u0440\u0430\u043C\u043A\u0438."),
                 React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" } },
                     containers.length > 1 && (React.createElement("button", { onClick: () => { setContainers((cs) => cs.filter((_, i) => i !== sel)); setSel(0); setSelection(null); }, style: { padding: "5px 10px", borderRadius: 8, fontSize: 12.5, cursor: "pointer", border: "1px solid #F1C0C0", background: "#fff", color: "#C0392B" } },
                         "\u0443\u0434\u0430\u043B\u0438\u0442\u044C \u2116",
@@ -5014,8 +5007,8 @@ function TrayGenerator() {
                     React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#3D4A5C", cursor: "pointer" } },
                         React.createElement("input", { type: "checkbox", checked: layMagnet, onChange: (e) => setLayMagnet(e.target.checked), style: { accentColor: ACCENT } }),
                         "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439: \u0448\u0438\u0440\u0438\u043D\u0443 \u043C\u0435\u043D\u044F\u0435\u0442 \u0442\u043E\u043B\u044C\u043A\u043E \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440, \u0430 \u0441\u043E\u0441\u0435\u0434\u0438 \u043F\u043E \u0440\u044F\u0434\u0443 \u0437\u0430\u0431\u0438\u0440\u0430\u044E\u0442 \u043E\u0441\u0432\u043E\u0431\u043E\u0434\u0438\u0432\u0448\u0435\u0435\u0441\u044F \u043C\u0435\u0441\u0442\u043E (\u0438\u043B\u0438 \u0443\u0441\u0442\u0443\u043F\u0430\u044E\u0442 \u0441\u0432\u043E\u0451); \u0433\u043B\u0443\u0431\u0438\u043D\u0430 \u043E\u0431\u0449\u0430\u044F \u0443 \u0440\u044F\u0434\u0430 \u2014 \u0435\u0451 \u043A\u043E\u043C\u043F\u0435\u043D\u0441\u0438\u0440\u0443\u044E\u0442 \u0441\u043E\u0441\u0435\u0434\u043D\u0438\u0435 \u0440\u044F\u0434\u044B."),
-                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438: \u0440\u044F\u0434\u044B \u0434\u043E\u0442\u044F\u0433\u0438\u0432\u0430\u044E\u0442\u0441\u044F \u0434\u043E \u043F\u0440\u0430\u0432\u043E\u0433\u043E \u043A\u0440\u0430\u044F \u043B\u0438\u043C\u0438\u0442\u0430, \u0441\u0442\u043E\u043F\u043A\u0430 \u0440\u044F\u0434\u043E\u0432 \u2014 \u0434\u043E \u0434\u0430\u043B\u044C\u043D\u0435\u0433\u043E; \u043F\u0443\u0441\u0442\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u043E\u0442 30 \u043C\u043C \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0442 \u043D\u043E\u0432\u044B\u0435 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u0438 \u0440\u044F\u0434\u044B."),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0441\u043E\u0441\u0435\u0434\u0435\u0439: \u0441\u043E\u0441\u0435\u0434\u0438, \u043F\u0440\u0438\u043B\u0438\u043F\u0448\u0438\u0435 \u043A \u0433\u0440\u0430\u043D\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430, \u0435\u0434\u0443\u0442 \u0437\u0430 \u043D\u0435\u0439 \u043F\u0440\u0438 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0438 \u0435\u0433\u043E \u0440\u0430\u0437\u043C\u0435\u0440\u0430 \u2014 \u0441\u0431\u043E\u0440\u043A\u0430 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043F\u043B\u043E\u0442\u043D\u043E\u0439."),
+                React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "6px 0 0", lineHeight: 1.4 } }, "\u041C\u0430\u0433\u043D\u0438\u0442 \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0438: \u0449\u0435\u043B\u0438 \u0443\u0436\u0435 30 \u043C\u043C \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0440\u0430\u0441\u0442\u044F\u0436\u043A\u043E\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432, \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E \u043F\u043E\u0431\u043E\u043B\u044C\u0448\u0435 \u2014 \u043D\u043E\u0432\u044B\u043C\u0438 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u0430\u043C\u0438."),
                 React.createElement(SectionTitle, null, "\u0421\u043E\u0435\u0434\u0438\u043D\u0438\u0442\u0435\u043B\u0438"),
                 React.createElement("p", { style: { fontSize: 11.5, color: "#8A97A8", margin: "0 0 0", lineHeight: 1.45 } },
                     "\u00AB\u041B\u0430\u0441\u0442\u043E\u0447\u043A\u0438\u043D \u0445\u0432\u043E\u0441\u0442\u00BB: \u0440\u0435\u043B\u044C\u0441 \u0432\u0445\u043E\u0434\u0438\u0442 \u0432 \u043F\u0430\u0437 \u0441\u043E\u0441\u0435\u0434\u0430 \u0441\u0432\u0435\u0440\u0445\u0443. \u0417\u0430\u0437\u043E\u0440 ",

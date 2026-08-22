@@ -1,101 +1,90 @@
 // ── «Магнит раскладки» ──
-// При включённой галке сборка липнет к краю лимита раскладки: ряд, не
-// достающий до правого края, дотягивается последним контейнером (в
-// пределах лимита принтера), а большое пустое место (от 30 мм) закрывается
-// новым контейнером. То же по глубине: последний ряд дотягивается до
-// дальнего края или добавляется новый ряд. Контейнеры с замками не
-// растягиваются. Возвращает новый список либо null, если менять нечего
-// (идемпотентно — повторный вызов на результате всегда даёт null).
+// При включённой галке сборка липнет к краям лимита: узкая щель между
+// контейнером и краем (или соседом), куда ничего не поставить, закрывается
+// растяжкой самого контейнера (в пределах лимита принтера), а свободное
+// место побольше (от 30 мм) заполняется новыми контейнерами — каждый
+// встаёт в самый большой свободный прямоугольник. Контейнеры с замками не
+// растягиваются. Возвращает новый список либо null (идемпотентно).
 
 import { makeContainer } from "../state/storage.js";
-import { rowsOf, MIN_BOX } from "./laymove.js";
+import { boxOf, overlaps, freeRects, autoSpot, MIN_BOX } from "./laymove.js";
 
-const round1 = (v) => Math.round(v * 10) / 10;
+const lgR1 = (v) => Math.round(v * 10) / 10; // имя уникально: сборка склеивает модули в один скрипт
 
 export function snapLayout(containers, limits) {
   if (!containers || !containers.length || !limits) return null;
   let cs = containers.map((c) => ({ ...c }));
   let changed = false;
-  const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
 
-  // ── ширина рядов ──
-  if (limW > 0)
-    for (const r of rowsOf(cs)) {
-      let rem = round1(limW - r.width);
-      if (rem < 0.05) continue;
-      const last = r.list[r.list.length - 1];
-      const free = last && !last.lockOuter && !last.lockCell;
-      // весь зазор закрывается растяжкой — растягиваем и всё
-      if (free && last.W + rem <= limits.maxW + 0.01) {
-        cs.find((c) => c.id === last.id).W = round1(last.W + rem);
-        changed = true;
-        continue;
-      }
-      // иначе зазор закрывают новые контейнеры этого ряда
-      let gx = r.list.length;
-      let tail = null;
-      while (rem >= MIN_BOX) {
-        const size = rem > limits.maxW + 0.01
-          ? (rem - limits.maxW < MIN_BOX ? round1(rem / 2) : limits.maxW)
-          : round1(rem);
-        const nc = makeContainer(null, gx, r.gy);
-        nc.W = size;
-        nc.D = r.depth;
-        cs.push(nc);
-        tail = nc;
-        rem = round1(rem - size);
-        gx++;
-        changed = true;
-      }
-      // хвост меньше контейнера добирает крайний — ряд встаёт ровно у края
-      if (rem >= 0.05) {
-        const t = tail || (free ? cs.find((c) => c.id === last.id) : null);
-        if (t && t.W + rem <= limits.maxW + 0.01) { t.W = round1(t.W + rem); changed = true; }
-      }
-    }
+  for (let pass = 0; pass < 12; pass++) {
+    let step = false;
 
-  // ── глубина стопки ──
-  if (limD > 0) {
-    const rows = rowsOf(cs);
-    const totalD = rows.reduce((s, r) => s + r.depth, 0);
-    let rem = round1(limD - totalD);
-    if (rem >= 0.05) {
-      const last = rows[rows.length - 1];
-      const free = last.list.every((c) => !c.lockOuter && !c.lockCell);
-      if (free && last.depth + rem <= limits.maxD + 0.01) {
-        for (const c of last.list) cs.find((x) => x.id === c.id).D = round1(last.depth + rem);
-        return cs;
+    // 1. узкие щели (< 30 мм): растяжка контейнера, к чьей грани щель
+    //    примыкает — правее или дальше него пусто до края щели
+    const stripFree = (x0, x1, z0, z1, skip) =>
+      x1 - x0 > 0.05 && z1 - z0 > 0.05 &&
+      !cs.some((c, k) => k !== skip && overlaps({ x0, x1, z0, z1 }, boxOf(c)));
+    const limW = (limits.layW || 0) * 10, limD = (limits.layD || 0) * 10;
+    for (let k = 0; k < cs.length && !step; k++) {
+      const c = cs[k];
+      if (c.lockOuter || c.lockCell) continue;
+      const b = boxOf(c);
+      // до правого края рамки
+      if (limW > 0) {
+        const gap = lgR1(limW - b.x1);
+        if (gap > 0.05 && gap < MIN_BOX && c.W + gap <= limits.maxW + 0.01 &&
+            stripFree(b.x1, limW, b.z0, b.z1, k)) {
+          c.W = lgR1(c.W + gap); step = true; continue;
+        }
       }
-      let gy = rows[rows.length - 1].gy + 1;
-      let tailRow = null;
-      while (rem >= MIN_BOX) {
-        const size = rem > limits.maxD + 0.01
-          ? (rem - limits.maxD < MIN_BOX ? round1(rem / 2) : limits.maxD)
-          : round1(rem);
-        // новый ряд повторяет ширины предыдущего — сборка остаётся ровной
-        const src = rowsOf(cs).slice(-1)[0].list;
-        tailRow = [];
-        src.forEach((c, gx) => {
-          const nc = makeContainer(null, gx, gy);
-          nc.W = c.W;
-          nc.D = size;
-          cs.push(nc);
-          tailRow.push(nc);
-        });
-        rem = round1(rem - size);
-        gy++;
-        changed = true;
+      // до дальнего края рамки
+      if (limD > 0) {
+        const gap = lgR1(limD - b.z1);
+        if (gap > 0.05 && gap < MIN_BOX && c.D + gap <= limits.maxD + 0.01 &&
+            stripFree(b.x0, b.x1, b.z1, limD, k)) {
+          c.D = lgR1(c.D + gap); step = true; continue;
+        }
       }
-      // хвост по глубине добирает последний ряд
-      if (rem >= 0.05) {
-        const list = tailRow || (free ? last.list.map((c) => cs.find((x) => x.id === c.id)) : null);
-        if (list && list[0].D + rem <= limits.maxD + 0.01) {
-          for (const t of list) t.D = round1(t.D + rem);
-          changed = true;
+      // до ближайшего соседа справа / сзади
+      for (const o of cs) {
+        const ob = boxOf(o);
+        if (ob.x0 > b.x1 + 0.05 && ob.z0 < b.z1 - 0.5 && ob.z1 > b.z0 + 0.5) {
+          const gap = lgR1(ob.x0 - b.x1);
+          if (gap < MIN_BOX && c.W + gap <= limits.maxW + 0.01 &&
+              stripFree(b.x1, ob.x0, b.z0, b.z1, k)) {
+            c.W = lgR1(c.W + gap); step = true; break;
+          }
+        }
+        if (ob.z0 > b.z1 + 0.05 && ob.x0 < b.x1 - 0.5 && ob.x1 > b.x0 + 0.5) {
+          const gap = lgR1(ob.z0 - b.z1);
+          if (gap < MIN_BOX && c.D + gap <= limits.maxD + 0.01 &&
+              stripFree(b.x0, b.x1, b.z1, ob.z0, k)) {
+            c.D = lgR1(c.D + gap); step = true; break;
+          }
         }
       }
     }
+
+    // 2. большое свободное место — новый контейнер в самый большой
+    //    свободный прямоугольник
+    if (!step) {
+      const spot = autoSpot(cs, limits);
+      if (spot) {
+        const nc = makeContainer(null, spot.px, spot.pz);
+        nc.W = spot.W;
+        nc.D = spot.D;
+        cs.push(nc);
+        step = true;
+      }
+    }
+
+    if (!step) break;
+    changed = true;
   }
 
   return changed ? cs : null;
 }
+
+// «Заполнить раскладку» пользуется тем же магнитом разово
+export const fillAll = (cs, limits) => snapLayout(cs, limits) || cs;
+export { freeRects };

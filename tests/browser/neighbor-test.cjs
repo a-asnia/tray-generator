@@ -47,10 +47,11 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   await page.locator("button", { hasText: /^Принтер$/ }).click();
   await setNum("Макс. ширина", 200);
 
-  // пристыковать второй контейнер (лимит 37 см: остаток 200 мм — один сосед)
+  // пристыковать второй контейнер (рамка 37×17 см: свободно только справа)
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
   await setNum("Раскладка по X", 37);
-  await page.locator('button:text-is("+")').first().click(); // сосед в конце ряда
+  await setNum("Раскладка по Y", 17);
+  await page.locator('button:text-is("+ контейнер")').click(); // сосед справа
   await page.waitForTimeout(400);
   let st = await state();
   ok("два контейнера", st.containers.length === 2);
@@ -72,20 +73,24 @@ const HTML = require("node:path").join(__dirname, "..", "..", "tray-generator.ht
   const nbW0 = st.containers[nbIdx].W;
   ok(`сосед: W=${nbW0}, замкнутая колонка ${lockedW0.toFixed(1)} мм`, near(nbW0, 180) && lockedW0 > 50);
 
-  // выбрать первый контейнер и ужать его
+  // выбрать ЛЕВЫЙ контейнер и ужать его: приклеенный сосед с замком
+  // внутренней колонки едет за гранью, а его размеры и замок не меняются
+  const leftIdx = st.containers[myIdx].px < st.containers[nbIdx].px ? myIdx : nbIdx;
+  const rightIdx = 1 - leftIdx;
+  const rPx0 = st.containers[rightIdx].px;
   await page.locator("button", { hasText: /^Раскладка$/ }).click();
-  await page.locator("button", { hasText: `№${myIdx + 1}` }).click();
+  await page.locator("button", { hasText: `№${leftIdx + 1}` }).click();
   await goCont();
-  const myW0 = (await state()).containers[myIdx].W;
-  await setNum("Ширина", 150);
+  const myW0 = (await state()).containers[leftIdx].W;
+  await setNum("Ширина", myW0 - 30);
 
   st = await state();
-  const nbW1 = st.containers[nbIdx].W;
+  ok(`мой контейнер ужался (${myW0} → ${st.containers[leftIdx].W})`, near(st.containers[leftIdx].W, myW0 - 30));
+  ok(`приклеенный сосед приехал (px ${rPx0} → ${st.containers[rightIdx].px})`,
+    near(st.containers[rightIdx].px, rPx0 - 30));
+  ok(`размер соседа не тронут (${st.containers[rightIdx].W})`, near(st.containers[rightIdx].W, nbW0));
   const nbCols1 = await colWsOf(nbIdx);
-  ok(`мой контейнер ужался (${myW0} → ${st.containers[myIdx].W})`, near(st.containers[myIdx].W, 150));
-  ok(`сосед вырос (${nbW0} → ${nbW1})`, nbW1 > nbW0 + 5);
   ok(`замкнутая колонка соседа не изменилась (${nbCols1[0].toFixed(1)} мм)`, near(nbCols1[0], lockedW0));
-  ok("свободная колонка соседа впитала рост", nbCols1[1] > lockedW0 - 5 || nbCols1[1] > 0);
 
   await page.screenshot({ path: "/tmp/neighbor.png" });
 

@@ -8,6 +8,7 @@ import { presetContainer, GORKA_DEF } from "../src/model/presets.js";
 import { connGeom } from "../src/model/connectors.js";
 import { assemble } from "../src/model/assembly.js";
 import { moveContainer } from "../src/model/laymove.js";
+const LIMS = { maxW: 170, maxD: 170, maxH: 175, layW: 60, layD: 60 };
 import { bboxOf, solidIndex, pointsInside } from "./fixtures.mjs";
 
 let fail = 0;
@@ -16,7 +17,7 @@ const LIM = { maxW: 170, maxD: 170, maxH: 175, layW: 40, layD: 40 };
 const CG = connGeom();
 
 const mk = (o = {}) => ({
-  id: 1, gx: 0, gy: 0, W: 120, D: 120, H: 40, cols: 1, rows: 1, gridMode: "count",
+  id: 1, px: 0, pz: 0, W: 120, D: 120, H: 40, cols: 1, rows: 1, gridMode: "count",
   cellWt: 40, cellDt: 40, wall: 1.6, wallOut: CG.minWall, floor: 1.6,
   walls: {}, cells: {}, rowColWs: null, rowDs: null,
   lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [],
@@ -72,27 +73,31 @@ function checkPair(name, items, ai, bi, axis) {
 // ── конфигурации ──
 const gorka = presetContainer(mk({ W: 140, D: 140, H: 60 }), "stairs", LIM, GORKA_DEF);
 const configs = [
-  ["одинаковые, стык по X", [mk({ id: 1, gx: 0 }), mk({ id: 2, gx: 1 })], [[0, 1, "x"]]],
-  ["одинаковые, стык по Z", [mk({ id: 1, gy: 0 }), mk({ id: 2, gy: 1 })], [[0, 1, "z"]]],
-  ["разной высоты", [mk({ id: 1, H: 30 }), mk({ id: 2, gx: 1, H: 70 })], [[0, 1, "x"]]],
+  ["одинаковые, стык по X", [mk({ id: 1 }), mk({ id: 2, px: 120 })], [[0, 1, "x"]]],
+  ["одинаковые, стык по Z", [mk({ id: 1 }), mk({ id: 2, pz: 120 })], [[0, 1, "z"]]],
+  ["разной высоты", [mk({ id: 1, H: 30 }), mk({ id: 2, px: 120, H: 70 })], [[0, 1, "x"]]],
   ["низкая внешняя стенка у соседа",
-    [mk({ id: 1 }), mk({ id: 2, gx: 1, walls: { "o:w:0": { h: 8 } } })], [[0, 1, "x"]]],
-  ["горка рядом с обычным", [{ ...gorka, id: 1, gx: 0, gy: 0 }, mk({ id: 2, gx: 1, W: 140, D: 140, H: 60 })], [[0, 1, "x"]]],
+    [mk({ id: 1 }), mk({ id: 2, px: 120, walls: { "o:w:0": { h: 8 } } })], [[0, 1, "x"]]],
+  ["горка рядом с обычным", [{ ...gorka, id: 1, px: 0, pz: 0 }, mk({ id: 2, px: 140, W: 140, D: 140, H: 60 })], [[0, 1, "x"]]],
   ["визитница на стыке",
-    [mk({ id: 1, W: 140, D: 140, H: 70, walls: { "o:e:0": { h: 64, cardHooks: true } } }), mk({ id: 2, gx: 1, W: 140, D: 140, H: 70 })],
+    [mk({ id: 1, W: 140, D: 140, H: 70, walls: { "o:e:0": { h: 64, cardHooks: true } } }), mk({ id: 2, px: 140, W: 140, D: 140, H: 70 })],
     [[0, 1, "x"]]],
-  ["два ряда по два",
-    [mk({ id: 1, gx: 0, gy: 0 }), mk({ id: 2, gx: 1, gy: 0 }), mk({ id: 3, gx: 0, gy: 1 }), mk({ id: 4, gx: 1, gy: 1 })],
+  ["квадрат 2×2",
+    [mk({ id: 1 }), mk({ id: 2, px: 120 }), mk({ id: 3, pz: 120 }), mk({ id: 4, px: 120, pz: 120 })],
     [[0, 1, "x"], [0, 2, "z"], [1, 3, "z"], [2, 3, "x"]]],
-  // главный новый случай: ряды разной разбивки — 160+160 сзади и 118 спереди
-  ["ряды со свободными ширинами",
-    [mk({ id: 1, gx: 0, gy: 0, W: 160, D: 120 }), mk({ id: 2, gx: 1, gy: 0, W: 160, D: 120 }),
-     mk({ id: 3, gx: 0, gy: 1, W: 118, D: 161 })],
+  // свободная раскладка: 160+160 сзади, 118 в углу спереди
+  ["угловая раскладка",
+    [mk({ id: 1, px: 0, pz: 0, W: 160, D: 120 }), mk({ id: 2, px: 160, pz: 0, W: 160, D: 120 }),
+     mk({ id: 3, px: 0, pz: 120, W: 118, D: 161 })],
     [[0, 1, "x"], [0, 2, "z"]]],
   ["узкий под двумя широкими",
-    [mk({ id: 1, gx: 0, gy: 0, W: 90, D: 100 }), mk({ id: 2, gx: 1, gy: 0, W: 90, D: 100 }),
-     mk({ id: 3, gx: 0, gy: 1, W: 170, D: 100 })],
+    [mk({ id: 1, px: 0, pz: 0, W: 90, D: 100 }), mk({ id: 2, px: 90, pz: 0, W: 90, D: 100 }),
+     mk({ id: 3, px: 0, pz: 100, W: 170, D: 100 })],
     [[0, 1, "x"], [0, 2, "z"], [1, 2, "z"]]],
+  // сосед касается лишь частью стенки, со сдвигом
+  ["касание со сдвигом",
+    [mk({ id: 1, px: 0, pz: 0, W: 150, D: 100 }), mk({ id: 2, px: 60, pz: 100, W: 150, D: 100 })],
+    [[0, 1, "z"]]],
 ];
 
 for (const [name, cs, pairs] of configs) {
@@ -102,8 +107,8 @@ for (const [name, cs, pairs] of configs) {
 
 // после перетаскивания сборка обязана остаться такой же плотной
 {
-  const cs = [mk({ id: 1, gx: 0, W: 150, D: 120 }), mk({ id: 2, gx: 1, W: 90, D: 120 })];
-  const moved = moveContainer(cs, 0, 0, 2); // №1 в конец ряда
+  const cs = [mk({ id: 1, px: 0, W: 150, D: 120 }), mk({ id: 2, px: 150, W: 90, D: 120 })];
+  const moved = moveContainer(cs, 0, 243, 2, LIMS); // №1 прилипает справа от №2
   const items = place(moved);
   checkPair("после переноса", items, 0, 1, "x");
 }
