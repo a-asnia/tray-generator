@@ -105,6 +105,39 @@ for (const [name, cs, pairs] of configs) {
   for (const [a, b, axis] of pairs) checkPair(name, items, a, b, axis);
 }
 
+// ── стенка за рельсом цела ──
+// Роль узла (рельс/паз) приходит списком групп — регрессия: в male-зоне
+// стенка обязана ставиться обратно, иначе в ячейке дыра. Проверяем точку
+// В СЕРЕДИНЕ ТОЛЩИНЫ стенки за рельсом: там должен быть материал.
+{
+  const cs = [
+    mk({ id: 1, px: 0, pz: 0, W: 150, D: 120, cols: 3, rows: 2 }),
+    mk({ id: 2, px: 150, pz: 0, W: 120, D: 120, cols: 2, rows: 2 }),
+    mk({ id: 3, px: 0, pz: 120, W: 270, D: 100, cols: 4 }),
+  ];
+  const items = place(cs);
+  let checked = 0;
+  for (const it of items) {
+    const idx = solidIndex(it.solids);
+    const { W, D, wallOut } = it.c;
+    for (const [side, groups] of Object.entries(it.conn)) {
+      if (!groups) continue;
+      for (const g of groups) {
+        if (!g.male) continue;
+        for (const vc of g.vs) {
+          const p = side === "E" ? [it.ox + W / 2 - wallOut / 2, 6, it.oz + vc]
+            : side === "W" ? [it.ox - W / 2 + wallOut / 2, 6, it.oz + vc]
+            : side === "S" ? [it.ox + vc, 6, it.oz + D / 2 - wallOut / 2]
+            : [it.ox + vc, 6, it.oz - D / 2 + wallOut / 2];
+          checked++;
+          ok(`стенка за рельсом цела (№${it.c.id} ${side} @${vc.toFixed(1)})`, idx.inside(p, 0));
+        }
+      }
+    }
+  }
+  ok("рельсы для проверки нашлись", checked >= 3, ` → ${checked}`);
+}
+
 // после перетаскивания сборка обязана остаться такой же плотной
 {
   const cs = [mk({ id: 1, px: 0, W: 150, D: 120 }), mk({ id: 2, px: 150, W: 90, D: 120 })];

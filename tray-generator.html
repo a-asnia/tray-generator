@@ -2253,18 +2253,12 @@ function buildContainer(c, conn, opts = {}) {
                     : (o, y, z) => [W / 2 - o, y, z];
         pushProfiled(wallProfile(wallOut, Math.max(1, u.h), u.rnd, false), mapFn, u.vc - CONN.bossW / 2, u.vc + CONN.bossW / 2, "conn");
     };
-    if (conn.S?.male)
-        for (const u of uS)
-            zoneWall("s", u);
-    if (conn.N?.male)
-        for (const u of uN)
-            zoneWall("n", u);
-    if (conn.E?.male)
-        for (const u of uE)
-            zoneWall("e", u);
-    if (conn.W?.male)
-        for (const u of uW)
-            zoneWall("w", u);
+    // роль (рельс/паз) теперь у каждого узла своя — стенка возвращается
+    // ровно там, где стоит рельс; в female-узлах её заменяет паз
+    for (const [sideKey, units] of [["s", uS], ["n", uN], ["e", uE], ["w", uW]])
+        for (const u of units)
+            if (u.male)
+                zoneWall(sideKey, u);
     // ── Вставные стенки: направляющие на внутренних гранях ──
     // Пара вертикальных рёбер образует канал, в который перегородка
     // вдвигается сверху уже после печати. Рёбра ставятся НА грань: внутри
