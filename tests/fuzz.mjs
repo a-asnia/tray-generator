@@ -101,7 +101,15 @@ for (let run = 0; run < RUNS; run++) {
   const label = `сценарий ${run}`;
 
   for (let step = 0; step < 8; step++) {
-    const op = Math.floor(r() * 7);
+    const op = Math.floor(r() * 8);
+    if (op === 7) { // прижатие к стороне: включить/снять случайный пин
+      const i = Math.floor(r() * cs.length);
+      const s = ["back", "front", "left", "right"][Math.floor(r() * 4)];
+      cs = cs.map((c, k) => (k === i ? { ...c, pin: c.pin?.[s] ? {} : { [s]: true } } : c));
+      cs = fitAssembly(cs, limits) || cs;
+      invariants(`${label}/${step}`, cs, limits);
+      continue;
+    }
     if (op === 0) {
       const i = Math.floor(r() * cs.length);
       cs = moveContainer(cs, i, r() * 500, r() * 500, limits);
@@ -129,8 +137,10 @@ for (let run = 0; run < RUNS; run++) {
     }
     invariants(`${label}/${step}`, cs, limits);
   }
-  // сборка обязана влезать в лимит после нормализации
+  // сборка обязана влезать в лимит после нормализации, а нормализация —
+  // сходиться (второй прогон ничего не меняет, иначе эффект зациклится)
   cs = fitAssembly(cs, limits) || cs;
+  if (fitAssembly(cs, limits) !== null) bad(`${label}: fitAssembly не сходится`);
   fits(label, cs, limits);
   geometryOk(label, cs);
   assembles(label, cs);

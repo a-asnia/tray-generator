@@ -13,6 +13,22 @@ export const SNAP = 8;     // радиус прилипания краёв, мм
 
 export const boxOf = (c) => ({ x0: c.px, x1: c.px + c.W, z0: c.pz, z1: c.pz + c.D });
 
+// ── Прижатие к стороне рамки ──
+// Контейнер можно закрепить у стороны стола/полки (задняя = верх плана,
+// pz 0). Прижатая ось не отпускается при переносе; после любых перестроек
+// контейнер возвращается вплотную к своей стороне, как только там свободно.
+export const PIN_SIDES = ["back", "front", "left", "right"];
+export const pinnedPos = (c, limits) => {
+  const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+  const p = c.pin || {};
+  let px = null, pz = null;
+  if (p.left) px = 0;
+  else if (p.right && limW > 0) px = lmR1(Math.max(0, limW - c.W));
+  if (p.back) pz = 0;
+  else if (p.front && limD > 0) pz = lmR1(Math.max(0, limD - c.D));
+  return { px, pz };
+};
+
 // пересечение по площади (касание краями — не пересечение)
 export const overlaps = (a, b, eps = 0.05) =>
   a.x0 < b.x1 - eps && b.x0 < a.x1 - eps && a.z0 < b.z1 - eps && b.z0 < a.z1 - eps;
@@ -67,6 +83,10 @@ export function snapMove(cs, idx, px, pz, limits) {
   if (limW > 0) nx = Math.min(nx, limW - me.W);
   if (limD > 0) nz = Math.min(nz, limD - me.D);
   nx = Math.max(0, nx); nz = Math.max(0, nz);
+  // прижатая ось не отпускается: тащить можно только вдоль своей стороны
+  const pin = pinnedPos(me, limits);
+  if (pin.px !== null) nx = pin.px;
+  if (pin.pz !== null) nz = pin.pz;
   return { px: lmR1(nx), pz: lmR1(nz) };
 }
 
@@ -77,11 +97,15 @@ export function moveContainer(cs, idx, px, pz, limits) {
   const me = cs[idx];
   if (!me || !Number.isFinite(px) || !Number.isFinite(pz)) return cs;
   const s = snapMove(cs, idx, px, pz, limits);
+  // прижатые оси не отпускаются и в запасных вариантах без прилипания
+  const pin = pinnedPos(me, limits);
+  const rawX = pin.px !== null ? pin.px : Math.max(0, lmR1(px));
+  const rawZ = pin.pz !== null ? pin.pz : Math.max(0, lmR1(pz));
   const cands = [
     [s.px, s.pz],
-    [s.px, Math.max(0, lmR1(pz))],
-    [Math.max(0, lmR1(px)), s.pz],
-    [Math.max(0, lmR1(px)), Math.max(0, lmR1(pz))],
+    [s.px, rawZ],
+    [rawX, s.pz],
+    [rawX, rawZ],
   ];
   for (const [nx, nz] of cands) {
     const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
@@ -172,9 +196,12 @@ export function fitAssembly(cs, limits) {
     if (n.pz < -0.05) set({ pz: 0 });
     return n;
   });
-  // раскладываем заново только наехавших: замки первыми (им не ужаться),
+  // раскладываем заново только наехавших: прижатые к сторонам и замки
+  // первыми (прижатый обязан остаться у своей стороны, замку не ужаться),
   // на месте стоящие не трогаем
-  const order = out.map((_, k) => k).sort((a, b) => (out[a].lockOuter ? 0 : 1) - (out[b].lockOuter ? 0 : 1) || a - b);
+  const pinRank = (c) => (c.pin && Object.keys(c.pin).length ? 0 : 2);
+  const order = out.map((_, k) => k).sort((a, b) =>
+    (pinRank(out[a]) + (out[a].lockOuter ? 0 : 1)) - (pinRank(out[b]) + (out[b].lockOuter ? 0 : 1)) || a - b);
   const placed = [];
   const parked = [];
   for (const k of order) {
@@ -220,8 +247,24 @@ export function fitAssembly(cs, limits) {
     out[k] = { ...out[k], px: parkX, pz: lmR1(parkZ) };
     parkZ += out[k].D + 8;
   }
-  const changed = out.some((c, k) => c !== cs[k]);
-  return changed ? out : null;
+  // дотяжка прижатых к своей стороне — только когда там свободно (иначе
+  // клеймо и перекладка гоняли бы контейнер по кругу); припаркованных
+  // снаружи это не касается
+  out.forEach((c, k) => {
+    if (parked.includes(k)) return;
+    const pin = pinnedPos(c, limits);
+    const px = pin.px !== null ? pin.px : c.px;
+    const pz = pin.pz !== null ? pin.pz : c.pz;
+    if (Math.abs(px - c.px) < 0.05 && Math.abs(pz - c.pz) < 0.05) return;
+    if (!out.some((q, j) => j !== k && overlaps({ x0: px, x1: px + c.W, z0: pz, z1: pz + c.D }, boxOf(q))))
+      out[k] = { ...c, px, pz };
+  });
+  // «изменилось» — по значениям: пересчёт, вернувший те же числа (например,
+  // припаркованному снаружи), не должен считаться изменением — иначе эффект
+  // раскладки перекладывал бы одно и то же вечно
+  const same = (a, b) => a.px === b.px && a.pz === b.pz && a.W === b.W && a.D === b.D;
+  if (out.every((c, k) => same(c, cs[k]))) return null;
+  return out.map((c, k) => (same(c, cs[k]) ? cs[k] : c));
 }
 
 // ── Приклеенные соседи при изменении размера ──

@@ -2858,6 +2858,22 @@ const sanitizeContainer = (c0) => {
         c.cornerR = num(c.cornerR, 2, 0, 20);
     c.gridMode = c.gridMode === "size" ? "size" : "count";
     delete c.rowAlign; // рудимент рядной раскладки
+    // прижатие к сторонам рамки: по одной стороне на ось
+    {
+        const p = obj(c.pin), pout = {};
+        if (p.back)
+            pout.back = true;
+        else if (p.front)
+            pout.front = true;
+        if (p.left)
+            pout.left = true;
+        else if (p.right)
+            pout.right = true;
+        if (Object.keys(pout).length)
+            c.pin = pout;
+        else
+            delete c.pin;
+    }
     c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
     c.cells = Object.fromEntries(Object.entries(obj(c.cells)).map(([k, v]) => {
         const o = obj(v), out = {};
@@ -3148,6 +3164,25 @@ const lmR1 = (v) => Math.round(v * 10) / 10; // имя уникально: сб�
 const MIN_BOX = 30; // минимальный габарит контейнера, мм
 const SNAP = 8; // радиус прилипания краёв, мм
 const boxOf = (c) => ({ x0: c.px, x1: c.px + c.W, z0: c.pz, z1: c.pz + c.D });
+// ── Прижатие к стороне рамки ──
+// Контейнер можно закрепить у стороны стола/полки (задняя = верх плана,
+// pz 0). Прижатая ось не отпускается при переносе; после любых перестроек
+// контейнер возвращается вплотную к своей стороне, как только там свободно.
+const PIN_SIDES = ["back", "front", "left", "right"];
+const pinnedPos = (c, limits) => {
+    const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
+    const p = c.pin || {};
+    let px = null, pz = null;
+    if (p.left)
+        px = 0;
+    else if (p.right && limW > 0)
+        px = lmR1(Math.max(0, limW - c.W));
+    if (p.back)
+        pz = 0;
+    else if (p.front && limD > 0)
+        pz = lmR1(Math.max(0, limD - c.D));
+    return { px, pz };
+};
 // пересечение по площади (касание краями — не пересечение)
 const overlaps = (a, b, eps = 0.05) => a.x0 < b.x1 - eps && b.x0 < a.x1 - eps && a.z0 < b.z1 - eps && b.z0 < a.z1 - eps;
 const collides = (cs, idx, px, pz) => {
@@ -3212,6 +3247,12 @@ function snapMove(cs, idx, px, pz, limits) {
         nz = Math.min(nz, limD - me.D);
     nx = Math.max(0, nx);
     nz = Math.max(0, nz);
+    // прижатая ось не отпускается: тащить можно только вдоль своей стороны
+    const pin = pinnedPos(me, limits);
+    if (pin.px !== null)
+        nx = pin.px;
+    if (pin.pz !== null)
+        nz = pin.pz;
     return { px: lmR1(nx), pz: lmR1(nz) };
 }
 // Перенос контейнера в точку (px, pz — левый ближний угол). Прилипает к
@@ -3222,11 +3263,15 @@ function moveContainer(cs, idx, px, pz, limits) {
     if (!me || !Number.isFinite(px) || !Number.isFinite(pz))
         return cs;
     const s = snapMove(cs, idx, px, pz, limits);
+    // прижатые оси не отпускаются и в запасных вариантах без прилипания
+    const pin = pinnedPos(me, limits);
+    const rawX = pin.px !== null ? pin.px : Math.max(0, lmR1(px));
+    const rawZ = pin.pz !== null ? pin.pz : Math.max(0, lmR1(pz));
     const cands = [
         [s.px, s.pz],
-        [s.px, Math.max(0, lmR1(pz))],
-        [Math.max(0, lmR1(px)), s.pz],
-        [Math.max(0, lmR1(px)), Math.max(0, lmR1(pz))],
+        [s.px, rawZ],
+        [rawX, s.pz],
+        [rawX, rawZ],
     ];
     for (const [nx, nz] of cands) {
         const limW = (limits?.layW || 0) * 10, limD = (limits?.layD || 0) * 10;
@@ -3331,9 +3376,11 @@ function fitAssembly(cs, limits) {
             set({ pz: 0 });
         return n;
     });
-    // раскладываем заново только наехавших: замки первыми (им не ужаться),
+    // раскладываем заново только наехавших: прижатые к сторонам и замки
+    // первыми (прижатый обязан остаться у своей стороны, замку не ужаться),
     // на месте стоящие не трогаем
-    const order = out.map((_, k) => k).sort((a, b) => (out[a].lockOuter ? 0 : 1) - (out[b].lockOuter ? 0 : 1) || a - b);
+    const pinRank = (c) => (c.pin && Object.keys(c.pin).length ? 0 : 2);
+    const order = out.map((_, k) => k).sort((a, b) => (pinRank(out[a]) + (out[a].lockOuter ? 0 : 1)) - (pinRank(out[b]) + (out[b].lockOuter ? 0 : 1)) || a - b);
     const placed = [];
     const parked = [];
     for (const k of order) {
@@ -3384,8 +3431,27 @@ function fitAssembly(cs, limits) {
         out[k] = { ...out[k], px: parkX, pz: lmR1(parkZ) };
         parkZ += out[k].D + 8;
     }
-    const changed = out.some((c, k) => c !== cs[k]);
-    return changed ? out : null;
+    // дотяжка прижатых к своей стороне — только когда там свободно (иначе
+    // клеймо и перекладка гоняли бы контейнер по кругу); припаркованных
+    // снаружи это не касается
+    out.forEach((c, k) => {
+        if (parked.includes(k))
+            return;
+        const pin = pinnedPos(c, limits);
+        const px = pin.px !== null ? pin.px : c.px;
+        const pz = pin.pz !== null ? pin.pz : c.pz;
+        if (Math.abs(px - c.px) < 0.05 && Math.abs(pz - c.pz) < 0.05)
+            return;
+        if (!out.some((q, j) => j !== k && overlaps({ x0: px, x1: px + c.W, z0: pz, z1: pz + c.D }, boxOf(q))))
+            out[k] = { ...c, px, pz };
+    });
+    // «изменилось» — по значениям: пересчёт, вернувший те же числа (например,
+    // припаркованному снаружи), не должен считаться изменением — иначе эффект
+    // раскладки перекладывал бы одно и то же вечно
+    const same = (a, b) => a.px === b.px && a.pz === b.pz && a.W === b.W && a.D === b.D;
+    if (out.every((c, k) => same(c, cs[k])))
+        return null;
+    return out.map((c, k) => (same(c, cs[k]) ? cs[k] : c));
 }
 // ── Приклеенные соседи при изменении размера ──
 // Правая грань контейнера двигается (меняется ширина) — контейнеры,
@@ -3658,10 +3724,12 @@ function Schematic({ c, selection, onSelect }) {
 // 3D-сцена (three.js): орбитальная камера, рендер контейнеров,
 // выбор стенок/ячеек кликом (рейкаст → тег треугольника)
 // ══════════════════════════════════════════════════════════════
-function useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection }) {
+function useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection, dragSnap, dragCommit }) {
     // актуальное состояние для пикинга кликом (эффект сцены создаётся один раз)
     const pickRef = useRef({});
-    pickRef.current = { containers, sel, selMode, setSel, setSelection };
+    pickRef.current = { containers, sel, selMode, setSel, setSelection, dragSnap, dragCommit };
+    // перетаскивание контейнера мышью прямо в 3D: {idx, g0, px0, pz0, cur, moved}
+    const boxRef = useRef(null);
     const mountRef = useRef(null);
     const groupRef = useRef(null);
     const cameraRef = useRef(null);
@@ -3725,9 +3793,47 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         let raf;
         const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
         loop();
+        // луч из курсора и его пересечение с плоскостью стола (y=0)
+        const ndc = (e) => {
+            const rect = renderer.domElement.getBoundingClientRect();
+            return new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+        };
+        const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const groundPt = (e) => {
+            raycaster.setFromCamera(ndc(e), camera);
+            const p = new THREE.Vector3();
+            return raycaster.ray.intersectPlane(ground, p) ? p : null;
+        };
+        // вернуть меши контейнера на честные позиции (конец/отмена переноса)
+        const boxRestore = () => {
+            const d = boxRef.current;
+            if (!d)
+                return;
+            const entry = meshRef.current.get(d.idx);
+            if (entry)
+                for (const m of entry.meshes)
+                    m.position.set(m.userData.ox, 0, m.userData.oz);
+            boxRef.current = null;
+        };
         const onDown = (e) => {
             const o = orbitRef.current;
-            // левая кнопка вращает, правая (и средняя) двигает сцену
+            // левая кнопка на контейнере — перенос контейнера; на пустом месте —
+            // вращение. Правая (и средняя) двигает сцену.
+            if (e.button === 0) {
+                raycaster.setFromCamera(ndc(e), camera);
+                const hit = raycaster.intersectObjects(group.children, false)[0];
+                const st = pickRef.current;
+                if (hit && hit.object.userData?.cIdx !== undefined && st.dragSnap) {
+                    const idx = hit.object.userData.cIdx;
+                    const c = st.containers[idx];
+                    const g0 = groundPt(e);
+                    if (c && g0) {
+                        boxRef.current = { idx, g0, px0: c.px, pz0: c.pz, cur: null, moved: 0 };
+                        o.moved = 0;
+                        return; // вращение не начинаем
+                    }
+                }
+            }
             o.panning = e.button === 2 || e.button === 1;
             o.dragging = true;
             o.moved = 0;
@@ -3736,6 +3842,21 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         };
         const onMove = (e) => {
             const o = orbitRef.current;
+            const bd = boxRef.current;
+            if (bd) {
+                bd.moved += 1;
+                const g = groundPt(e);
+                if (!g)
+                    return;
+                const st = pickRef.current;
+                const s = st.dragSnap(bd.idx, bd.px0 + (g.x - bd.g0.x), bd.pz0 + (g.z - bd.g0.z));
+                bd.cur = s;
+                const entry = meshRef.current.get(bd.idx);
+                if (entry)
+                    for (const m of entry.meshes)
+                        m.position.set(m.userData.ox + (s.px - bd.px0), 0, m.userData.oz + (s.pz - bd.pz0));
+                return;
+            }
             if (!o.dragging)
                 return;
             const dx = e.clientX - o.lastX, dy = e.clientY - o.lastY;
@@ -3761,7 +3882,24 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
             o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - dy * 0.008));
             applyCamera();
         };
-        const onUp = () => { const o = orbitRef.current; o.dragging = false; o.panning = false; };
+        const onUp = () => {
+            const o = orbitRef.current;
+            const bd = boxRef.current;
+            if (bd) {
+                const commit = bd.moved > 2 && bd.cur ? bd.cur : null;
+                boxRestore();
+                if (commit) {
+                    o.moved = 99; // подавить клик-выбор после переноса
+                    pickRef.current.dragCommit?.(bd.idx, commit.px, commit.pz);
+                }
+                // без сдвига — обычный клик: onClickPick сработает следом и выберет
+            }
+            o.dragging = false;
+            o.panning = false;
+        };
+        // Esc отменяет перенос контейнера — меши возвращаются на место
+        const onKey = (e) => { if (e.key === "Escape")
+            boxRestore(); };
         // правый клик без протяжки возвращает сцену в центр
         const onCtx = (e) => {
             e.preventDefault();
@@ -3846,6 +3984,7 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
         el.addEventListener("pointerdown", onDown);
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
+        window.addEventListener("keydown", onKey);
         el.addEventListener("wheel", onWheel, { passive: false });
         el.addEventListener("contextmenu", onCtx);
         const onResize = () => {
@@ -3860,6 +3999,7 @@ function useTrayScene({ built, selection, sel, cur, limits, containers, selMode,
             el.removeEventListener("pointerdown", onDown);
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
+            window.removeEventListener("keydown", onKey);
             el.removeEventListener("wheel", onWheel);
             el.removeEventListener("contextmenu", onCtx);
             window.removeEventListener("resize", onResize);
@@ -4311,6 +4451,19 @@ function TrayGenerator() {
             updCur({ cells, walls });
     }, [containers, sel]);
     const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
+    // прижатие к стороне рамки: по одной стороне на ось (нельзя одновременно
+    // к левой и правой). Контейнер сразу уезжает к своей стороне (п. 1.1 ТЗ)
+    const togglePin = (side) => {
+        const OPP = { left: "right", right: "left", back: "front", front: "back" };
+        const p = { ...(cur.pin || {}) };
+        if (p[side])
+            delete p[side];
+        else {
+            p[side] = true;
+            delete p[OPP[side]];
+        }
+        updCur({ pin: p });
+    };
     // Замок ширины держит только ЭТУ ячейку: её ряд получает явные размеры
     // (rowColWs), перегородки других рядов независимы и не обязаны совпадать.
     // Снятие замка размеры НЕ выравнивает — вписанные вручную остаются.
@@ -4543,8 +4696,19 @@ function TrayGenerator() {
         });
         return { items, totalW: a.totalW, totalD: a.totalD, rows: a.rows };
     }, [containers, connect]);
-    // ── three.js: сцена, камера, пикинг ──
-    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
+    // ── three.js: сцена, камера, пикинг, перетаскивание контейнеров ──
+    // перенос мышью прямо на 3D-виде: сцена показывает прилипший «призрак»,
+    // на отпускании позиция коммитится той же моделью, что и на плане
+    const dragSnap3d = (idx, px, pz) => {
+        const s = snapMove(containers, idx, px, pz, limits);
+        return { ...s, bad: collides(containers, idx, s.px, s.pz) };
+    };
+    const dragCommit3d = (idx, px, pz) => {
+        setContainers((cs) => moveContainer(cs, idx, px, pz, limits));
+        setSel(idx);
+        setSelection(null);
+    };
+    const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow, dragSnap: dragSnap3d, dragCommit: dragCommit3d });
     const L = layout(cur);
     const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
     const INS = insertsOf(cur);
@@ -4725,6 +4889,37 @@ function TrayGenerator() {
         setSelection(null);
     };
     const dragCancel = () => { dragRef.current = null; setDrag(null); };
+    // «рисование» раскладки: у выбранного контейнера правый и нижний край
+    // тянутся мышью — размер меняется вживую через resizeBox (магнит,
+    // соседи и рамка соблюдаются моделью)
+    const rsRef = useRef(null);
+    const resizeStart = (e, idx, mode) => {
+        if (e.button)
+            return;
+        e.stopPropagation();
+        if (e.currentTarget.setPointerCapture)
+            e.currentTarget.setPointerCapture(e.pointerId);
+        rsRef.current = { idx, mode };
+    };
+    const resizeMove = (e) => {
+        const d = rsRef.current;
+        if (!d)
+            return;
+        e.stopPropagation();
+        const r = planRef.current?.getBoundingClientRect();
+        if (!r)
+            return;
+        const c = containers[d.idx];
+        if (!c)
+            return;
+        const patch = {};
+        if (d.mode !== "s")
+            patch.W = Math.round((e.clientX - r.left) / scale - c.px);
+        if (d.mode !== "e")
+            patch.D = Math.round((e.clientY - r.top) / scale - c.pz);
+        setContainers((cs) => resizeBox(cs, d.idx, patch, limits, magnet));
+    };
+    const resizeEnd = (e) => { e.stopPropagation(); rsRef.current = null; };
     useEffect(() => {
         if (!drag)
             return;
@@ -4748,7 +4943,7 @@ function TrayGenerator() {
             const isDragged = drag?.idx === idx;
             const px = isDragged ? drag.px : c.px;
             const pz = isDragged ? drag.pz : c.pz;
-            return (React.createElement("button", { key: c.id, title: `Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`, onPointerDown: (e) => dragStart(e, idx), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
+            return (React.createElement("button", { key: c.id, title: `Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить; края выбранного тянутся`, onPointerDown: (e) => dragStart(e, idx), onPointerMove: dragMove, onPointerUp: dragEnd, onPointerCancel: dragCancel, style: {
                     position: "absolute",
                     left: Math.round(px * scale), top: Math.round(pz * scale),
                     width: Math.max(18, Math.round(c.W * scale)),
@@ -4763,7 +4958,22 @@ function TrayGenerator() {
                     zIndex: isDragged ? 5 : 1,
                 } },
                 "\u2116",
-                idx + 1));
+                idx + 1,
+                c.D * scale > 34 && (React.createElement("div", { "aria-hidden": "true", style: { fontSize: 9, fontWeight: 500, color: "#8A97A8" } },
+                    c.W,
+                    "\u00D7",
+                    c.D)),
+                [["back", { top: 0, left: 4, right: 4, height: 3 }], ["front", { bottom: 0, left: 4, right: 4, height: 3 }],
+                    ["left", { left: 0, top: 4, bottom: 4, width: 3 }], ["right", { right: 0, top: 4, bottom: 4, width: 3 }]]
+                    .filter(([s]) => c.pin?.[s])
+                    .map(([s, pos]) => (React.createElement("div", { key: s, style: { position: "absolute", background: SEL, borderRadius: 2, ...pos } }))),
+                idx === sel && !isDragged && !c.lockOuter && (React.createElement(React.Fragment, null,
+                    React.createElement("div", { "aria-hidden": "true", onPointerDown: (e) => resizeStart(e, idx, "e"), onPointerMove: resizeMove, onPointerUp: resizeEnd, onPointerCancel: resizeEnd, title: "\u041F\u043E\u0442\u044F\u043D\u0438: \u0448\u0438\u0440\u0438\u043D\u0430", style: { position: "absolute", right: -5, top: "50%", marginTop: -9, width: 10, height: 18,
+                            cursor: "ew-resize", touchAction: "none", background: ACCENT, borderRadius: 3, opacity: 0.85 } }),
+                    React.createElement("div", { "aria-hidden": "true", onPointerDown: (e) => resizeStart(e, idx, "s"), onPointerMove: resizeMove, onPointerUp: resizeEnd, onPointerCancel: resizeEnd, title: "\u041F\u043E\u0442\u044F\u043D\u0438: \u0433\u043B\u0443\u0431\u0438\u043D\u0430", style: { position: "absolute", bottom: -5, left: "50%", marginLeft: -9, width: 18, height: 10,
+                            cursor: "ns-resize", touchAction: "none", background: ACCENT, borderRadius: 3, opacity: 0.85 } }),
+                    React.createElement("div", { "aria-hidden": "true", onPointerDown: (e) => resizeStart(e, idx, "se"), onPointerMove: resizeMove, onPointerUp: resizeEnd, onPointerCancel: resizeEnd, title: "\u041F\u043E\u0442\u044F\u043D\u0438: \u043E\u0431\u0430 \u0440\u0430\u0437\u043C\u0435\u0440\u0430", style: { position: "absolute", right: -5, bottom: -5, width: 12, height: 12,
+                            cursor: "nwse-resize", touchAction: "none", background: ACCENT, borderRadius: "50%", opacity: 0.85 } })))));
         })));
     // ── редакторы: стенка/линия и ячейка/фиксированная ячейка ──
     let editorWall = null, editorCell = null;
@@ -4953,24 +5163,25 @@ function TrayGenerator() {
         React.createElement("div", { style: { width: 310, minWidth: 270, flex: "0 1 310px", padding: "18px 18px 30px", background: "#FDFDFE", borderRight: "1px solid #E4E9EF", overflowY: "auto", maxHeight: "100vh" } },
             React.createElement("div", { style: { fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: ACCENT, fontWeight: 700 } }, "\u0413\u0435\u043D\u0435\u0440\u0430\u0442\u043E\u0440 \u043B\u043E\u0442\u043A\u043E\u0432"),
             React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "3px 0 0" } }, "\u0421\u0438\u0441\u0442\u0435\u043C\u0430 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u043E\u0432"),
-            React.createElement("div", { style: { display: "flex", gap: 6, margin: "12px 0 16px" } },
-                [["↶", undo, histLen, "Отменить последнее изменение (Ctrl+Z)"],
-                    ["↷", redo, aheadLen, "Вернуть отменённое (Ctrl+Shift+Z)"]].map(([sign, act, on, hint]) => (React.createElement("button", { key: sign, onClick: act, disabled: !on, title: hint, style: {
-                        flex: "0 0 auto", width: 32, padding: "7px 0", borderRadius: 8, fontSize: 14, fontWeight: 700,
-                        cursor: on ? "pointer" : "default", border: "1px solid #D6DDE6",
-                        background: on ? "#fff" : "#F1F5F9", color: on ? "#3D4A5C" : "#B6C0CC",
-                    } }, sign))),
-                [["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (React.createElement("button", { key: t, onClick: () => setTab(t), style: {
-                        flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
-                        border: tab === t ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
-                        background: tab === t ? "#FFF3EB" : "#fff", color: tab === t ? ACCENT : "#3D4A5C",
-                    } }, n)))),
+            React.createElement("div", { style: { display: "flex", gap: 6, margin: "12px 0 6px" } }, [["↶ Назад", undo, histLen, "Отменить последнее изменение (Ctrl+Z)"],
+                ["↷ Вперёд", redo, aheadLen, "Вернуть отменённое (Ctrl+Shift+Z)"]].map(([sign, act, on, hint]) => (React.createElement("button", { key: sign, onClick: act, disabled: !on, title: hint, style: {
+                    flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
+                    cursor: on ? "pointer" : "default", border: "1px solid #D6DDE6",
+                    background: on ? "#fff" : "#F1F5F9", color: on ? "#3D4A5C" : "#B6C0CC",
+                } }, sign)))),
+            React.createElement("div", { style: { display: "flex", gap: 6, margin: "0 0 16px" } }, [["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (React.createElement("button", { key: t, onClick: () => setTab(t), style: {
+                    flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                    border: tab === t ? `2px solid ${ACCENT}` : "1px solid #D6DDE6",
+                    background: tab === t ? "#FFF3EB" : "#fff", color: tab === t ? ACCENT : "#3D4A5C",
+                } }, n)))),
             tab === "layout" && (React.createElement("div", null,
                 React.createElement(SectionTitle, null, "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430"),
                 React.createElement("p", { style: { fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 } },
-                    "\u0420\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u0441\u0432\u043E\u0431\u043E\u0434\u043D\u0430\u044F: \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B \u043B\u044E\u0431\u044B\u0445 \u0440\u0430\u0437\u043C\u0435\u0440\u043E\u0432 \u0441\u0442\u043E\u044F\u0442 \u0433\u0434\u0435 \u0443\u0433\u043E\u0434\u043D\u043E \u0432\u043D\u0443\u0442\u0440\u0438 \u0440\u0430\u043C\u043A\u0438 \u0441\u0442\u043E\u043B\u0430 \u0438 ",
+                    "\u041A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440\u044B ",
                     React.createElement("b", null, "\u0442\u0430\u0441\u043A\u0430\u044E\u0442\u0441\u044F \u043C\u044B\u0448\u044C\u044E"),
-                    " \u2014 \u043A\u0440\u0430\u044F \u043F\u0440\u0438\u043B\u0438\u043F\u0430\u044E\u0442 \u043A \u0441\u043E\u0441\u0435\u0434\u044F\u043C \u0438 \u043A \u0440\u0430\u043C\u043A\u0435 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442, \u043A\u0440\u0430\u0441\u043D\u044B\u043C \u2014 \u043C\u0435\u0441\u0442\u043E \u0437\u0430\u043D\u044F\u0442\u043E)."),
+                    " \u2014 \u0438 \u043D\u0430 \u043F\u043B\u0430\u043D\u0435, \u0438 \u043D\u0430 3D-\u0432\u0438\u0434\u0435; \u043A\u0440\u0430\u044F \u043F\u0440\u0438\u043B\u0438\u043F\u0430\u044E\u0442 (Esc \u043E\u0442\u043C\u0435\u043D\u044F\u0435\u0442, \u043A\u0440\u0430\u0441\u043D\u044B\u043C \u2014 \u0437\u0430\u043D\u044F\u0442\u043E). \u0423 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u0433\u043E \u0442\u044F\u043D\u0443\u0442\u0441\u044F ",
+                    React.createElement("b", null, "\u0440\u0443\u0447\u043A\u0438 \u043D\u0430 \u043A\u0440\u0430\u044F\u0445"),
+                    " \u2014 \u0442\u0430\u043A \u0440\u0430\u0441\u043A\u043B\u0430\u0434\u043A\u0430 \u0440\u0438\u0441\u0443\u0435\u0442\u0441\u044F \u043F\u0440\u044F\u043C\u043E \u0437\u0434\u0435\u0441\u044C."),
                 mapView,
                 React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
                     React.createElement("button", { onClick: addContainer, disabled: !canAdd, style: {
@@ -5106,6 +5317,13 @@ function TrayGenerator() {
                             cur.lockOuter ? "🔒" : "🔓",
                             " \u0417\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0432\u043D\u0435\u0448\u043D\u0438\u0439 \u0440\u0430\u0437\u043C\u0435\u0440"),
                         cur.lockOuter && (React.createElement("p", { style: { fontSize: 11.5, color: "#64748B", margin: "-4px 0 8px", lineHeight: 1.4 } }, "\u0413\u0430\u0431\u0430\u0440\u0438\u0442 \u043D\u0435 \u043C\u0435\u043D\u044F\u044E\u0442 \u043D\u0438 \u044F\u0447\u0435\u0439\u043A\u0438, \u043D\u0438 \u043C\u0430\u0433\u043D\u0438\u0442. \u0412\u043D\u0443\u0442\u0440\u0438 \u043C\u0435\u043D\u044F\u0442\u044C \u043C\u043E\u0436\u043D\u043E \u0432\u0441\u0451.")),
+                        React.createElement("div", { style: { display: "flex", gap: 4, alignItems: "center", margin: "0 0 10px" } },
+                            React.createElement("span", { style: { fontSize: 11.5, color: "#64748B", flex: "0 0 auto" } }, "\u041F\u0440\u0438\u0436\u0430\u0442\u044C \u043A:"),
+                            [["back", "задней"], ["front", "передней"], ["left", "левой"], ["right", "правой"]].map(([s, t]) => (React.createElement("button", { key: s, onClick: () => togglePin(s), title: `Держать контейнер вплотную к ${t} стороне раскладки`, style: {
+                                    flex: 1, padding: "5px 0", borderRadius: 7, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                    border: cur.pin?.[s] ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                                    background: cur.pin?.[s] ? "#DBEAFE" : "#fff", color: cur.pin?.[s] ? SEL : "#3D4A5C",
+                                } }, t)))),
                         React.createElement(Param, { label: "\u0428\u0438\u0440\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.W, min: 30, max: limits.maxW, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ W: v }) }),
                         React.createElement(Param, { label: "\u0413\u043B\u0443\u0431\u0438\u043D\u0430", unit: "\u043C\u043C", value: cur.D, min: 30, max: limits.maxD, step: 1, disabled: cur.lockOuter || (cur.lockCell && cur.gridMode !== "size"), onChange: (v) => applyOuterDim({ D: v }) }),
                         React.createElement(Param, { label: "\u0412\u044B\u0441\u043E\u0442\u0430", unit: "\u043C\u043C", value: cur.H, min: 10, max: limits.maxH, step: 1, disabled: cur.lockOuter, onChange: (v) => updCur({ H: v }) }),

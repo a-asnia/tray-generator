@@ -316,6 +316,16 @@ export default function TrayGenerator() {
 
   const toggleLockOuter = () => updCur({ lockOuter: !cur.lockOuter });
 
+  // прижатие к стороне рамки: по одной стороне на ось (нельзя одновременно
+  // к левой и правой). Контейнер сразу уезжает к своей стороне (п. 1.1 ТЗ)
+  const togglePin = (side) => {
+    const OPP = { left: "right", right: "left", back: "front", front: "back" };
+    const p = { ...(cur.pin || {}) };
+    if (p[side]) delete p[side];
+    else { p[side] = true; delete p[OPP[side]]; }
+    updCur({ pin: p });
+  };
+
   // Замок ширины держит только ЭТУ ячейку: её ряд получает явные размеры
   // (rowColWs), перегородки других рядов независимы и не обязаны совпадать.
   // Снятие замка размеры НЕ выравнивает — вписанные вручную остаются.
@@ -526,8 +536,19 @@ export default function TrayGenerator() {
     return { items, totalW: a.totalW, totalD: a.totalD, rows: a.rows };
   }, [containers, connect]);
 
-  // ── three.js: сцена, камера, пикинг ──
-  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow });
+  // ── three.js: сцена, камера, пикинг, перетаскивание контейнеров ──
+  // перенос мышью прямо на 3D-виде: сцена показывает прилипший «призрак»,
+  // на отпускании позиция коммитится той же моделью, что и на плане
+  const dragSnap3d = (idx, px, pz) => {
+    const s = snapMove(containers, idx, px, pz, limits);
+    return { ...s, bad: collides(containers, idx, s.px, s.pz) };
+  };
+  const dragCommit3d = (idx, px, pz) => {
+    setContainers((cs) => moveContainer(cs, idx, px, pz, limits));
+    setSel(idx);
+    setSelection(null);
+  };
+  const mountRef = useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection: selectAndShow, dragSnap: dragSnap3d, dragCommit: dragCommit3d });
 
   const L = layout(cur);
   const volume = useMemo(() => solidsVolume(built.items[sel]?.solids ?? []), [built, sel]);
@@ -695,6 +716,31 @@ export default function TrayGenerator() {
     setSelection(null);
   };
   const dragCancel = () => { dragRef.current = null; setDrag(null); };
+
+  // «рисование» раскладки: у выбранного контейнера правый и нижний край
+  // тянутся мышью — размер меняется вживую через resizeBox (магнит,
+  // соседи и рамка соблюдаются моделью)
+  const rsRef = useRef(null);
+  const resizeStart = (e, idx, mode) => {
+    if (e.button) return;
+    e.stopPropagation();
+    if (e.currentTarget.setPointerCapture) e.currentTarget.setPointerCapture(e.pointerId);
+    rsRef.current = { idx, mode };
+  };
+  const resizeMove = (e) => {
+    const d = rsRef.current;
+    if (!d) return;
+    e.stopPropagation();
+    const r = planRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const c = containers[d.idx];
+    if (!c) return;
+    const patch = {};
+    if (d.mode !== "s") patch.W = Math.round((e.clientX - r.left) / scale - c.px);
+    if (d.mode !== "e") patch.D = Math.round((e.clientY - r.top) / scale - c.pz);
+    setContainers((cs) => resizeBox(cs, d.idx, patch, limits, magnet));
+  };
+  const resizeEnd = (e) => { e.stopPropagation(); rsRef.current = null; };
   useEffect(() => {
     if (!drag) return;
     const esc = (e) => { if (e.key === "Escape") dragCancel(); };
@@ -725,7 +771,7 @@ export default function TrayGenerator() {
         return (
           <button
             key={c.id}
-            title={`Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить`}
+            title={`Контейнер №${idx + 1}: ${c.W}×${c.D} мм. Перетащи, чтобы переставить; края выбранного тянутся`}
             onPointerDown={(e) => dragStart(e, idx)}
             onPointerMove={dragMove}
             onPointerUp={dragEnd}
@@ -746,6 +792,46 @@ export default function TrayGenerator() {
             }}
           >
             №{idx + 1}
+            {/* aria-hidden: подпись не должна менять доступное имя кнопки «№N» */}
+            {c.D * scale > 34 && (
+              <div aria-hidden="true" style={{ fontSize: 9, fontWeight: 500, color: "#8A97A8" }}>{c.W}×{c.D}</div>
+            )}
+            {/* прижатые стороны — синие полоски по краю */}
+            {[["back", { top: 0, left: 4, right: 4, height: 3 }], ["front", { bottom: 0, left: 4, right: 4, height: 3 }],
+              ["left", { left: 0, top: 4, bottom: 4, width: 3 }], ["right", { right: 0, top: 4, bottom: 4, width: 3 }]]
+              .filter(([s]) => c.pin?.[s])
+              .map(([s, pos]) => (
+                <div key={s} style={{ position: "absolute", background: SEL, borderRadius: 2, ...pos }} />
+              ))}
+            {/* ручки изменения размера — только у выбранного, чтобы не мешали таскать */}
+            {idx === sel && !isDragged && !c.lockOuter && (
+              <>
+                <div
+                  aria-hidden="true"
+                  onPointerDown={(e) => resizeStart(e, idx, "e")} onPointerMove={resizeMove}
+                  onPointerUp={resizeEnd} onPointerCancel={resizeEnd}
+                  title="Потяни: ширина"
+                  style={{ position: "absolute", right: -5, top: "50%", marginTop: -9, width: 10, height: 18,
+                    cursor: "ew-resize", touchAction: "none", background: ACCENT, borderRadius: 3, opacity: 0.85 }}
+                />
+                <div
+                  aria-hidden="true"
+                  onPointerDown={(e) => resizeStart(e, idx, "s")} onPointerMove={resizeMove}
+                  onPointerUp={resizeEnd} onPointerCancel={resizeEnd}
+                  title="Потяни: глубина"
+                  style={{ position: "absolute", bottom: -5, left: "50%", marginLeft: -9, width: 18, height: 10,
+                    cursor: "ns-resize", touchAction: "none", background: ACCENT, borderRadius: 3, opacity: 0.85 }}
+                />
+                <div
+                  aria-hidden="true"
+                  onPointerDown={(e) => resizeStart(e, idx, "se")} onPointerMove={resizeMove}
+                  onPointerUp={resizeEnd} onPointerCancel={resizeEnd}
+                  title="Потяни: оба размера"
+                  style={{ position: "absolute", right: -5, bottom: -5, width: 12, height: 12,
+                    cursor: "nwse-resize", touchAction: "none", background: ACCENT, borderRadius: "50%", opacity: 0.85 }}
+                />
+              </>
+            )}
           </button>
         );
       })}
@@ -1100,16 +1186,17 @@ export default function TrayGenerator() {
         </div>
         <h1 style={{ fontSize: 19, fontWeight: 700, margin: "3px 0 0" }}>Система контейнеров</h1>
 
-        <div style={{ display: "flex", gap: 6, margin: "12px 0 16px" }}>
-          {[["↶", undo, histLen, "Отменить последнее изменение (Ctrl+Z)"],
-            ["↷", redo, aheadLen, "Вернуть отменённое (Ctrl+Shift+Z)"]].map(([sign, act, on, hint]) => (
+        {/* кнопки в два ряда, чтобы не теснились: история отдельно, вкладки отдельно */}
+        <div style={{ display: "flex", gap: 6, margin: "12px 0 6px" }}>
+          {[["↶ Назад", undo, histLen, "Отменить последнее изменение (Ctrl+Z)"],
+            ["↷ Вперёд", redo, aheadLen, "Вернуть отменённое (Ctrl+Shift+Z)"]].map(([sign, act, on, hint]) => (
             <button
               key={sign}
               onClick={act}
               disabled={!on}
               title={hint}
               style={{
-                flex: "0 0 auto", width: 32, padding: "7px 0", borderRadius: 8, fontSize: 14, fontWeight: 700,
+                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
                 cursor: on ? "pointer" : "default", border: "1px solid #D6DDE6",
                 background: on ? "#fff" : "#F1F5F9", color: on ? "#3D4A5C" : "#B6C0CC",
               }}
@@ -1117,6 +1204,8 @@ export default function TrayGenerator() {
               {sign}
             </button>
           ))}
+        </div>
+        <div style={{ display: "flex", gap: 6, margin: "0 0 16px" }}>
           {[["printer", "Принтер"], ["layout", "Раскладка"], ["cont", "Контейнеры"]].map(([t, n]) => (
             <button
               key={t}
@@ -1136,7 +1225,7 @@ export default function TrayGenerator() {
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
-          Раскладка свободная: контейнеры любых размеров стоят где угодно внутри рамки стола и <b>таскаются мышью</b> — края прилипают к соседям и к рамке (Esc отменяет, красным — место занято).
+          Контейнеры <b>таскаются мышью</b> — и на плане, и на 3D-виде; края прилипают (Esc отменяет, красным — занято). У выбранного тянутся <b>ручки на краях</b> — так раскладка рисуется прямо здесь.
         </p>
         {mapView}
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -1386,6 +1475,23 @@ export default function TrayGenerator() {
           Габарит не меняют ни ячейки, ни магнит. Внутри менять можно всё.
         </p>
         )}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", margin: "0 0 10px" }}>
+          <span style={{ fontSize: 11.5, color: "#64748B", flex: "0 0 auto" }}>Прижать к:</span>
+          {[["back", "задней"], ["front", "передней"], ["left", "левой"], ["right", "правой"]].map(([s, t]) => (
+            <button
+              key={s}
+              onClick={() => togglePin(s)}
+              title={`Держать контейнер вплотную к ${t} стороне раскладки`}
+              style={{
+                flex: 1, padding: "5px 0", borderRadius: 7, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                border: cur.pin?.[s] ? `2px solid ${SEL}` : "1px solid #D6DDE6",
+                background: cur.pin?.[s] ? "#DBEAFE" : "#fff", color: cur.pin?.[s] ? SEL : "#3D4A5C",
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
         <Param label="Ширина" unit="мм" value={cur.W} min={30} max={limits.maxW} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ W: v })} />
         <Param label="Глубина" unit="мм" value={cur.D} min={30} max={limits.maxD} step={1} disabled={cur.lockOuter || (cur.lockCell && cur.gridMode !== "size")} onChange={(v) => applyOuterDim({ D: v })} />
         <Param label="Высота" unit="мм" value={cur.H} min={10} max={limits.maxH} step={1} disabled={cur.lockOuter} onChange={(v) => updCur({ H: v })} />

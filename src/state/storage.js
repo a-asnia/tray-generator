@@ -80,6 +80,13 @@ const sanitizeContainer = (c0) => {
   if (c.cornerR !== undefined) c.cornerR = num(c.cornerR, 2, 0, 20);
   c.gridMode = c.gridMode === "size" ? "size" : "count";
   delete c.rowAlign; // рудимент рядной раскладки
+  // прижатие к сторонам рамки: по одной стороне на ось
+  {
+    const p = obj(c.pin), pout = {};
+    if (p.back) pout.back = true; else if (p.front) pout.front = true;
+    if (p.left) pout.left = true; else if (p.right) pout.right = true;
+    if (Object.keys(pout).length) c.pin = pout; else delete c.pin;
+  }
   c.walls = Object.fromEntries(Object.entries(obj(c.walls)).map(([k, w]) => [k, sanitizeWall(w)]));
   c.cells = Object.fromEntries(
     Object.entries(obj(c.cells)).map(([k, v]) => {

@@ -119,6 +119,50 @@ const noOverlaps = (cs) => cs.every((a, i) => cs.every((b, j) => i >= j || !over
   ok("у рамки сосед ужался, пересечений нет", noOverlaps(g2) && g2.every((c) => c.px + c.W <= 320.05));
 }
 
+// ── прижатие к стороне рамки ──
+{
+  const cs = [
+    mk({ id: 1, px: 50, pz: 60, W: 100, D: 100, pin: { back: true, left: true } }),
+    mk({ id: 2, px: 200, pz: 200, W: 80, D: 80, pin: { front: true, right: true } }),
+    mk({ id: 3, px: 150, pz: 100, W: 60, D: 60, pin: { back: true } }),
+  ];
+  const n = fitAssembly(cs, LIM) || cs;
+  ok("прижатый уехал в задний левый угол", near(at(n, 1).px, 0) && near(at(n, 1).pz, 0),
+    ` → ${at(n, 1).px},${at(n, 1).pz}`);
+  ok("прижатый к переду-праву — в противоположном углу", near(at(n, 2).px, 240) && near(at(n, 2).pz, 240));
+  ok("прижатый только к заду держит одну ось", near(at(n, 3).pz, 0) && near(at(n, 3).px, 150));
+  ok("после дотяжки пересечений нет", noOverlaps(n));
+  ok("идемпотентно", fitAssembly(n, LIM) === null);
+  // перенос прижатого: свободная ось едет, прижатая — нет
+  const m = moveContainer(n, 2, 250, 150, LIM);
+  ok("прижатая ось не отпускается при переносе", near(at(m, 3).pz, 0) && near(at(m, 3).px, 250),
+    ` → ${at(m, 3).px},${at(m, 3).pz}`);
+  // рост прижатого к правому краю держит правую грань у рамки
+  const g = resizeBox(n, 1, { W: 120 }, LIM, false);
+  ok("прижатый справа остался вплотную к рамке", near(at(g, 2).px, 200) && at(g, 2).W === 120,
+    ` → ${at(g, 2).px}+${at(g, 2).W}`);
+  // место у стороны занято — прижатый ждёт снаружи от чужого, наезда нет
+  const blocked = [
+    mk({ id: 1, px: 0, pz: 0, W: 100, D: 100 }),
+    mk({ id: 2, px: 0, pz: 150, W: 80, D: 80, pin: { back: true, left: true } }),
+  ];
+  const b = fitAssembly(blocked, LIM) || blocked;
+  ok("занятая сторона не вызывает наезда", noOverlaps(b));
+  ok("заблокированный пин сходится", fitAssembly(b, LIM) === null);
+}
+
+// ── стабильность парковки ──
+{
+  // рамка 100×100: второй контейнер физически не помещается и паркуется
+  // снаружи; повторный прогон не должен перекладывать его заново
+  const tiny = { ...LIM, layW: 10, layD: 10 };
+  const cs = [mk({ id: 1, px: 0, pz: 0, W: 100, D: 100, lockOuter: true }),
+    mk({ id: 2, px: 0, pz: 0, W: 90, D: 90, lockOuter: true })];
+  const p = fitAssembly(cs, tiny) || cs;
+  ok("не поместившийся припаркован снаружи", at(p, 2).px >= 100);
+  ok("парковка стабильна (нет вечной перекладки)", fitAssembly(p, tiny) === null);
+}
+
 // ── нормализация позиций ──
 {
   const cs = [mk({ id: 1, px: 40, pz: 30 }), mk({ id: 2, px: 140, pz: 30 })];

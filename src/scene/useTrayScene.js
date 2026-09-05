@@ -7,10 +7,12 @@ import { useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
 import { layout, lineOf, cellKeys } from "../model/layout.js";
 
-export function useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection }) {
+export function useTrayScene({ built, selection, sel, cur, limits, containers, selMode, setSel, setSelection, dragSnap, dragCommit }) {
   // актуальное состояние для пикинга кликом (эффект сцены создаётся один раз)
   const pickRef = useRef({});
-  pickRef.current = { containers, sel, selMode, setSel, setSelection };
+  pickRef.current = { containers, sel, selMode, setSel, setSelection, dragSnap, dragCommit };
+  // перетаскивание контейнера мышью прямо в 3D: {idx, g0, px0, pz0, cur, moved}
+  const boxRef = useRef(null);
 
   const mountRef = useRef(null);
   const groupRef = useRef(null);
@@ -80,14 +82,66 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); };
     loop();
 
+    // луч из курсора и его пересечение с плоскостью стола (y=0)
+    const ndc = (e) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      return new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+    };
+    const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const groundPt = (e) => {
+      raycaster.setFromCamera(ndc(e), camera);
+      const p = new THREE.Vector3();
+      return raycaster.ray.intersectPlane(ground, p) ? p : null;
+    };
+    // вернуть меши контейнера на честные позиции (конец/отмена переноса)
+    const boxRestore = () => {
+      const d = boxRef.current;
+      if (!d) return;
+      const entry = meshRef.current.get(d.idx);
+      if (entry) for (const m of entry.meshes) m.position.set(m.userData.ox, 0, m.userData.oz);
+      boxRef.current = null;
+    };
     const onDown = (e) => {
       const o = orbitRef.current;
-      // левая кнопка вращает, правая (и средняя) двигает сцену
+      // левая кнопка на контейнере — перенос контейнера; на пустом месте —
+      // вращение. Правая (и средняя) двигает сцену.
+      if (e.button === 0) {
+        raycaster.setFromCamera(ndc(e), camera);
+        const hit = raycaster.intersectObjects(group.children, false)[0];
+        const st = pickRef.current;
+        if (hit && hit.object.userData?.cIdx !== undefined && st.dragSnap) {
+          const idx = hit.object.userData.cIdx;
+          const c = st.containers[idx];
+          const g0 = groundPt(e);
+          if (c && g0) {
+            boxRef.current = { idx, g0, px0: c.px, pz0: c.pz, cur: null, moved: 0 };
+            o.moved = 0;
+            return; // вращение не начинаем
+          }
+        }
+      }
       o.panning = e.button === 2 || e.button === 1;
       o.dragging = true; o.moved = 0; o.lastX = e.clientX; o.lastY = e.clientY;
     };
     const onMove = (e) => {
       const o = orbitRef.current;
+      const bd = boxRef.current;
+      if (bd) {
+        bd.moved += 1;
+        const g = groundPt(e);
+        if (!g) return;
+        const st = pickRef.current;
+        const s = st.dragSnap(bd.idx, bd.px0 + (g.x - bd.g0.x), bd.pz0 + (g.z - bd.g0.z));
+        bd.cur = s;
+        const entry = meshRef.current.get(bd.idx);
+        if (entry)
+          for (const m of entry.meshes)
+            m.position.set(m.userData.ox + (s.px - bd.px0), 0, m.userData.oz + (s.pz - bd.pz0));
+        return;
+      }
       if (!o.dragging) return;
       const dx = e.clientX - o.lastX, dy = e.clientY - o.lastY;
       o.moved = (o.moved || 0) + Math.abs(dx) + Math.abs(dy);
@@ -110,7 +164,22 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       o.phi = Math.min(Math.PI / 2.05, Math.max(0.25, o.phi - dy * 0.008));
       applyCamera();
     };
-    const onUp = () => { const o = orbitRef.current; o.dragging = false; o.panning = false; };
+    const onUp = () => {
+      const o = orbitRef.current;
+      const bd = boxRef.current;
+      if (bd) {
+        const commit = bd.moved > 2 && bd.cur ? bd.cur : null;
+        boxRestore();
+        if (commit) {
+          o.moved = 99; // подавить клик-выбор после переноса
+          pickRef.current.dragCommit?.(bd.idx, commit.px, commit.pz);
+        }
+        // без сдвига — обычный клик: onClickPick сработает следом и выберет
+      }
+      o.dragging = false; o.panning = false;
+    };
+    // Esc отменяет перенос контейнера — меши возвращаются на место
+    const onKey = (e) => { if (e.key === "Escape") boxRestore(); };
     // правый клик без протяжки возвращает сцену в центр
     const onCtx = (e) => {
       e.preventDefault();
@@ -172,6 +241,7 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
     el.addEventListener("pointerdown", onDown);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("keydown", onKey);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", onCtx);
     const onResize = () => {
@@ -186,6 +256,7 @@ export function useTrayScene({ built, selection, sel, cur, limits, containers, s
       el.removeEventListener("pointerdown", onDown);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("keydown", onKey);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onCtx);
       window.removeEventListener("resize", onResize);
