@@ -1132,6 +1132,7 @@ export default function TrayGenerator() {
           ))}
         </div>
 
+        {/* ── вкладка «Раскладка»: план, магниты, соединители ── */}
         {tab === "layout" && (<div>
         <SectionTitle>Раскладка</SectionTitle>
         <p style={{ fontSize: 12, color: "#8A97A8", margin: "0 0 8px", lineHeight: 1.45 }}>
@@ -1222,6 +1223,7 @@ export default function TrayGenerator() {
 
         </div>)}
 
+        {/* ── вкладка «Принтер»: лимиты, проект в файл, экспорт STL, сброс ── */}
         {tab === "printer" && (<div>
         <SectionTitle>Лимиты принтера</SectionTitle>
         <Param label="Макс. ширина" unit="мм" value={limits.maxW} min={50} max={500} step={1} onChange={(v) => updLimits({ maxW: v })} />
@@ -1322,6 +1324,7 @@ export default function TrayGenerator() {
         </button>
         </div>)}
 
+        {/* ── вкладка «Контейнеры»: подвкладки cont (размер, пресеты, сетка) / cell / walls ── */}
         {tab === "cont" && (<div>
         {containers.length > 1 && (
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
