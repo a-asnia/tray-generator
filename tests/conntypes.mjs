@@ -1,0 +1,147 @@
+// Замок и высота стенки.
+// 1) Замок следует высоте СВОЕЙ стенки: понизили стенку — паз, задний
+//    слой, щёчки и рельс понизились вместе с ней, ступеньки по высоте нет.
+// 2) Слишком низкая стенка — зона не режется, замок не ставится.
+// 3) male/female берётся из описания стороны, а не из её имени.
+import { buildContainer } from "../src/model/build.js";
+import { connOf, connGeom, connectorVs } from "../src/model/connectors.js";
+
+const mk = (o = {}) => ({
+  W: 120, D: 100, H: 30, cols: 1, rows: 1, gridMode: "count",
+  wall: 1.6, wallOut: 3, floor: 1.6,
+  walls: {}, cells: {}, rowColWs: null, rowDs: null,
+  lockedCellW: {}, lockedRows: {}, cellShares: {}, fixedCells: [], ...o,
+});
+const noConn = { N: null, S: null, W: null, E: null };
+const vs = [0];
+let fail = 0;
+const ok = (n, c, extra = "") => { console.log(`${c ? "OK  " : "FAIL"} ${n}${extra}`); if (!c) fail++; };
+const near = (a, b, e = 0.05) => Math.abs(a - b) < e;
+
+const bbox = (b) => {
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (const t of b.tris) for (const p of t) for (let k = 0; k < 3; k++) {
+    lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]);
+  }
+  return { lo, hi };
+};
+// точка внутри выпуклого тела (все грани смотрят наружу)
+const inside = (b, p, eps = 1e-4) => {
+  let cx = 0, cy = 0, cz = 0, n = 0;
+  for (const t of b.tris) for (const q of t) { cx += q[0]; cy += q[1]; cz += q[2]; n++; }
+  cx /= n; cy /= n; cz /= n;
+  for (const [a, b2, d] of b.tris) {
+    const u = [b2[0] - a[0], b2[1] - a[1], b2[2] - a[2]];
+    const v = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+    const nn = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    if ((p[0] - a[0]) * nn[0] + (p[1] - a[1]) * nn[1] + (p[2] - a[2]) * nn[2] > eps * Math.hypot(...nn)) return false;
+  }
+  return true;
+};
+const anyInside = (solids, p) => solids.some((b) => inside(b, p));
+
+// ── замок следует высоте стенки ──
+{
+  const hLow = 16;
+  const c = mk({ walls: { "o:n:0": { h: hLow } } });
+  const s = buildContainer(c, { ...noConn, N: { male: false, vs } }, { fillets: false });
+  const conns = s.filter((b) => b.tag === "conn");
+  ok("female на пониженной стенке ставится", conns.length > 0);
+  let top = -1e9;
+  for (const b of conns) top = Math.max(top, bbox(b).hi[1]);
+  ok(`паз не выше стенки (${top.toFixed(1)} ≈ ${hLow})`, near(top, hLow, 0.1));
+  // ничего в зоне замка не торчит выше пониженной стенки
+  let over = false;
+  for (const b of s) {
+    const bb = bbox(b);
+    if (bb.lo[2] < -c.D / 2 + c.wallOut && bb.hi[1] > hLow + 0.1 && bb.lo[0] < 8 && bb.hi[0] > -8) over = true;
+  }
+  ok("над замком нет ступеньки из старой высоты", !over);
+
+  // male: рельс следует высоте
+  const cm = mk({ walls: { "o:s:0": { h: hLow } } });
+  const sm = buildContainer(cm, { ...noConn, S: { male: true, vs } }, { fillets: false });
+  let railTop = -1e9, wallTop = -1e9;
+  for (const b of sm.filter((x) => x.tag === "conn")) {
+    const bb = bbox(b);
+    if (bb.hi[2] > cm.D / 2 + 0.05) railTop = Math.max(railTop, bb.hi[1]); // сам рельс
+    else wallTop = Math.max(wallTop, bb.hi[1]);
+  }
+  const g = connOf(cm);
+  ok(`рельс кончается ниже кромки своей стенки (${railTop.toFixed(1)} = ${hLow - g.top})`, near(railTop, hLow - g.top));
+  ok(`стенка зоны замка той же высоты (${wallTop.toFixed(1)} ≈ ${hLow})`, near(wallTop, hLow, 0.1));
+}
+
+// ── слишком низкая стенка: зона не режется, замок не ставится ──
+{
+  const g = connGeom();
+  const hTiny = g.lockMin - 1;
+  const c = mk({ walls: { "o:n:0": { h: hTiny } } });
+  const s = buildContainer(c, { ...noConn, N: { male: false, vs } }, { fillets: false });
+  ok("замок на низкой стенке не ставится", !s.some((b) => b.tag === "conn"));
+  // стенка цела по всей зоне (материал на середине толщины)
+  const holes = [];
+  for (let y = 0.4; y < hTiny - 0.4; y += 0.5)
+    if (!anyInside(s, [0, y, -c.D / 2 + c.wallOut / 2])) holes.push(y);
+  ok("стенка в зоне цела и ровная", holes.length === 0, holes.length ? ` → дыры на y=${holes.join(",")}` : "");
+  // male-сторона так же
+  const sm = buildContainer(mk({ walls: { "o:s:0": { h: hTiny } } }), { ...noConn, S: { male: true, vs } }, { fillets: false });
+  ok("рельс на низкой стенке не ставится", !sm.some((b) => b.tag === "conn"));
+}
+
+// ── male/female — из описания стороны, а не из её имени ──
+{
+  // паз на «мужской» по имени стороне E строится именно пазом
+  const c = mk();
+  const s = buildContainer(c, { ...noConn, E: { male: false, vs } }, { fillets: false });
+  let maxX = -1e9;
+  for (const b of s) maxX = Math.max(maxX, bbox(b).hi[0]);
+  ok("female на E: наружу ничего не торчит", maxX <= c.W / 2 + 0.001);
+  const g = connOf(c);
+  ok("female на E: паз открыт", !anyInside(s, [c.W / 2 - g.dg / 2, c.H / 2, 0]));
+  ok("female на E: задний слой на месте", anyInside(s, [c.W / 2 - g.dg - (c.wallOut - g.dg) / 2, c.H / 2, 0]));
+  // рельс на «женской» по имени стороне N строится именно рельсом
+  const sm = buildContainer(c, { ...noConn, N: { male: true, vs } }, { fillets: false });
+  let minZ = 1e9;
+  for (const b of sm.filter((x) => x.tag === "conn")) minZ = Math.min(minZ, bbox(b).lo[2]);
+  ok(`male на N: рельс выступает наружу (${(-c.D / 2 - minZ).toFixed(2)} = ${g.depth})`, near(-c.D / 2 - minZ, g.depth));
+}
+
+// ── зона на стыке сегментов разной высоты: замок не ставится ──
+{
+  // W=120 → один замок по центру, ровно на границе двух колонок с разными
+  // высотами передних сегментов: вырезать зону — разломать ступеньку
+  const c = mk({ cols: 2, walls: { "o:n:0": { h: 14 } } });
+  const s = buildContainer(c, { ...noConn, N: { male: false, vs } }, { fillets: false });
+  ok("ступенчатая зона: замок пропущен", !s.some((b) => b.tag === "conn"));
+  // стенка цела: низкий сегмент 14, высокий 30, обе сплошные
+  const holesL = [], holesR = [];
+  for (let y = 0.4; y < 13.5; y += 0.5)
+    if (!anyInside(s, [-15, y, -c.D / 2 + c.wallOut / 2])) holesL.push(y);
+  for (let y = 0.4; y < 29.5; y += 0.5)
+    if (!anyInside(s, [15, y, -c.D / 2 + c.wallOut / 2])) holesR.push(y);
+  ok("оба сегмента целы", holesL.length === 0 && holesR.length === 0);
+  // одинаковые высоты сегментов — замок ставится как раньше
+  const s2 = buildContainer(mk({ cols: 2 }), { ...noConn, N: { male: false, vs } }, { fillets: false });
+  ok("ровные сегменты: замок на месте", s2.some((b) => b.tag === "conn"));
+}
+
+// ── два замка на широкой стенке, разные высоты сегментов ──
+{
+  // 2 колонки: левый сегмент понижен — левый замок следует ему,
+  // правый остаётся на полной высоте
+  const c = mk({ W: 200, cols: 2, walls: { "o:n:0": { h: 14 } } });
+  const vw = connectorVs(200);
+  const s = buildContainer(c, { ...noConn, N: { male: false, vs: vw } }, { fillets: false });
+  let topL = -1e9, topR = -1e9;
+  for (const b of s.filter((x) => x.tag === "conn")) {
+    const bb = bbox(b);
+    if (bb.hi[0] < 0) topL = Math.max(topL, bb.hi[1]);
+    else if (bb.lo[0] > 0) topR = Math.max(topR, bb.hi[1]);
+  }
+  ok(`левый замок по левой стенке (${topL.toFixed(1)} ≈ 14)`, near(topL, 14, 0.1));
+  ok(`правый замок по правой стенке (${topR.toFixed(1)} ≈ 30)`, near(topR, 30, 0.1));
+}
+
+console.log(fail === 0 ? "\nCONNECTOR TESTS PASSED" : `\n${fail} FAILURES`);
+process.exit(fail ? 1 : 0);

@@ -1,0 +1,42 @@
+# Публикация генератора на GitHub Pages.
+# На каждый пуш собранного файла workflow кладёт его в ветку gh-pages
+# как index.html; GitHub публикует эту ветку на
+# https://a-asnia.github.io/tray-generator/
+# (в настройках репозитория Pages должен быть один раз включён:
+#  Settings → Pages → Source: Deploy from a branch → gh-pages → /).
+name: pages
+
+on:
+  push:
+    branches:
+      - claude/tray-generator-modular-vite-531gqd
+      - main
+    paths:
+      - tray-generator.html
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Обновить ветку gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages
+          git worktree add /tmp/site gh-pages
+          cp tray-generator.html /tmp/site/index.html
+          touch /tmp/site/.nojekyll
+          cd /tmp/site
+          git add -A
+          git diff --cached --quiet || git commit -m "Обновление страницы из ${GITHUB_SHA}"
+          git push origin gh-pages
